@@ -1,0 +1,11 @@
+[package]
+name = "lithic-renderer-vulkan"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+ash.workspace = true
+lithic-core.workspace = true
+lithic-material.workspace = true
+lithic-render.workspace = true
+lithic-text.workspace = true

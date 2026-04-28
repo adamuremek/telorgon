@@ -1,0 +1,16 @@
+[package]
+name = "lithic"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lithic-compositor.workspace = true
+lithic-core.workspace = true
+lithic-scene.workspace = true
+lithic-render.workspace = true
+lithic-renderer-vulkan.workspace = true
+lithic-app.workspace = true
+lithic-text.workspace = true
+lithic-theme.workspace = true
+lithic-ui.workspace = true
+lithic-material.workspace = true

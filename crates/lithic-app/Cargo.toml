@@ -1,0 +1,10 @@
+[package]
+name = "lithic-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lithic-core.workspace = true
+lithic-render.workspace = true
+lithic-ui.workspace = true
+winit = "0.30"

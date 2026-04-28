@@ -1,0 +1,11 @@
+[package]
+name = "lithic-compositor"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lithic-core.workspace = true
+lithic-material.workspace = true
+lithic-render.workspace = true
+lithic-theme.workspace = true
+lithic-ui.workspace = true

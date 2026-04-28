@@ -1,0 +1,9 @@
+[package]
+name = "lithic-material"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lithic-core.workspace = true
+lithic-render.workspace = true
+lithic-theme.workspace = true

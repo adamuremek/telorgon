@@ -1,0 +1,9 @@
+name = "default"
+api_version = 1
+entry = "builtin:default"
+
+[capabilities]
+window_chrome = true
+animations = true
+materials = true
+hot_reload = false

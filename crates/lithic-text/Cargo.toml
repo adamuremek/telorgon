@@ -1,0 +1,8 @@
+[package]
+name = "lithic-text"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+cosmic-text.workspace = true
+lithic-core.workspace = true

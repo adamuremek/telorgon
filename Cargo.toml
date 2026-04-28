@@ -1,0 +1,36 @@
+[workspace]
+members = [
+    "crates/lithic-core",
+    "crates/lithic-scene",
+    "crates/lithic-render",
+    "crates/lithic-compositor",
+    "crates/lithic-renderer-vulkan",
+    "crates/lithic-app",
+    "crates/lithic-text",
+    "crates/lithic-theme",
+    "crates/lithic-theme-build",
+    "crates/lithic-theme-create",
+    "crates/lithic-theme-studio",
+    "crates/lithic-ui",
+    "crates/lithic-material",
+    "crates/lithic",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+ash = "0.38"
+cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
+lithic-core = { path = "crates/lithic-core" }
+lithic-scene = { path = "crates/lithic-scene" }
+lithic-render = { path = "crates/lithic-render" }
+lithic-compositor = { path = "crates/lithic-compositor" }
+lithic-renderer-vulkan = { path = "crates/lithic-renderer-vulkan" }
+lithic-app = { path = "crates/lithic-app" }
+lithic-text = { path = "crates/lithic-text" }
+lithic-theme = { path = "crates/lithic-theme" }
+lithic-ui = { path = "crates/lithic-ui" }
+lithic-material = { path = "crates/lithic-material" }

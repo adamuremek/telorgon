@@ -1,0 +1,7 @@
+[package]
+name = "lithic-theme"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lithic-core.workspace = true
