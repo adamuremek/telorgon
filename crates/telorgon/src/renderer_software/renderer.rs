@@ -1,0 +1,1711 @@
+use std::collections::BTreeMap;
+use std::marker::PhantomData;
+
+use crate::core::{ColorRgba8, RectF, RectI, SizeF, SizeI};
+
+use crate::render::{
+    BlendMode, Border, BoxInstance, ColorSpace, DamageRegion, DrawItem, GlyphInstance,
+    ImageAlphaMode, ImageColorEncoding, ImageId, ImageInstance, ImageResourceDelta, MaterialId,
+    MaterialInstance, MaterialKind, MaterialResource, MaterialResourceDelta, PrimitiveKind,
+    ReadbackFormat, ReadbackImage, ReadbackRequest, RenderBackend, RenderClip, RenderError,
+    RenderErrorKind, RenderReadback, RenderRequest, RenderResult, RenderSceneDelta,
+    RenderSpatialNode, RenderStats, RenderTargetInfo, SceneUpdateStats, Shadow, SpatialId,
+    TargetLoad, apply_patches,
+};
+
+#[derive(Clone, Debug)]
+struct SoftwareImage {
+    extent: SizeI,
+    color_encoding: ImageColorEncoding,
+    alpha_mode: ImageAlphaMode,
+    pixels: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SoftwareRenderer;
+
+#[derive(Clone, Debug, Default)]
+pub struct SoftwareScene {
+    epoch: u64,
+    extent: SizeF,
+    background: ColorRgba8,
+    boxes: Vec<BoxInstance>,
+    glyphs: Vec<GlyphInstance>,
+    images: Vec<ImageInstance>,
+    materials: Vec<MaterialInstance>,
+    clips: Vec<RenderClip>,
+    spatial: Vec<RenderSpatialNode>,
+    draw_order: Vec<DrawItem>,
+    atlas_extent: SizeI,
+    atlas_a8: Vec<u8>,
+    image_resources: BTreeMap<ImageId, SoftwareImage>,
+    material_resources: BTreeMap<MaterialId, MaterialResource>,
+    pending_damage: DamageRegion,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SoftwareSurface {
+    presented_damage: DamageRegion,
+    framebuffer_extent: SizeI,
+    framebuffer_rgba8: Vec<u8>,
+}
+
+pub struct SoftwareFrameContext<'frame> {
+    surface: &'frame mut SoftwareSurface,
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct SoftwareTarget<'frame> {
+    info: RenderTargetInfo,
+    marker: PhantomData<&'frame ()>,
+}
+
+#[derive(Copy, Clone, Debug, Default)]
+pub struct SoftwareReadback;
+
+impl RenderBackend for SoftwareRenderer {
+    type Scene = SoftwareScene;
+    type FrameContext<'frame> = SoftwareFrameContext<'frame>;
+    type Target<'frame> = SoftwareTarget<'frame>;
+
+    fn create_scene(&self) -> RenderResult<Self::Scene> {
+        Ok(SoftwareScene::default())
+    }
+
+    fn apply_scene_delta(
+        &self,
+        scene: &mut Self::Scene,
+        delta: &RenderSceneDelta,
+    ) -> RenderResult<SceneUpdateStats> {
+        #[cfg(feature = "instrumentation")]
+        let _span = crate::profiler::span!("delta.apply");
+        if delta.epoch <= scene.epoch {
+            return Ok(SceneUpdateStats {
+                epoch: scene.epoch,
+                ..SceneUpdateStats::default()
+            });
+        }
+        scene.epoch = delta.epoch;
+        scene.extent = delta.extent;
+        scene.background = delta.background;
+        apply_patches(&mut scene.boxes, &delta.boxes, delta.box_len);
+        apply_patches(&mut scene.glyphs, &delta.glyphs, delta.glyph_len);
+        apply_patches(&mut scene.images, &delta.images, delta.image_len);
+        apply_patches(&mut scene.materials, &delta.materials, delta.material_len);
+        apply_patches(&mut scene.clips, &delta.clips, delta.clip_len);
+        apply_patches(&mut scene.spatial, &delta.spatial_nodes, delta.spatial_len);
+        if let Some(order) = &delta.draw_order {
+            scene.draw_order.clear();
+            scene.draw_order.extend_from_slice(order);
+        }
+        scene.atlas_extent = delta.atlas_extent;
+        let atlas_len =
+            (delta.atlas_extent.width.max(1) * delta.atlas_extent.height.max(1)) as usize;
+        if scene.atlas_a8.len() != atlas_len {
+            scene.atlas_a8.resize(atlas_len, 0);
+        }
+        for page in &delta.atlas_pages {
+            for row in 0..page.height {
+                let source = row as usize * page.width as usize;
+                let target = ((page.y + row) * delta.atlas_extent.width + page.x) as usize;
+                scene.atlas_a8[target..target + page.width as usize]
+                    .copy_from_slice(&page.pixels_a8[source..source + page.width as usize]);
+            }
+        }
+        for update in &delta.image_resources {
+            match update {
+                ImageResourceDelta::Write(update) => {
+                    let image = scene
+                        .image_resources
+                        .entry(update.image)
+                        .or_insert_with(|| SoftwareImage {
+                            extent: update.extent,
+                            color_encoding: update.color_encoding,
+                            alpha_mode: update.alpha_mode,
+                            pixels: vec![
+                                0;
+                                update.extent.width as usize
+                                    * update.extent.height as usize
+                                    * 4
+                            ],
+                        });
+                    if image.extent != update.extent {
+                        image.extent = update.extent;
+                        image.pixels.resize(
+                            update.extent.width as usize * update.extent.height as usize * 4,
+                            0,
+                        );
+                    }
+                    image.color_encoding = update.color_encoding;
+                    image.alpha_mode = update.alpha_mode;
+                    let destination_stride = update.extent.width as usize * 4;
+                    let copy_bytes = update.rect.width as usize * 4;
+                    for row in 0..update.rect.height as usize {
+                        let source = row * update.row_bytes;
+                        let target = (update.rect.y as usize + row) * destination_stride
+                            + update.rect.x as usize * 4;
+                        image.pixels[target..target + copy_bytes]
+                            .copy_from_slice(&update.pixels_rgba8[source..source + copy_bytes]);
+                    }
+                }
+                ImageResourceDelta::Remove(image) => {
+                    scene.image_resources.remove(image);
+                }
+            }
+        }
+        for update in &delta.material_resources {
+            match update {
+                MaterialResourceDelta::Upsert(resource) => {
+                    scene
+                        .material_resources
+                        .insert(resource.material, *resource);
+                }
+                MaterialResourceDelta::Remove(material) => {
+                    scene.material_resources.remove(material);
+                }
+            }
+        }
+        if delta.damage.full {
+            scene.pending_damage.full = true;
+            scene.pending_damage.rects.clear();
+        } else {
+            for rect in &delta.damage.rects {
+                scene.pending_damage.add(*rect, delta.extent);
+            }
+        }
+        Ok(SceneUpdateStats {
+            epoch: scene.epoch,
+            upload_bytes_queued: 0,
+            descriptor_writes_queued: 0,
+        })
+    }
+
+    fn render<'frame>(
+        &self,
+        scene: &mut Self::Scene,
+        frame: &mut Self::FrameContext<'frame>,
+        target: &Self::Target<'frame>,
+        request: &RenderRequest,
+    ) -> RenderResult<RenderStats> {
+        #[cfg(feature = "instrumentation")]
+        let _span = crate::profiler::span!("software.raster.detail");
+        validate_target(target.info)?;
+        let render_region = request.region.unwrap_or(target.info.region);
+        if !rect_contains(target.info.region, render_region) {
+            return Err(RenderError::new(
+                RenderErrorKind::InvalidTarget,
+                "software render region lies outside the target region",
+            ));
+        }
+        let clear = match request.load {
+            TargetLoad::Clear(color) => color,
+            TargetLoad::Preserve => {
+                return Err(RenderError::new(
+                    RenderErrorKind::Unsupported,
+                    "the software reference backend cannot preserve a host-provided target",
+                ));
+            }
+        };
+        let resized = frame.surface.ensure_framebuffer(target.info.extent);
+        if request.force || resized {
+            scene.pending_damage.full = true;
+            scene.pending_damage.rects.clear();
+        }
+        let recorded = !scene.pending_damage.is_empty();
+        let batches = if recorded {
+            scene
+                .draw_order
+                .iter()
+                .enumerate()
+                .filter(|(index, item)| {
+                    *index == 0 || scene.draw_order[index - 1].batch != item.batch
+                })
+                .count() as u32
+        } else {
+            0
+        };
+        if recorded {
+            std::mem::swap(
+                &mut scene.pending_damage,
+                &mut frame.surface.presented_damage,
+            );
+            scene.pending_damage.full = false;
+            scene.pending_damage.rects.clear();
+            scene.rasterize_presented_damage(
+                frame.surface,
+                render_region,
+                clear,
+                target.info.color_space,
+            );
+        } else {
+            frame.surface.presented_damage.full = false;
+            frame.surface.presented_damage.rects.clear();
+        }
+        let stats = RenderStats {
+            recorded,
+            epoch: scene.epoch,
+            upload_bytes_recorded: 0,
+            buffer_copies: 0,
+            buffer_allocations: 0,
+            descriptor_writes: 0,
+            passes: u32::from(recorded),
+            barriers: 0,
+            batches,
+            draws: batches,
+            dispatches: 0,
+            damage_area: if recorded {
+                damage_area(
+                    frame.surface.presented_damage.full,
+                    &frame.surface.presented_damage.rects,
+                    render_region,
+                )
+            } else {
+                0.0
+            },
+        };
+        Ok(stats)
+    }
+}
+
+impl RenderReadback<SoftwareRenderer> for SoftwareReadback {
+    type Pending = ReadbackImage;
+
+    fn record_readback<'frame>(
+        &self,
+        _backend: &SoftwareRenderer,
+        frame: &mut SoftwareFrameContext<'frame>,
+        target: &SoftwareTarget<'frame>,
+        request: &ReadbackRequest,
+    ) -> RenderResult<Self::Pending> {
+        if !rect_contains(target.info.region, request.region) {
+            return Err(RenderError::new(
+                RenderErrorKind::InvalidTarget,
+                "software readback region lies outside the target region",
+            ));
+        }
+        frame.surface.readback(request)
+    }
+}
+
+impl SoftwareSurface {
+    pub fn begin_frame(&mut self) -> SoftwareFrameContext<'_> {
+        SoftwareFrameContext { surface: self }
+    }
+
+    pub fn framebuffer_extent(&self) -> SizeI {
+        self.framebuffer_extent
+    }
+
+    pub fn pixels_rgba8(&self) -> &[u8] {
+        &self.framebuffer_rgba8
+    }
+
+    pub fn presented_damage(&self) -> &DamageRegion {
+        &self.presented_damage
+    }
+
+    pub fn readback(&self, request: &ReadbackRequest) -> RenderResult<ReadbackImage> {
+        if request.format != ReadbackFormat::Rgba8 {
+            return Err(RenderError::new(
+                RenderErrorKind::Unsupported,
+                "unsupported software readback format",
+            ));
+        }
+        let bounds = RectI {
+            x: 0,
+            y: 0,
+            width: self.framebuffer_extent.width,
+            height: self.framebuffer_extent.height,
+        };
+        if !rect_contains(bounds, request.region) {
+            return Err(RenderError::new(
+                RenderErrorKind::InvalidTarget,
+                "software readback region lies outside the framebuffer",
+            ));
+        }
+        let row_bytes = request.region.width as usize * 4;
+        let mut pixels = Vec::with_capacity(row_bytes * request.region.height as usize);
+        let stride = self.framebuffer_extent.width as usize * 4;
+        for row in request.region.y..request.region.bottom() {
+            let start = row as usize * stride + request.region.x as usize * 4;
+            pixels.extend_from_slice(&self.framebuffer_rgba8[start..start + row_bytes]);
+        }
+        Ok(ReadbackImage {
+            extent: SizeI {
+                width: request.region.width,
+                height: request.region.height,
+            },
+            row_bytes,
+            pixels,
+        })
+    }
+
+    fn ensure_framebuffer(&mut self, extent: SizeI) -> bool {
+        if self.framebuffer_extent == extent && !self.framebuffer_rgba8.is_empty() {
+            return false;
+        }
+        self.framebuffer_extent = extent;
+        self.framebuffer_rgba8.resize(
+            extent.width.max(1) as usize * extent.height.max(1) as usize * 4,
+            0,
+        );
+        true
+    }
+}
+
+impl SoftwareTarget<'_> {
+    pub fn new(info: RenderTargetInfo) -> Self {
+        Self {
+            info,
+            marker: PhantomData,
+        }
+    }
+
+    pub fn info(&self) -> RenderTargetInfo {
+        self.info
+    }
+}
+
+impl SoftwareScene {
+    pub fn background(&self) -> ColorRgba8 {
+        self.background
+    }
+
+    fn rasterize_presented_damage(
+        &self,
+        surface: &mut SoftwareSurface,
+        render_region: RectI,
+        clear: ColorRgba8,
+        color_space: ColorSpace,
+    ) {
+        let render_region = rect_i_to_f(render_region);
+        if surface.presented_damage.full {
+            self.rasterize_region(surface, render_region, clear, color_space);
+            return;
+        }
+        let rects = std::mem::take(&mut surface.presented_damage.rects);
+        for rect in rects.iter().copied() {
+            if let Some(region) = rect.intersection(render_region) {
+                self.rasterize_region(surface, region, clear, color_space);
+            }
+        }
+        surface.presented_damage.rects = rects;
+    }
+
+    fn rasterize_region(
+        &self,
+        surface: &mut SoftwareSurface,
+        region: RectF,
+        clear: ColorRgba8,
+        color_space: ColorSpace,
+    ) {
+        let width = surface.framebuffer_extent.width.max(1) as usize;
+        let height = surface.framebuffer_extent.height.max(1) as usize;
+        clear_region(
+            &mut surface.framebuffer_rgba8,
+            width,
+            height,
+            region,
+            clear,
+            color_space,
+        );
+        let mut target = RasterTarget {
+            pixels: &mut surface.framebuffer_rgba8,
+            width,
+            height,
+            blend_mode: BlendMode::Alpha,
+            color_space,
+        };
+        for item in &self.draw_order {
+            target.blend_mode = item.batch.blend;
+            let item_clip = self
+                .clips
+                .iter()
+                .find(|clip| clip.id == item.batch.clip)
+                .filter(|_| item.batch.clip.0 != 0);
+            match item.kind {
+                PrimitiveKind::Box => {
+                    if let Some(instance) = self.boxes.get(item.index as usize) {
+                        draw_box(
+                            &mut target,
+                            instance,
+                            self.spatial_for(instance.spatial),
+                            item_clip,
+                            region,
+                        );
+                    }
+                }
+                PrimitiveKind::Glyph => {
+                    if let Some(instance) = self.glyphs.get(item.index as usize) {
+                        draw_glyph(
+                            &mut target,
+                            instance,
+                            self.spatial_for(instance.spatial),
+                            item_clip,
+                            region,
+                            &self.atlas_a8,
+                            self.atlas_extent,
+                        );
+                    }
+                }
+                PrimitiveKind::Image => {
+                    if let Some(instance) = self.images.get(item.index as usize)
+                        && let Some(image) = self.image_resources.get(&instance.image)
+                    {
+                        draw_image(
+                            &mut target,
+                            instance,
+                            self.spatial_for(instance.spatial),
+                            item_clip,
+                            region,
+                            image,
+                        );
+                    }
+                }
+                PrimitiveKind::Material => {
+                    if let Some(instance) = self.materials.get(item.index as usize)
+                        && let Some(material) = self.material_resources.get(&instance.material)
+                    {
+                        draw_material(
+                            &mut target,
+                            instance,
+                            self.spatial_for(instance.spatial),
+                            item_clip,
+                            region,
+                            material,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn spatial_for(&self, id: SpatialId) -> Option<&RenderSpatialNode> {
+        self.spatial.iter().find(|spatial| spatial.id == id)
+    }
+}
+
+struct RasterTarget<'a> {
+    pixels: &'a mut [u8],
+    width: usize,
+    height: usize,
+    blend_mode: BlendMode,
+    color_space: ColorSpace,
+}
+
+impl RasterTarget<'_> {
+    fn blend_srgba(&mut self, x: i32, y: i32, source: ColorRgba8, opacity: f32) {
+        let alpha = (f32::from(source.a) / 255.0) * opacity.clamp(0.0, 1.0);
+        let rgb = [
+            srgb_decode_byte(source.r) * alpha,
+            srgb_decode_byte(source.g) * alpha,
+            srgb_decode_byte(source.b) * alpha,
+        ];
+        self.blend_linear_premultiplied(x, y, rgb, alpha);
+    }
+
+    fn blend_linear_premultiplied(
+        &mut self,
+        x: i32,
+        y: i32,
+        source_rgb: [f32; 3],
+        source_alpha: f32,
+    ) {
+        if x < 0 || y < 0 || (source_alpha <= 0.0 && self.blend_mode == BlendMode::Alpha) {
+            return;
+        }
+        let index = (y as usize * self.width + x as usize) * 4;
+        if index + 3 >= self.pixels.len() {
+            return;
+        }
+        let source_alpha = source_alpha.clamp(0.0, 1.0);
+        let inverse = 1.0 - source_alpha;
+        let (rgb, alpha) = if self.blend_mode == BlendMode::Opaque {
+            (source_rgb, source_alpha)
+        } else {
+            (
+                [
+                    source_rgb[0]
+                        + decode_target_channel(self.pixels[index], self.color_space) * inverse,
+                    source_rgb[1]
+                        + decode_target_channel(self.pixels[index + 1], self.color_space) * inverse,
+                    source_rgb[2]
+                        + decode_target_channel(self.pixels[index + 2], self.color_space) * inverse,
+                ],
+                source_alpha + f32::from(self.pixels[index + 3]) / 255.0 * inverse,
+            )
+        };
+        self.pixels[index] = encode_target_channel(rgb[0], self.color_space);
+        self.pixels[index + 1] = encode_target_channel(rgb[1], self.color_space);
+        self.pixels[index + 2] = encode_target_channel(rgb[2], self.color_space);
+        self.pixels[index + 3] = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+    }
+}
+
+fn validate_target(info: RenderTargetInfo) -> RenderResult<()> {
+    let bounds = RectI {
+        x: 0,
+        y: 0,
+        width: info.extent.width,
+        height: info.extent.height,
+    };
+    if info.extent.width <= 0
+        || info.extent.height <= 0
+        || info.sample_count != 1
+        || !rect_contains(bounds, info.region)
+    {
+        return Err(RenderError::new(
+            RenderErrorKind::InvalidTarget,
+            "software target has invalid extent, region, or sample count",
+        ));
+    }
+    if !matches!(info.color_space, ColorSpace::Linear | ColorSpace::Srgb) {
+        return Err(RenderError::new(
+            RenderErrorKind::Unsupported,
+            "software target supports only linear and sRGB color spaces",
+        ));
+    }
+    Ok(())
+}
+
+fn rect_contains(outer: RectI, inner: RectI) -> bool {
+    inner.width > 0
+        && inner.height > 0
+        && inner.x >= outer.x
+        && inner.y >= outer.y
+        && inner.right() <= outer.right()
+        && inner.bottom() <= outer.bottom()
+}
+
+fn rect_i_to_f(rect: RectI) -> RectF {
+    RectF {
+        x: rect.x as f32,
+        y: rect.y as f32,
+        width: rect.width as f32,
+        height: rect.height as f32,
+    }
+}
+
+fn damage_area(full: bool, rects: &[RectF], region: RectI) -> f32 {
+    let region = rect_i_to_f(region);
+    if full {
+        region.area()
+    } else {
+        rects
+            .iter()
+            .filter_map(|rect| rect.intersection(region))
+            .map(RectF::area)
+            .sum()
+    }
+}
+
+fn clear_region(
+    pixels: &mut [u8],
+    width: usize,
+    height: usize,
+    region: RectF,
+    color: ColorRgba8,
+    color_space: ColorSpace,
+) {
+    let Some(region) = clip_to_target(region, width, height) else {
+        return;
+    };
+    let alpha = f32::from(color.a) / 255.0;
+    let encoded = [
+        encode_target_channel(srgb_decode_byte(color.r) * alpha, color_space),
+        encode_target_channel(srgb_decode_byte(color.g) * alpha, color_space),
+        encode_target_channel(srgb_decode_byte(color.b) * alpha, color_space),
+        color.a,
+    ];
+    let left = region.x.floor().max(0.0) as usize;
+    let top = region.y.floor().max(0.0) as usize;
+    let right = region.right().ceil().min(width as f32) as usize;
+    let bottom = region.bottom().ceil().min(height as f32) as usize;
+    for y in top..bottom {
+        for pixel in pixels[(y * width + left) * 4..(y * width + right) * 4].chunks_exact_mut(4) {
+            pixel.copy_from_slice(&encoded);
+        }
+    }
+}
+
+fn draw_box(
+    raster: &mut RasterTarget<'_>,
+    instance: &BoxInstance,
+    spatial: Option<&RenderSpatialNode>,
+    clip: Option<&RenderClip>,
+    region: RectF,
+) {
+    let transform = spatial.map_or(crate::core::Affine2D::IDENTITY, |value| value.transform);
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+    let scale = (
+        transform.m11.hypot(transform.m12),
+        transform.m21.hypot(transform.m22),
+    );
+    let scale_min = scale.0.min(scale.1).max(f32::EPSILON);
+    let outline_extent = (instance.outline.offset + instance.outline.width).max(0.0);
+    let mut visual_bounds = transform.transform_rect(outset_rect(instance.rect, outline_extent));
+    for shadow in instance.shadows.as_slice() {
+        let reach = shadow.spread + shadow.blur * 2.0;
+        let shadow_rect = transform.transform_rect(RectF {
+            x: instance.rect.x + shadow.offset.x - reach,
+            y: instance.rect.y + shadow.offset.y - reach,
+            width: instance.rect.width + reach * 2.0,
+            height: instance.rect.height + reach * 2.0,
+        });
+        visual_bounds = union_rect(visual_bounds, shadow_rect);
+    }
+    let bounds = intersect(
+        intersect(visual_bounds, clip.map_or(region, |clip| clip.rect)),
+        region,
+    );
+    let Some(bounds) = clip_to_target(bounds, raster.width, raster.height) else {
+        return;
+    };
+    let radii = [
+        instance.corner_radii.top_left,
+        instance.corner_radii.top_right,
+        instance.corner_radii.bottom_right,
+        instance.corner_radii.bottom_left,
+    ];
+    let border_widths = [
+        instance.border.top.width,
+        instance.border.right.width,
+        instance.border.bottom.width,
+        instance.border.left.width,
+    ];
+    for y in bounds.y.floor() as i32..bounds.bottom().ceil() as i32 {
+        for x in bounds.x.floor() as i32..bounds.right().ceil() as i32 {
+            let point_x = x as f32 + 0.5;
+            let point_y = y as f32 + 0.5;
+            if !inside_clip(point_x, point_y, clip) {
+                continue;
+            }
+            let local = inverse.transform_point(crate::core::PointF {
+                x: point_x,
+                y: point_y,
+            });
+            for shadow in instance.shadows.as_slice().iter().rev() {
+                let coverage =
+                    shadow_coverage(local.x, local.y, instance.rect, radii, *shadow, scale_min);
+                if coverage > 0.0 {
+                    raster.blend_srgba(x, y, shadow.color, coverage * instance.opacity);
+                }
+            }
+
+            let outline_width = instance.outline.width.max(0.0);
+            if outline_width > 0.0 {
+                let offset = instance.outline.offset;
+                let outer = rounded_coverage(
+                    local.x,
+                    local.y,
+                    outset_rect(instance.rect, offset + outline_width),
+                    add_radii(radii, offset + outline_width),
+                    scale_min,
+                );
+                let inner = rounded_coverage(
+                    local.x,
+                    local.y,
+                    outset_rect(instance.rect, offset),
+                    add_radii(radii, offset),
+                    scale_min,
+                );
+                let coverage = (outer - inner).clamp(0.0, 1.0);
+                if coverage > 0.0 {
+                    raster.blend_srgba(x, y, instance.outline.color, coverage * instance.opacity);
+                }
+            }
+
+            let outer = rounded_coverage(local.x, local.y, instance.rect, radii, scale_min);
+            if outer <= 0.0 {
+                continue;
+            }
+            let inner_rect = inset_asymmetric(instance.rect, border_widths);
+            let inner_radii = inset_radii(radii, border_widths);
+            let inner =
+                rounded_coverage(local.x, local.y, inner_rect, inner_radii, scale_min).min(outer);
+            if let Some(background) = instance.background
+                && inner > 0.0
+            {
+                raster.blend_srgba(x, y, background, inner * instance.opacity);
+            }
+            let ring = (outer - inner).clamp(0.0, 1.0);
+            if ring > 0.0 {
+                let color = border_color_at(
+                    local.x - instance.rect.x,
+                    local.y - instance.rect.y,
+                    instance.rect.width,
+                    instance.rect.height,
+                    border_widths,
+                    instance.border,
+                );
+                raster.blend_srgba(x, y, color, ring * instance.opacity);
+            }
+        }
+    }
+}
+
+fn shadow_coverage(
+    x: f32,
+    y: f32,
+    rect: RectF,
+    radii: [f32; 4],
+    shadow: Shadow,
+    scale: f32,
+) -> f32 {
+    let spread = shadow.spread;
+    let shifted = outset_rect(
+        RectF {
+            x: rect.x + shadow.offset.x,
+            y: rect.y + shadow.offset.y,
+            ..rect
+        },
+        spread,
+    );
+    let distance = rounded_signed_distance(x, y, shifted, add_radii(radii, spread));
+    let blur = shadow.blur.max(0.0);
+    if blur <= f32::EPSILON {
+        (0.5 - distance * scale).clamp(0.0, 1.0)
+    } else {
+        (0.5 - distance / (blur * 2.0 + 1.0 / scale)).clamp(0.0, 1.0)
+    }
+}
+
+fn border_color_at(
+    x: f32,
+    y: f32,
+    width: f32,
+    height: f32,
+    widths: [f32; 4],
+    border: Border,
+) -> ColorRgba8 {
+    let ratio = |distance: f32, width: f32| {
+        if width > 0.0 {
+            distance / width
+        } else {
+            f32::INFINITY
+        }
+    };
+    let candidates = [
+        (ratio(y, widths[0]), border.top.color),
+        (ratio(width - x, widths[1]), border.right.color),
+        (ratio(height - y, widths[2]), border.bottom.color),
+        (ratio(x, widths[3]), border.left.color),
+    ];
+    candidates
+        .into_iter()
+        .min_by(|left, right| left.0.total_cmp(&right.0))
+        .map(|item| item.1)
+        .unwrap_or_default()
+}
+
+fn rounded_coverage(x: f32, y: f32, rect: RectF, radii: [f32; 4], scale: f32) -> f32 {
+    (0.5 - rounded_signed_distance(x, y, rect, radii) * scale).clamp(0.0, 1.0)
+}
+
+fn rounded_signed_distance(x: f32, y: f32, rect: RectF, radii: [f32; 4]) -> f32 {
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return f32::INFINITY;
+    }
+    let local_x = x - rect.x;
+    let local_y = y - rect.y;
+    let radius = if local_x < rect.width * 0.5 {
+        if local_y < rect.height * 0.5 {
+            radii[0]
+        } else {
+            radii[3]
+        }
+    } else if local_y < rect.height * 0.5 {
+        radii[1]
+    } else {
+        radii[2]
+    }
+    .clamp(0.0, rect.width.min(rect.height) * 0.5);
+    let center_x = rect.width * 0.5;
+    let center_y = rect.height * 0.5;
+    let qx = (local_x - center_x).abs() - (center_x - radius);
+    let qy = (local_y - center_y).abs() - (center_y - radius);
+    let outside = qx.max(0.0).hypot(qy.max(0.0));
+    outside + qx.max(qy).min(0.0) - radius
+}
+
+fn outset_rect(rect: RectF, amount: f32) -> RectF {
+    RectF {
+        x: rect.x - amount,
+        y: rect.y - amount,
+        width: (rect.width + amount * 2.0).max(0.0),
+        height: (rect.height + amount * 2.0).max(0.0),
+    }
+}
+
+fn inset_asymmetric(rect: RectF, widths: [f32; 4]) -> RectF {
+    RectF {
+        x: rect.x + widths[3],
+        y: rect.y + widths[0],
+        width: (rect.width - widths[3] - widths[1]).max(0.0),
+        height: (rect.height - widths[0] - widths[2]).max(0.0),
+    }
+}
+
+fn add_radii(mut radii: [f32; 4], amount: f32) -> [f32; 4] {
+    for radius in &mut radii {
+        *radius = (*radius + amount).max(0.0);
+    }
+    radii
+}
+
+fn inset_radii(radii: [f32; 4], widths: [f32; 4]) -> [f32; 4] {
+    [
+        (radii[0] - widths[0].max(widths[3])).max(0.0),
+        (radii[1] - widths[0].max(widths[1])).max(0.0),
+        (radii[2] - widths[2].max(widths[1])).max(0.0),
+        (radii[3] - widths[2].max(widths[3])).max(0.0),
+    ]
+}
+
+fn union_rect(first: RectF, second: RectF) -> RectF {
+    let left = first.x.min(second.x);
+    let top = first.y.min(second.y);
+    let right = first.right().max(second.right());
+    let bottom = first.bottom().max(second.bottom());
+    RectF {
+        x: left,
+        y: top,
+        width: (right - left).max(0.0),
+        height: (bottom - top).max(0.0),
+    }
+}
+
+fn draw_glyph(
+    raster: &mut RasterTarget<'_>,
+    glyph: &GlyphInstance,
+    spatial: Option<&RenderSpatialNode>,
+    clip: Option<&RenderClip>,
+    region: RectF,
+    atlas: &[u8],
+    atlas_extent: SizeI,
+) {
+    let transform = spatial.map_or(crate::core::Affine2D::IDENTITY, |value| value.transform);
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+    let rect = transform.transform_rect(glyph.rect);
+    let Some(target) = clip_to_target(
+        intersect(
+            intersect(rect, clip.map_or(region, |clip| clip.rect)),
+            region,
+        ),
+        raster.width,
+        raster.height,
+    ) else {
+        return;
+    };
+    for y in target.y.floor() as i32..target.bottom().ceil() as i32 {
+        for x in target.x.floor() as i32..target.right().ceil() as i32 {
+            let point_x = x as f32 + 0.5;
+            let point_y = y as f32 + 0.5;
+            if !inside_clip(point_x, point_y, clip) {
+                continue;
+            }
+            let local = inverse.transform_point(crate::core::PointF {
+                x: point_x,
+                y: point_y,
+            });
+            if !glyph.rect.contains(local) {
+                continue;
+            }
+            let atlas_x = glyph.atlas_x as f32 + (local.x - glyph.rect.x);
+            let atlas_y = glyph.atlas_y as f32 + (local.y - glyph.rect.y);
+            let coverage = sample_a8_linear(
+                atlas,
+                atlas_extent.width,
+                atlas_extent.height,
+                atlas_x,
+                atlas_y,
+            );
+            raster.blend_srgba(x, y, glyph.color, coverage * glyph.opacity);
+        }
+    }
+}
+
+fn draw_image(
+    raster: &mut RasterTarget<'_>,
+    instance: &ImageInstance,
+    spatial: Option<&RenderSpatialNode>,
+    clip: Option<&RenderClip>,
+    region: RectF,
+    image: &SoftwareImage,
+) {
+    let transform = spatial.map_or(crate::core::Affine2D::IDENTITY, |value| value.transform);
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+    let rect = transform.transform_rect(instance.rect);
+    let Some(target) = clip_to_target(
+        intersect(
+            intersect(rect, clip.map_or(region, |clip| clip.rect)),
+            region,
+        ),
+        raster.width,
+        raster.height,
+    ) else {
+        return;
+    };
+    for y in target.y.floor() as i32..target.bottom().ceil() as i32 {
+        for x in target.x.floor() as i32..target.right().ceil() as i32 {
+            let point_x = x as f32 + 0.5;
+            let point_y = y as f32 + 0.5;
+            if !inside_clip(point_x, point_y, clip) {
+                continue;
+            }
+            let local = inverse.transform_point(crate::core::PointF {
+                x: point_x,
+                y: point_y,
+            });
+            let u = (local.x - instance.rect.x) / instance.rect.width;
+            let v = (local.y - instance.rect.y) / instance.rect.height;
+            let sampled =
+                sample_image_linear(&image.pixels, image.extent, image.color_encoding, u, v);
+            let opacity = instance.opacity.clamp(0.0, 1.0);
+            let alpha = match image.alpha_mode {
+                ImageAlphaMode::Opaque => opacity,
+                ImageAlphaMode::Straight | ImageAlphaMode::Premultiplied => sampled[3] * opacity,
+            };
+            let rgb_scale = match image.alpha_mode {
+                ImageAlphaMode::Straight => alpha,
+                ImageAlphaMode::Premultiplied => opacity,
+                ImageAlphaMode::Opaque => opacity,
+            };
+            raster.blend_linear_premultiplied(
+                x,
+                y,
+                [
+                    sampled[0] * rgb_scale,
+                    sampled[1] * rgb_scale,
+                    sampled[2] * rgb_scale,
+                ],
+                alpha,
+            );
+        }
+    }
+}
+
+fn draw_material(
+    raster: &mut RasterTarget<'_>,
+    instance: &MaterialInstance,
+    spatial: Option<&RenderSpatialNode>,
+    clip: Option<&RenderClip>,
+    region: RectF,
+    material: &MaterialResource,
+) {
+    let transform = spatial.map_or(crate::core::Affine2D::IDENTITY, |value| value.transform);
+    let Some(inverse) = transform.inverse() else {
+        return;
+    };
+    let rect = transform.transform_rect(instance.rect);
+    let Some(target) = clip_to_target(
+        intersect(
+            intersect(rect, clip.map_or(region, |clip| clip.rect)),
+            region,
+        ),
+        raster.width,
+        raster.height,
+    ) else {
+        return;
+    };
+    for y in target.y.floor() as i32..target.bottom().ceil() as i32 {
+        for x in target.x.floor() as i32..target.right().ceil() as i32 {
+            let point_x = x as f32 + 0.5;
+            let point_y = y as f32 + 0.5;
+            if !inside_clip(point_x, point_y, clip) {
+                continue;
+            }
+            let local = inverse.transform_point(crate::core::PointF {
+                x: point_x,
+                y: point_y,
+            });
+            let amount = match material.kind {
+                MaterialKind::Solid => 0.0,
+                MaterialKind::LinearGradientHorizontal => {
+                    (local.x - instance.rect.x) / instance.rect.width
+                }
+                MaterialKind::LinearGradientVertical => {
+                    (local.y - instance.rect.y) / instance.rect.height
+                }
+            }
+            .clamp(0.0, 1.0);
+            raster.blend_srgba(
+                x,
+                y,
+                lerp_color(material.colors[0], material.colors[1], amount),
+                instance.opacity,
+            );
+        }
+    }
+}
+
+fn inside_clip(x: f32, y: f32, clip: Option<&RenderClip>) -> bool {
+    let Some(clip) = clip else {
+        return true;
+    };
+    let local_x = x - clip.rect.x;
+    let local_y = y - clip.rect.y;
+    if local_x < 0.0 || local_y < 0.0 || local_x > clip.rect.width || local_y > clip.rect.height {
+        return false;
+    }
+    inside_rounded(
+        local_x,
+        local_y,
+        clip.rect.width,
+        clip.rect.height,
+        [
+            clip.corner_radii.top_left,
+            clip.corner_radii.top_right,
+            clip.corner_radii.bottom_right,
+            clip.corner_radii.bottom_left,
+        ],
+    )
+}
+
+fn lerp_color(first: ColorRgba8, second: ColorRgba8, amount: f32) -> ColorRgba8 {
+    let channel = |first: u8, second: u8| {
+        (first as f32 + (second as f32 - first as f32) * amount).round() as u8
+    };
+    ColorRgba8::rgba(
+        channel(first.r, second.r),
+        channel(first.g, second.g),
+        channel(first.b, second.b),
+        channel(first.a, second.a),
+    )
+}
+
+fn inside_rounded(x: f32, y: f32, width: f32, height: f32, radii: [f32; 4]) -> bool {
+    let [top_left, top_right, bottom_right, bottom_left] = radii;
+    let check = |x: f32, y: f32, cx: f32, cy: f32, radius: f32| {
+        let dx = x - cx;
+        let dy = y - cy;
+        dx * dx + dy * dy <= radius * radius
+    };
+    if x < top_left && y < top_left {
+        check(x, y, top_left, top_left, top_left)
+    } else if x > width - top_right && y < top_right {
+        check(x, y, width - top_right, top_right, top_right)
+    } else if x > width - bottom_right && y > height - bottom_right {
+        check(
+            x,
+            y,
+            width - bottom_right,
+            height - bottom_right,
+            bottom_right,
+        )
+    } else if x < bottom_left && y > height - bottom_left {
+        check(x, y, bottom_left, height - bottom_left, bottom_left)
+    } else {
+        true
+    }
+}
+
+fn intersect(a: RectF, b: RectF) -> RectF {
+    a.intersection(b).unwrap_or(RectF::ZERO)
+}
+fn clip_to_target(rect: RectF, width: usize, height: usize) -> Option<RectF> {
+    rect.intersection(RectF {
+        x: 0.0,
+        y: 0.0,
+        width: width as f32,
+        height: height as f32,
+    })
+}
+
+fn sample_a8_linear(pixels: &[u8], width: i32, height: i32, texel_x: f32, texel_y: f32) -> f32 {
+    if width <= 0 || height <= 0 || pixels.is_empty() {
+        return 0.0;
+    }
+    let x = texel_x - 0.5;
+    let y = texel_y - 0.5;
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let amount_x = x - x.floor();
+    let amount_y = y - y.floor();
+    let fetch = |x: i32, y: i32| {
+        let x = x.clamp(0, width - 1) as usize;
+        let y = y.clamp(0, height - 1) as usize;
+        pixels
+            .get(y * width as usize + x)
+            .map_or(0.0, |value| f32::from(*value) / 255.0)
+    };
+    let top = lerp(fetch(x0, y0), fetch(x0 + 1, y0), amount_x);
+    let bottom = lerp(fetch(x0, y0 + 1), fetch(x0 + 1, y0 + 1), amount_x);
+    lerp(top, bottom, amount_y)
+}
+
+fn sample_image_linear(
+    pixels: &[u8],
+    extent: SizeI,
+    encoding: ImageColorEncoding,
+    u: f32,
+    v: f32,
+) -> [f32; 4] {
+    if extent.width <= 0 || extent.height <= 0 || pixels.is_empty() {
+        return [0.0; 4];
+    }
+    let x = u * extent.width as f32 - 0.5;
+    let y = v * extent.height as f32 - 0.5;
+    let x0 = x.floor() as i32;
+    let y0 = y.floor() as i32;
+    let amount_x = x - x.floor();
+    let amount_y = y - y.floor();
+    let fetch = |x: i32, y: i32| {
+        let x = x.clamp(0, extent.width - 1) as usize;
+        let y = y.clamp(0, extent.height - 1) as usize;
+        let index = (y * extent.width as usize + x) * 4;
+        let decode = |channel: u8| match encoding {
+            ImageColorEncoding::Linear => f32::from(channel) / 255.0,
+            ImageColorEncoding::Srgb => srgb_decode_byte(channel),
+        };
+        [
+            decode(pixels[index]),
+            decode(pixels[index + 1]),
+            decode(pixels[index + 2]),
+            f32::from(pixels[index + 3]) / 255.0,
+        ]
+    };
+    let top_left = fetch(x0, y0);
+    let top_right = fetch(x0 + 1, y0);
+    let bottom_left = fetch(x0, y0 + 1);
+    let bottom_right = fetch(x0 + 1, y0 + 1);
+    std::array::from_fn(|channel| {
+        lerp(
+            lerp(top_left[channel], top_right[channel], amount_x),
+            lerp(bottom_left[channel], bottom_right[channel], amount_x),
+            amount_y,
+        )
+    })
+}
+
+fn decode_target_channel(value: u8, color_space: ColorSpace) -> f32 {
+    match color_space {
+        ColorSpace::Linear => f32::from(value) / 255.0,
+        ColorSpace::Srgb => srgb_decode_byte(value),
+        ColorSpace::Extended | ColorSpace::BackendDefined => unreachable!("validated color space"),
+    }
+}
+
+fn encode_target_channel(value: f32, color_space: ColorSpace) -> u8 {
+    let value = value.clamp(0.0, 1.0);
+    let encoded = match color_space {
+        ColorSpace::Linear => value,
+        ColorSpace::Srgb => {
+            if value <= 0.003_130_8 {
+                value * 12.92
+            } else {
+                1.055 * value.powf(1.0 / 2.4) - 0.055
+            }
+        }
+        ColorSpace::Extended | ColorSpace::BackendDefined => unreachable!("validated color space"),
+    };
+    (encoded * 255.0).round().clamp(0.0, 255.0) as u8
+}
+
+fn srgb_decode_byte(value: u8) -> f32 {
+    let value = f32::from(value) / 255.0;
+    if value <= 0.040_45 {
+        value / 12.92
+    } else {
+        ((value + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+fn lerp(first: f32, second: f32, amount: f32) -> f32 {
+    first + (second - first) * amount
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{ColorRgba8, PointF, RectI, SizeF, SizeI};
+    use crate::layout::LayoutEngine;
+    use crate::layout::{ClipId, SpatialId};
+    use crate::render::{
+        BatchKey, BlendMode, BoxInstance, GlyphInstance, ImageAlphaMode, ImageColorEncoding,
+        ImageId, ImageInstance, ImageResource, MaterialInstance, MaterialKind, MaterialResource,
+        PipelineKind, PrimitiveKind, ReadbackFormat, ReadbackRequest, RenderClip, RenderRequest,
+        RenderScene, RenderSpatialNode, RenderTargetInfo, SceneCompiler, TargetLoad, TargetStore,
+    };
+    use crate::text::AtlasPageUpdate;
+    use crate::text::RetainedTextSystem;
+    use crate::ui::{
+        Background, Border, BorderSide, BoxStyle, CornerRadii, LayoutStyle, MaterialId,
+        MountWriter, MountedUi, Outline, Shadow, ShadowList, SizeRule, UiNodeId as NodeId,
+    };
+    use std::sync::Arc;
+
+    #[test]
+    fn fractional_glyph_bounds_do_not_sample_outside_the_quad() {
+        let mut pixels = [0_u8; 3 * 4];
+        let mut raster = RasterTarget {
+            pixels: &mut pixels,
+            width: 3,
+            height: 1,
+            blend_mode: BlendMode::Alpha,
+            color_space: ColorSpace::Srgb,
+        };
+        let glyph = GlyphInstance {
+            node: NodeId::new(0, 1),
+            rect: RectF {
+                x: 0.75,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            view_bounds: RectF {
+                x: 0.75,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            atlas_x: 0,
+            atlas_y: 0,
+            color: ColorRgba8::rgba(255, 255, 255, 255),
+            opacity: 1.0,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        };
+
+        draw_glyph(
+            &mut raster,
+            &glyph,
+            None,
+            None,
+            RectF {
+                x: 0.0,
+                y: 0.0,
+                width: 3.0,
+                height: 1.0,
+            },
+            &[255],
+            SizeI {
+                width: 1,
+                height: 1,
+            },
+        );
+
+        assert_eq!(pixels[3], 0);
+        assert!(pixels[7] > 0);
+    }
+
+    #[test]
+    fn retained_scene_readback_is_explicit() {
+        let mut ui = MountedUi::default();
+        {
+            let mut builder = MountWriter::<()>::new(&mut ui);
+            builder.root(
+                BoxStyle {
+                    width: SizeRule::Fill(1.0),
+                    height: SizeRule::Fill(1.0),
+                    background: Background::Color(ColorRgba8::rgba(255, 0, 0, 255)),
+                    ..BoxStyle::default()
+                },
+                LayoutStyle::default(),
+                |_| {},
+            );
+        }
+        let extent = SizeF {
+            width: 4.0,
+            height: 4.0,
+        };
+        let mut layout = LayoutEngine::default();
+        let mut text = RetainedTextSystem::new(100).unwrap();
+        layout.update(&mut ui, &mut text, extent, 1.0);
+        let mut scene = RenderScene::default();
+        SceneCompiler::default().compile(
+            &mut ui,
+            &layout,
+            &mut text,
+            &mut scene,
+            extent,
+            ColorRgba8::default(),
+        );
+        let delta = scene.take_delta().unwrap();
+        let renderer = SoftwareRenderer;
+        let mut backend_scene = renderer.create_scene().unwrap();
+        renderer
+            .apply_scene_delta(&mut backend_scene, &delta)
+            .unwrap();
+        let mut surface = SoftwareSurface::default();
+        let target = SoftwareTarget::new(RenderTargetInfo::full(SizeI {
+            width: 4,
+            height: 4,
+        }));
+        let clear = backend_scene.background();
+        {
+            let mut frame = surface.begin_frame();
+            renderer
+                .render(
+                    &mut backend_scene,
+                    &mut frame,
+                    &target,
+                    &RenderRequest {
+                        force: true,
+                        load: TargetLoad::Clear(clear),
+                        store: TargetStore::Store,
+                        region: None,
+                    },
+                )
+                .unwrap();
+        }
+        let image = surface
+            .readback(&ReadbackRequest {
+                region: RectI {
+                    x: 0,
+                    y: 0,
+                    width: 4,
+                    height: 4,
+                },
+                format: ReadbackFormat::Rgba8,
+            })
+            .unwrap();
+        assert_eq!(&image.pixels[0..4], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn one_backend_creates_independent_per_view_scenes() {
+        let renderer = SoftwareRenderer;
+        let mut first = renderer.create_scene().unwrap();
+        let second = renderer.create_scene().unwrap();
+        let mut scene = RenderScene::default();
+        let delta = scene.take_delta().unwrap();
+
+        renderer.apply_scene_delta(&mut first, &delta).unwrap();
+
+        assert_eq!(first.epoch, 1);
+        assert_eq!(second.epoch, 0);
+    }
+
+    #[test]
+    fn rounded_asymmetric_border_outline_two_shadows_and_local_opacity_render() {
+        let node = NodeId::new(0, 1);
+        let mut source = RenderScene::default();
+        source.extent = SizeF {
+            width: 40.0,
+            height: 40.0,
+        };
+        source.boxes.upsert(
+            node,
+            BoxInstance {
+                node,
+                rect: RectF {
+                    x: 10.0,
+                    y: 10.0,
+                    width: 18.0,
+                    height: 18.0,
+                },
+                view_bounds: RectF {
+                    x: 4.0,
+                    y: 4.0,
+                    width: 34.0,
+                    height: 34.0,
+                },
+                background: Some(ColorRgba8::rgba(240, 240, 240, 255)),
+                border: Border {
+                    top: BorderSide {
+                        width: 1.0,
+                        color: ColorRgba8::rgba(255, 0, 0, 255),
+                    },
+                    right: BorderSide {
+                        width: 2.0,
+                        color: ColorRgba8::rgba(0, 255, 0, 255),
+                    },
+                    bottom: BorderSide {
+                        width: 3.0,
+                        color: ColorRgba8::rgba(0, 0, 255, 255),
+                    },
+                    left: BorderSide {
+                        width: 4.0,
+                        color: ColorRgba8::rgba(255, 255, 0, 255),
+                    },
+                },
+                outline: Outline {
+                    width: 1.0,
+                    offset: 1.0,
+                    color: ColorRgba8::rgba(0, 255, 255, 255),
+                },
+                corner_radii: CornerRadii::all(5.0),
+                shadows: ShadowList::two(
+                    Shadow {
+                        offset: PointF { x: 2.0, y: 2.0 },
+                        blur: 2.0,
+                        spread: 0.0,
+                        color: ColorRgba8::rgba(255, 0, 255, 160),
+                    },
+                    Shadow {
+                        offset: PointF { x: -2.0, y: -2.0 },
+                        blur: 1.0,
+                        spread: 1.0,
+                        color: ColorRgba8::rgba(255, 128, 0, 120),
+                    },
+                ),
+                opacity: 0.5,
+                clip: ClipId(0),
+                spatial: SpatialId(0),
+            },
+        );
+        source.set_draw_order(vec![DrawItem {
+            kind: PrimitiveKind::Box,
+            index: 0,
+            batch: BatchKey {
+                pipeline: PipelineKind::AnalyticBox,
+                resource: 0,
+                clip: ClipId(0),
+                blend: BlendMode::Alpha,
+                target: 0,
+            },
+        }]);
+
+        let renderer = SoftwareRenderer;
+        let mut scene = renderer.create_scene().unwrap();
+        renderer
+            .apply_scene_delta(&mut scene, &source.take_delta().unwrap())
+            .unwrap();
+        let mut surface = SoftwareSurface::default();
+        let target = SoftwareTarget::new(RenderTargetInfo::full(SizeI {
+            width: 40,
+            height: 40,
+        }));
+        {
+            let mut frame = surface.begin_frame();
+            renderer
+                .render(
+                    &mut scene,
+                    &mut frame,
+                    &target,
+                    &RenderRequest {
+                        force: true,
+                        load: TargetLoad::Clear(ColorRgba8::rgba(0, 0, 0, 255)),
+                        store: TargetStore::Store,
+                        region: None,
+                    },
+                )
+                .unwrap();
+        }
+        let pixel = |x: usize, y: usize| {
+            let offset = (y * 40 + x) * 4;
+            &surface.pixels_rgba8()[offset..offset + 4]
+        };
+        assert!(pixel(18, 10)[0] > pixel(18, 10)[1]);
+        assert!(pixel(27, 18)[1] > pixel(27, 18)[0]);
+        assert!(pixel(18, 26)[2] > pixel(18, 26)[0]);
+        assert!(pixel(10, 18)[0] > 80 && pixel(10, 18)[1] > 80);
+        assert!(pixel(8, 18)[1] > 80 && pixel(8, 18)[2] > 80);
+        assert!(pixel(29, 29)[0] > 0 || pixel(29, 29)[2] > 0);
+        assert!(
+            pixel(18, 18)[0] < 240,
+            "box opacity must be primitive-local"
+        );
+        assert_eq!(pixel(0, 0), &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn mixed_glyph_image_material_clip_spatial_and_opacity_are_rasterized_in_order() {
+        let mut source = RenderScene::default();
+        source.extent = SizeF {
+            width: 8.0,
+            height: 4.0,
+        };
+        let image_node = NodeId::new(0, 1);
+        let glyph_node = NodeId::new(1, 1);
+        let material_node = NodeId::new(2, 1);
+        source.spatial_nodes.upsert(
+            image_node,
+            RenderSpatialNode {
+                id: SpatialId(1),
+                transform: crate::core::Affine2D::translation(1.0, 0.0),
+            },
+        );
+        source.clips.upsert(
+            glyph_node,
+            RenderClip {
+                id: ClipId(1),
+                rect: RectF {
+                    x: 3.0,
+                    y: 0.0,
+                    width: 1.0,
+                    height: 2.0,
+                },
+                corner_radii: Default::default(),
+            },
+        );
+        source
+            .set_image_resource(ImageResource {
+                image: ImageId(7),
+                content_version: 1,
+                extent: SizeI {
+                    width: 2,
+                    height: 1,
+                },
+                color_encoding: ImageColorEncoding::Srgb,
+                alpha_mode: ImageAlphaMode::Straight,
+                pixels_rgba8: Arc::from([255, 0, 0, 255, 0, 255, 0, 128]),
+            })
+            .unwrap();
+        source.images.upsert(
+            image_node,
+            ImageInstance {
+                node: image_node,
+                image: ImageId(7),
+                rect: RectF {
+                    x: 0.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 1.0,
+                },
+                view_bounds: RectF {
+                    x: 1.0,
+                    y: 0.0,
+                    width: 2.0,
+                    height: 1.0,
+                },
+                content_version: 1,
+                opacity: 1.0,
+                clip: ClipId(0),
+                spatial: SpatialId(1),
+            },
+        );
+        source.set_atlas_updates(
+            SizeI {
+                width: 2,
+                height: 1,
+            },
+            vec![AtlasPageUpdate {
+                page: 0,
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 1,
+                pixels_a8: Arc::from([255, 255]),
+            }],
+        );
+        source.set_glyphs(vec![GlyphInstance {
+            node: glyph_node,
+            rect: RectF {
+                x: 2.0,
+                y: 0.0,
+                width: 2.0,
+                height: 1.0,
+            },
+            view_bounds: RectF {
+                x: 2.0,
+                y: 0.0,
+                width: 2.0,
+                height: 1.0,
+            },
+            atlas_x: 0,
+            atlas_y: 0,
+            color: ColorRgba8::rgba(255, 255, 255, 255),
+            opacity: 0.5,
+            clip: ClipId(1),
+            spatial: SpatialId(0),
+        }]);
+        source.set_material_resource(MaterialResource {
+            material: MaterialId(3),
+            content_version: 1,
+            kind: MaterialKind::LinearGradientHorizontal,
+            colors: [
+                ColorRgba8::rgba(255, 0, 0, 255),
+                ColorRgba8::rgba(0, 0, 255, 255),
+            ],
+        });
+        source.materials.upsert(
+            material_node,
+            MaterialInstance {
+                node: material_node,
+                material: MaterialId(3),
+                rect: RectF {
+                    x: 4.0,
+                    y: 0.0,
+                    width: 4.0,
+                    height: 1.0,
+                },
+                view_bounds: RectF {
+                    x: 4.0,
+                    y: 0.0,
+                    width: 4.0,
+                    height: 1.0,
+                },
+                opacity: 1.0,
+                clip: ClipId(0),
+                spatial: SpatialId(0),
+            },
+        );
+        source.set_draw_order(vec![
+            DrawItem {
+                kind: PrimitiveKind::Image,
+                index: 0,
+                batch: BatchKey {
+                    pipeline: PipelineKind::Image,
+                    resource: 7,
+                    clip: ClipId(0),
+                    blend: BlendMode::Alpha,
+                    target: 0,
+                },
+            },
+            DrawItem {
+                kind: PrimitiveKind::Glyph,
+                index: 0,
+                batch: BatchKey {
+                    pipeline: PipelineKind::Glyph,
+                    resource: 0,
+                    clip: ClipId(1),
+                    blend: BlendMode::Alpha,
+                    target: 0,
+                },
+            },
+            DrawItem {
+                kind: PrimitiveKind::Material,
+                index: 0,
+                batch: BatchKey {
+                    pipeline: PipelineKind::Material,
+                    resource: 3,
+                    clip: ClipId(0),
+                    blend: BlendMode::Alpha,
+                    target: 0,
+                },
+            },
+        ]);
+
+        let renderer = SoftwareRenderer;
+        let mut scene = renderer.create_scene().unwrap();
+        renderer
+            .apply_scene_delta(&mut scene, &source.take_delta().unwrap())
+            .unwrap();
+        let mut surface = SoftwareSurface::default();
+        let target = SoftwareTarget::new(RenderTargetInfo::full(SizeI {
+            width: 8,
+            height: 4,
+        }));
+        {
+            let mut frame = surface.begin_frame();
+            renderer
+                .render(
+                    &mut scene,
+                    &mut frame,
+                    &target,
+                    &RenderRequest {
+                        force: true,
+                        load: TargetLoad::Clear(ColorRgba8::rgba(0, 0, 0, 255)),
+                        store: TargetStore::Store,
+                        region: None,
+                    },
+                )
+                .unwrap();
+        }
+        let pixel = |x: usize| &surface.pixels_rgba8()[(x * 4)..(x * 4 + 4)];
+        assert_eq!(pixel(0), &[0, 0, 0, 255]);
+        assert_eq!(pixel(1), &[255, 0, 0, 255]);
+        assert_eq!(pixel(2), &[0, 188, 0, 255]);
+        assert_eq!(pixel(3), &[188, 188, 188, 255]);
+        assert!(pixel(4)[0] > pixel(4)[2]);
+        assert!(pixel(7)[2] > pixel(7)[0]);
+    }
+}

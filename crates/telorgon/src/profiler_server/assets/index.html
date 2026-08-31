@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Telorgon Profiler</title>
+  <link rel="stylesheet" href="/assets/profiler.css">
+  <script src="/assets/profiler.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="product">
+      <strong>Telorgon Profiler</strong>
+      <span id="application-name">Connecting</span>
+    </div>
+    <div class="connection" aria-live="polite">
+      <span class="status-dot" id="status-dot"></span>
+      <span id="connection-state">Connecting</span>
+    </div>
+    <div class="toolbar" aria-label="Session controls">
+      <button id="pause-button" class="pause-toggle" type="button" aria-label="Pause profiling" title="Pause profiling">
+        <svg id="play-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-play-icon lucide-play" aria-hidden="true" focusable="false"><path d="M5 5a2 2 0 0 1 3.008-1.728l11.997 6.998a2 2 0 0 1 .003 3.458l-12 7A2 2 0 0 1 5 19z"/></svg>
+        <svg id="pause-icon" xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-pause-icon lucide-pause" aria-hidden="true" focusable="false"><rect x="14" y="3" width="5" height="18" rx="1"/><rect x="5" y="3" width="5" height="18" rx="1"/></svg>
+      </button>
+      <button id="clear-button" type="button">Clear</button>
+      <a id="save-trace" class="button primary" href="/capture" download="profile.telorgon-trace">Save trace</a>
+    </div>
+  </header>
+
+  <div id="application-shell" class="shell">
+    <nav class="navigation" aria-label="Profiler workspaces">
+      <button class="nav-button current" type="button" data-workspace="performance" aria-current="page">Performance</button>
+      <button class="nav-button" type="button" data-workspace="resources">Resources</button>
+      <button class="nav-button" type="button" data-workspace="diagnostics">Diagnostics</button>
+      <button class="nav-button" type="button" data-workspace="session">Session</button>
+    </nav>
+
+    <main class="workspace">
+      <section id="disconnected-state" class="disconnected-state" aria-live="polite" hidden>
+        <div>
+          <h1>Target not connected</h1>
+          <p>Waiting for the managed target to be started with <code>cargo profile</code>.</p>
+        </div>
+      </section>
+
+      <section id="workspace-performance" class="workspace-panel" aria-labelledby="performance-heading">
+        <div class="section-heading metrics-heading">
+          <div>
+            <h1 id="performance-heading">Performance</h1>
+            <div class="view-switcher" role="group" aria-label="Performance view">
+              <button class="performance-view-button current" type="button" data-performance-view="overview" aria-pressed="true">Overview</button>
+              <button class="performance-view-button" type="button" data-performance-view="work" aria-pressed="false">Frame Work</button>
+              <button class="performance-view-button" type="button" data-performance-view="responsiveness" aria-pressed="false">Responsiveness</button>
+            </div>
+          </div>
+          <dl class="metrics" aria-label="Performance statistics">
+            <div><dt id="metric-label-1">Host turn p50</dt><dd id="metric-1">—</dd></div>
+            <div><dt id="metric-label-2">Host turn p95</dt><dd id="metric-2">—</dd></div>
+            <div><dt id="metric-label-3">Host turn p99</dt><dd id="metric-3">—</dd></div>
+            <div><dt id="metric-label-4">Over budget</dt><dd id="metric-4">0</dd></div>
+            <div><dt>Dropped</dt><dd id="metric-dropped">0</dd></div>
+          </dl>
+        </div>
+
+        <div class="plot-region">
+          <div class="performance-legend" aria-label="Performance categories">
+            <span id="plot-legend-1" class="category-badge cpu statistic-line">Host turn duration</span>
+            <span id="plot-legend-2" class="category-badge cpu statistic-heavy">Frame budget</span>
+            <span id="plot-legend-3" class="category-badge cpu statistic-point">Recorded frame</span>
+            <span id="plot-caption" class="plot-caption">Recorded frame order; timestamps are session-relative</span>
+          </div>
+          <canvas id="frame-plot" height="144" tabindex="0" aria-label="Live performance plot in recorded frame order. Left-click a point to inspect it, left-drag to select an analysis range, right-drag to zoom the graph, or use left and right arrow keys to inspect frames without pausing collection."></canvas>
+          <div class="plot-point-details" aria-live="polite">
+            <div class="plot-point-selection">
+              <strong id="plot-point-heading">No point selected</strong>
+              <span id="plot-point-values">Left-click a plotted point to inspect every displayed value at that frame.</span>
+            </div>
+            <div class="plot-view-actions">
+              <label for="plot-frame-limit">Frames shown</label>
+              <select id="plot-frame-limit" aria-label="Maximum retained frames shown in the graph">
+                <option value="30">Latest 30</option>
+                <option value="60">Latest 60</option>
+                <option value="120">Latest 120</option>
+                <option value="300">Latest 300</option>
+                <option value="all" selected>All retained</option>
+              </select>
+              <span id="plot-view-status">Full retained view</span>
+              <button id="plot-view-back" type="button" disabled>Back view</button>
+              <button id="plot-view-reset" type="button" disabled>Reset view</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="range-toolbar" aria-label="Analysis scope">
+          <div>
+            <strong id="range-label">Waiting for frames</strong>
+            <span>Analysis follows the visible graph unless you left-drag a custom range.</span>
+          </div>
+          <div class="range-actions">
+            <label class="view-filter-label" for="view-filter">View</label>
+            <select id="view-filter" aria-label="Rendered view filter">
+              <option value="all">All views</option>
+            </select>
+            <button id="toggle-pointer-moves" type="button" aria-pressed="false" title="Record future pointer-movement profiling details and include their frames and responsiveness signals">Mouse moves ignored</button>
+            <button id="clear-analysis-range" type="button" hidden>Clear range</button>
+          </div>
+        </div>
+
+        <div id="overview-panels" class="performance-view-panel">
+          <div class="analysis-grid">
+          <section class="analysis-panel" aria-labelledby="frame-distribution-heading">
+            <div class="analysis-heading">
+              <div>
+                <h2 id="frame-distribution-heading">Host frame-work distribution</h2>
+                <span>CPU host-turn duration; one statistically equal sample per completed frame</span>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="analysis-table metric-table">
+                <thead><tr><th scope="col">Measurement</th><th scope="col">Value</th></tr></thead>
+                <tbody id="frame-distribution-body"></tbody>
+              </table>
+            </div>
+          </section>
+
+          <section class="analysis-panel" aria-labelledby="category-summary-heading">
+            <div class="analysis-heading">
+              <div>
+                <h2 id="category-summary-heading">Category work</h2>
+                <span>Per-frame self time; repeated events are combined before percentiles</span>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="analysis-table">
+                <thead><tr><th scope="col">Category</th><th scope="col">Median</th><th scope="col">p95</th><th scope="col">Max</th><th scope="col">Coverage</th></tr></thead>
+                <tbody id="category-summary-body"></tbody>
+              </table>
+            </div>
+            <p id="category-summary-empty" class="empty-state">No categorized work is available in this range.</p>
+          </section>
+          </div>
+
+          <section class="analysis-panel slow-frame-panel" aria-labelledby="slow-frames-heading">
+            <div class="analysis-heading">
+              <div>
+                <h2 id="slow-frames-heading">Important frames</h2>
+                <span>Worst budget misses with the dominant measured category and preceding wall-time gap</span>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="analysis-table">
+                <thead><tr><th scope="col">Frame</th><th scope="col">Host duration</th><th scope="col">Budget</th><th scope="col">CPU</th><th scope="col">GPU</th><th scope="col">Presentation</th><th scope="col">Dominant category</th><th scope="col">Prior gap</th></tr></thead>
+                <tbody id="slow-frames-body"></tbody>
+              </table>
+            </div>
+            <p id="slow-frames-empty" class="empty-state">No completed frames are available in this range.</p>
+          </section>
+        </div>
+
+        <div id="work-panels" class="performance-view-panel" hidden>
+        <div class="analysis-grid">
+          <section class="analysis-panel" aria-labelledby="hotspots-heading">
+            <div class="analysis-heading">
+              <div>
+                <h2 id="hotspots-heading">Range hot spots</h2>
+                <span>Per-frame values, ranked by total self time</span>
+              </div>
+              <button id="clear-hotspot" type="button" hidden>Clear filter</button>
+            </div>
+            <div class="table-scroll">
+              <table class="analysis-table">
+                <thead><tr><th scope="col">Stage</th><th scope="col">Category</th><th scope="col">Median</th><th scope="col">p95</th><th scope="col">Max</th><th scope="col">Total self</th><th scope="col">Coverage</th><th scope="col">Worst</th></tr></thead>
+                <tbody id="hotspots-body"></tbody>
+              </table>
+            </div>
+            <p id="hotspots-empty" class="empty-state">No completed spans are available in this range.</p>
+          </section>
+
+          <section class="analysis-panel" aria-labelledby="range-work-heading">
+            <div class="analysis-heading">
+              <div>
+                <h2 id="range-work-heading">Range work</h2>
+                <span>Gauges, per-turn work, and cumulative deltas</span>
+              </div>
+            </div>
+            <div class="table-scroll">
+              <table class="analysis-table">
+                <thead><tr><th scope="col">Measurement</th><th scope="col">Category</th><th scope="col">Median/frame</th><th scope="col">p95</th><th scope="col">Max</th></tr></thead>
+                <tbody id="range-work-body"></tbody>
+              </table>
+            </div>
+            <p id="range-work-empty" class="empty-state">No frame-correlated work counters are available.</p>
+          </section>
+        </div>
+
+        <div class="timeline-heading">
+          <div>
+            <h2>Raw frame flame chart</h2>
+            <span id="selected-frame-label">Waiting for frames</span>
+          </div>
+          <div class="timeline-actions" aria-label="Timeline zoom">
+            <button id="toggle-timeline" class="timeline-toggle" type="button" aria-expanded="false">Show raw</button>
+            <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+            <output id="zoom-label">100%</output>
+            <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+          </div>
+        </div>
+        <div id="timeline" class="timeline" aria-live="polite" hidden></div>
+        </div>
+
+        <div id="responsiveness-panels" class="performance-view-panel" hidden>
+          <div class="analysis-grid">
+            <section class="analysis-panel" aria-labelledby="responsiveness-health-heading">
+              <div class="analysis-heading">
+                <div>
+                  <h2 id="responsiveness-health-heading">Responsiveness health</h2>
+                  <span>Range-level latency and delivery measurements</span>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="analysis-table metric-table">
+                  <thead><tr><th scope="col">Measurement</th><th scope="col">Value</th></tr></thead>
+                  <tbody id="responsiveness-summary-body"></tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="analysis-panel" aria-labelledby="presentation-attempts-heading">
+              <div class="analysis-heading">
+                <div>
+                  <h2 id="presentation-attempts-heading">Presentation outcomes</h2>
+                  <span>Attempts aggregated by terminal result; individual attempts stay in the raw trace</span>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="analysis-table">
+                  <thead><tr><th scope="col">Result</th><th scope="col">Category</th><th scope="col">Count</th><th scope="col">Share</th><th scope="col">p95 duration</th><th scope="col">Max duration</th></tr></thead>
+                  <tbody id="presentation-attempts-body"></tbody>
+                </table>
+              </div>
+              <p id="presentation-attempts-empty" class="empty-state">No completed presentation outcomes are available in this range.</p>
+            </section>
+          </div>
+
+          <div class="analysis-grid single-column-grid">
+            <section class="analysis-panel" aria-labelledby="responsiveness-gaps-heading">
+              <div class="analysis-heading">
+                <div>
+                  <h2 id="responsiveness-gaps-heading">Latency incidents</h2>
+                  <span>Only actionable over-budget intervals, ranked by active wall time</span>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="analysis-table">
+                  <thead><tr><th scope="col">Gap</th><th scope="col">Category</th><th scope="col">Duration</th><th scope="col">From</th><th scope="col">To</th></tr></thead>
+                  <tbody id="responsiveness-gaps-body"></tbody>
+                </table>
+              </div>
+              <p id="responsiveness-gaps-empty" class="empty-state">At least two frames or successful presents are needed to measure a gap.</p>
+            </section>
+          </div>
+
+          <div class="responsiveness-note">
+            Successful present means the platform presentation call accepted the image. Actual scan-out timing requires display-timing support and remains unavailable when the session reports it as unsupported.
+          </div>
+        </div>
+      </section>
+
+      <section id="workspace-resources" class="workspace-panel" aria-labelledby="resources-heading" hidden>
+        <div class="section-heading"><h1 id="resources-heading">Resources</h1></div>
+        <table>
+          <thead><tr><th scope="col">Measurement</th><th scope="col">Category</th><th scope="col">Current</th><th scope="col">Frame</th></tr></thead>
+          <tbody id="resources-body"></tbody>
+        </table>
+        <p id="resources-empty" class="empty-state">No resource counters have arrived.</p>
+      </section>
+
+      <section id="workspace-diagnostics" class="workspace-panel" aria-labelledby="diagnostics-heading" hidden>
+        <div class="section-heading"><h1 id="diagnostics-heading">Diagnostics</h1></div>
+        <div id="diagnostics-guidance" hidden></div>
+        <table>
+          <thead><tr><th scope="col">Kind</th><th scope="col">Category</th><th scope="col">Severity</th><th scope="col">Frame</th><th scope="col">Count</th></tr></thead>
+          <tbody id="diagnostics-body"></tbody>
+        </table>
+        <p id="diagnostics-empty" class="empty-state">No diagnostics have arrived.</p>
+      </section>
+
+      <section id="workspace-session" class="workspace-panel" aria-labelledby="session-heading" hidden>
+        <div class="section-heading"><h1 id="session-heading">Session</h1></div>
+        <dl id="session-details" class="session-details"></dl>
+      </section>
+    </main>
+
+    <div id="inspector-resize-handle" class="inspector-resize-handle" role="separator" tabindex="0" aria-label="Resize frame summary sidebar" aria-controls="inspector" aria-orientation="vertical" aria-valuemin="220" aria-valuemax="760" aria-valuenow="288" title="Drag left or right to resize the frame summary"></div>
+    <aside id="inspector" class="inspector" aria-labelledby="inspector-heading">
+      <div class="inspector-heading">
+        <h2 id="inspector-heading">Frame summary</h2>
+      </div>
+      <dl id="inspector-details" class="inspector-details">
+        <div><dt>Status</dt><dd>Waiting for a completed frame</dd></div>
+      </dl>
+      <div id="inspector-analysis" class="inspector-analysis"></div>
+    </aside>
+  </div>
+
+  <div id="error-banner" class="error-banner" role="alert" hidden></div>
+</body>
+</html>

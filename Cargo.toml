@@ -1,36 +1,62 @@
 [workspace]
 members = [
-    "crates/lithic-core",
-    "crates/lithic-scene",
-    "crates/lithic-render",
-    "crates/lithic-compositor",
-    "crates/lithic-renderer-vulkan",
-    "crates/lithic-app",
-    "crates/lithic-text",
-    "crates/lithic-theme",
-    "crates/lithic-theme-build",
-    "crates/lithic-theme-create",
-    "crates/lithic-theme-studio",
-    "crates/lithic-ui",
-    "crates/lithic-material",
-    "crates/lithic",
+    "crates/telorgon",
+    "crates/telorgon-macros",
+    "crates/telorgon-shader-build",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+repository = "https://github.com/TempDesktopEnvNameOrg/telorgon"
+license = "GPL-3.0-or-later"
+readme = "README.md"
+
+[profile.telorgon-profile]
+inherits = "release"
+debug = 1
+incremental = true
+strip = "none"
 
 [workspace.dependencies]
-ash = "0.38"
+ash = { version = "0.38", default-features = false, features = ["std", "loaded"] }
+ash-window = "0.13"
+axum = { version = "0.8", features = ["ws"] }
+bytemuck = { version = "1", features = ["derive", "must_cast"] }
 cosmic-text = { version = "0.19.0", default-features = false, features = ["std", "swash", "sys-locale"] }
-lithic-core = { path = "crates/lithic-core" }
-lithic-scene = { path = "crates/lithic-scene" }
-lithic-render = { path = "crates/lithic-render" }
-lithic-compositor = { path = "crates/lithic-compositor" }
-lithic-renderer-vulkan = { path = "crates/lithic-renderer-vulkan" }
-lithic-app = { path = "crates/lithic-app" }
-lithic-text = { path = "crates/lithic-text" }
-lithic-theme = { path = "crates/lithic-theme" }
-lithic-ui = { path = "crates/lithic-ui" }
-lithic-material = { path = "crates/lithic-material" }
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
+proc-macro2 = "1"
+proc-macro-crate = "3"
+quote = "1"
+rand = "0.9"
+raw-window-handle = "0.6"
+rtrb = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.11"
+softbuffer = "0.4.8"
+syn = { version = "2", features = ["full"] }
+thiserror = "2"
+tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
+toml = "0.9"
+tower = { version = "0.5", features = ["util"] }
+unicode-segmentation = "=1.13.2"
+winit = "0.30.13"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows = { version = "0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+telorgon-macros = { version = "=0.1.0", path = "crates/telorgon-macros" }

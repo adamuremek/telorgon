@@ -1,0 +1,90 @@
+[package]
+name = "telorgon"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+description = "Retained, component-based UI framework with software and Vulkan rendering"
+
+[features]
+# Ordinary applications compile both managed desktop backends. Runtime entrypoint declarations
+# choose between them; downstream applications do not select a renderer with Cargo features.
+default = ["application-software", "application-vulkan-windows"]
+
+# Internal switch shared by managed and embedded profiling without forcing the managed web service
+# into embedded builds.
+instrumentation = ["dep:rtrb"]
+
+application-software = [
+    "dep:softbuffer",
+    "dep:winit",
+    "dep:windows-sys",
+]
+application-vulkan-windows = [
+    "dep:ash",
+    "dep:ash-window",
+    "dep:bytemuck",
+    "dep:gpu-allocator",
+    "dep:raw-window-handle",
+    "dep:sha2",
+    "dep:winit",
+    "dep:windows",
+    "dep:windows-sys",
+]
+desktop-wayland-linux = [
+    "dep:ash",
+    "dep:bytemuck",
+    "dep:gpu-allocator",
+    "dep:sha2",
+]
+embedded-vulkan = [
+    "dep:ash",
+    "dep:bytemuck",
+    "dep:gpu-allocator",
+    "dep:sha2",
+]
+embedded-profiler = ["instrumentation"]
+profiler = [
+    "instrumentation",
+    "dep:axum",
+    "dep:rand",
+    "dep:serde_json",
+    "dep:tokio",
+]
+
+[dependencies]
+ash = { workspace = true, optional = true }
+ash-window = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
+cosmic-text.workspace = true
+gpu-allocator = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+raw-window-handle = { workspace = true, optional = true }
+rtrb = { workspace = true, optional = true }
+serde.workspace = true
+serde_json = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+softbuffer = { workspace = true, optional = true }
+telorgon-macros.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, optional = true }
+toml.workspace = true
+unicode-segmentation.workspace = true
+winit = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true, optional = true }
+windows-sys = { workspace = true, optional = true }
+
+[dev-dependencies]
+tower.workspace = true
+
+[[bench]]
+name = "retained_runtime"
+harness = false
+
+[[bench]]
+name = "composition_callbacks"
+harness = false

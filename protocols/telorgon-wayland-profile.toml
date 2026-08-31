@@ -1,0 +1,158 @@
+# Machine-readable record of the protocol source and runtime-advertisement boundary.
+# Loading/parsing an XML file never advertises its global by itself.
+profile = "telorgon-linux-desktop-v1"
+
+[source]
+wayland = "/usr/share/wayland/wayland.xml"
+wayland_protocols_root = "/usr/share/wayland-protocols"
+
+[[global]]
+name = "wl_compositor"
+max_version = 6
+availability = "always"
+
+[[global]]
+name = "wl_shm"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "wl_subcompositor"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "wl_data_device_manager"
+max_version = 3
+availability = "selection-and-pointer-touch-dnd-with-mime-fd-actions"
+
+[[global]]
+name = "xdg_wm_base"
+max_version = 7
+availability = "always"
+
+[[global]]
+name = "zxdg_decoration_manager_v1"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "wp_cursor_shape_manager_v1"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "wp_fractional_scale_manager_v1"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "wp_viewporter"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "wp_presentation"
+max_version = 2
+availability = "commit-scoped-monotonic-feedback-after-kms-commit"
+
+[[global]]
+name = "xdg_activation_v1"
+max_version = 1
+availability = "fresh-input-authorized-one-shot-tokens"
+
+[[global]]
+name = "ext_session_lock_manager_v1"
+max_version = 1
+availability = "blank-first-kms-presented-secure-lock"
+
+[[global]]
+name = "zwp_relative_pointer_manager_v1"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "zwp_pointer_constraints_v1"
+max_version = 1
+availability = "focused-pointer-lock-and-confinement"
+
+[[global]]
+name = "zwp_idle_inhibit_manager_v1"
+max_version = 1
+availability = "always"
+
+[[global]]
+name = "wl_output"
+max_version = 4
+availability = "per-output"
+
+[[global]]
+name = "wl_seat"
+max_version = 9
+availability = "per-seat"
+
+[[global]]
+name = "zwp_linux_dmabuf_v1"
+max_version = 3
+availability = "exact-vulkan-format-modifier-capabilities"
+
+[[global]]
+name = "zwp_linux_explicit_synchronization_v1"
+max_version = 2
+availability = "render-path-supports-sync-fd-acquire-release"
+
+[[understood_source]]
+name = "wayland"
+path = "wayland/src/wayland.xml"
+
+[[understood_source]]
+name = "xdg-shell"
+path = "stable/xdg-shell/xdg-shell.xml"
+
+[[understood_source]]
+name = "viewporter"
+path = "stable/viewporter/viewporter.xml"
+
+[[understood_source]]
+name = "presentation-time"
+path = "stable/presentation-time/presentation-time.xml"
+
+[[understood_source]]
+name = "linux-dmabuf-v1"
+path = "stable/linux-dmabuf/linux-dmabuf-v1.xml"
+
+[[understood_source]]
+name = "xdg-decoration-unstable-v1"
+path = "unstable/xdg-decoration/xdg-decoration-unstable-v1.xml"
+
+[[understood_source]]
+name = "cursor-shape-v1"
+path = "staging/cursor-shape/cursor-shape-v1.xml"
+
+[[understood_source]]
+name = "fractional-scale-v1"
+path = "staging/fractional-scale/fractional-scale-v1.xml"
+
+[[understood_source]]
+name = "relative-pointer-unstable-v1"
+path = "unstable/relative-pointer/relative-pointer-unstable-v1.xml"
+
+[[understood_source]]
+name = "pointer-constraints-unstable-v1"
+path = "unstable/pointer-constraints/pointer-constraints-unstable-v1.xml"
+
+[[understood_source]]
+name = "idle-inhibit-unstable-v1"
+path = "unstable/idle-inhibit/idle-inhibit-unstable-v1.xml"
+
+[[understood_source]]
+name = "xdg-activation-v1"
+path = "staging/xdg-activation/xdg-activation-v1.xml"
+
+[[understood_source]]
+name = "ext-session-lock-v1"
+path = "staging/ext-session-lock/ext-session-lock-v1.xml"
+
+[[understood_source]]
+name = "linux-explicit-synchronization-unstable-v1"
+path = "unstable/linux-explicit-synchronization/linux-explicit-synchronization-unstable-v1.xml"

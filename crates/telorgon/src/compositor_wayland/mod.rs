@@ -1,0 +1,56 @@
+//! Telorgon-owned Wayland protocol state and Linux compositor runtime.
+
+mod buffer;
+mod core;
+mod data_device;
+mod id;
+mod object;
+mod output;
+mod region;
+mod seat;
+mod serial;
+mod shell_export;
+mod subsurface;
+mod surface;
+mod synchronization;
+mod world;
+mod xdg;
+
+#[cfg(target_os = "linux")]
+mod native;
+
+pub use buffer::{
+    BufferDescriptor, BufferError, DmaBufDescriptor, DmaBufFlags, DmaBufPlane, ShmBuffer,
+    ShmFormat, ShmPool,
+};
+pub use core::{CompositorAction, CompositorCore, CompositorCoreError};
+pub use data_device::{
+    DataAction, DataDeviceError, DataDeviceState, DataOffer, DataSource, MimeType,
+};
+pub use id::{ClientId, ProtocolObjectId, WaylandBufferId, WaylandSurfaceId};
+#[cfg(target_os = "linux")]
+pub use native::{
+    DmaBufFormat, DmaBufImage, NativeCompositor, NativeCompositorError, PointerConstraintKind,
+    PointerConstraintState, ShmImage, ViewportSource, ViewportState,
+};
+pub use object::{ObjectMetadata, ObjectRegistry, ObjectRegistryError, ProtocolObjectKind};
+pub use output::{OutputDescription, OutputError, OutputMode, OutputState, OutputTransform};
+pub use region::{Region, RegionError};
+pub use seat::{
+    ButtonState, CursorImage, KeyboardFocus, PointerFocus, SeatCapabilities, SeatState,
+};
+pub use serial::{SerialKind, SerialLedger, SerialRecord, SerialValidationError};
+pub use shell_export::{ShellSurfaceExport, SurfaceExportError};
+pub use subsurface::{SubsurfaceError, SubsurfaceGraph, SubsurfacePosition};
+pub use surface::{
+    BufferAttachment, BufferTransform, CommitOutcome, SurfaceCommit, SurfaceError, SurfaceRole,
+    SurfaceState, SurfaceStateSnapshot,
+};
+pub use synchronization::{
+    BufferRelease, BufferUseError, BufferUseId, BufferUseTracker, SurfaceFrameCallback,
+};
+pub use world::{ClientLimits, WaylandWorld, WaylandWorldError};
+pub use xdg::{
+    DecorationMode, ResizeEdge, ToplevelState, XdgConfigure, XdgError, XdgPopupState,
+    XdgPositioner, XdgSurfaceState, XdgToplevelState,
+};

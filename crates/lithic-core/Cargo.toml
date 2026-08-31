@@ -1,7 +1,0 @@
-[package]
-name = "lithic-core"
-version.workspace = true
-edition.workspace = true
-
-[lib]
-name = "lithic_core"

@@ -1,7 +1,0 @@
-[package]
-name = "lithic-theme-build"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-lithic-theme.workspace = true

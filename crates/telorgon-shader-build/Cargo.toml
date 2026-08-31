@@ -1,0 +1,16 @@
+[package]
+name = "telorgon-shader-build"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+license.workspace = true
+readme.workspace = true
+publish = false
+
+[dependencies]
+rspirv = "0.13"
+serde.workspace = true
+sha2.workspace = true
+shaderc = "0.10"
+spirv-tools = "0.13"
+toml.workspace = true

@@ -1,0 +1,618 @@
+#![cfg(all(
+    feature = "application-software",
+    any(
+        feature = "application-vulkan-windows",
+        feature = "desktop-wayland-linux",
+        feature = "embedded-vulkan"
+    )
+))]
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use telorgon::core::{ColorRgba8, RectF, RectI, SizeF, SizeI};
+use telorgon::gpu_abi::{GpuBoxInstance, GpuSpatial};
+use telorgon::layout::{ClipId, SpatialId};
+use telorgon::render::{
+    BatchKey, BlendMode, BoxInstance, DrawItem, GlyphInstance, ImageAlphaMode, ImageColorEncoding,
+    ImageId, ImageInstance, ImageResource, MaterialInstance, MaterialKind, MaterialResource,
+    PipelineKind, PrimitiveKind, ReadbackFormat, ReadbackRequest, RenderBackend, RenderClip,
+    RenderRequest, RenderScene, RenderSpatialNode, TargetLoad, TargetStore,
+};
+use telorgon::renderer_software::{SoftwareRenderer, SoftwareSurface, SoftwareTarget};
+use telorgon::renderer_vulkan::{
+    DeviceSelection, OffscreenVulkanTarget, VulkanConfig, VulkanDevice, VulkanInstance,
+};
+use telorgon::scene::NodeId;
+use telorgon::text::AtlasPageUpdate;
+use telorgon::ui::MaterialId;
+
+#[test]
+#[ignore = "requires TELORGON_TEST_MODE=developer-hardware and a non-CPU Vulkan 1.3 adapter"]
+fn box_shader_executes_on_real_vulkan_hardware() {
+    assert_eq!(
+        std::env::var("TELORGON_TEST_MODE").as_deref(),
+        Ok("developer-hardware"),
+        "hardware test must be selected explicitly"
+    );
+    let config = VulkanConfig {
+        enable_validation: true,
+        ..VulkanConfig::default()
+    };
+    let instance = VulkanInstance::load(&config, &[]).expect("load Vulkan 1.3 with validation");
+    let adapters = instance.adapters().expect("enumerate Vulkan adapters");
+    let selection = DeviceSelection::best(&adapters)
+        .unwrap_or_else(|| panic!("no eligible non-CPU Vulkan adapter; reports: {adapters:#?}"));
+    let device = VulkanDevice::create_owned(instance.clone(), &config, &selection, None)
+        .expect("create Vulkan device");
+    let target = OffscreenVulkanTarget::new(
+        &device,
+        SizeI {
+            width: 16,
+            height: 16,
+        },
+    )
+    .expect("create offscreen target");
+
+    let node = NodeId::new(0, 1);
+    let mut source = RenderScene::default();
+    source.extent = SizeF {
+        width: 16.0,
+        height: 16.0,
+    };
+    source.spatial_nodes.upsert(
+        node,
+        RenderSpatialNode {
+            id: SpatialId(0),
+            transform: telorgon::core::Affine2D::IDENTITY,
+        },
+    );
+    let box_instance = BoxInstance {
+        node,
+        rect: RectF {
+            x: 4.0,
+            y: 4.0,
+            width: 8.0,
+            height: 8.0,
+        },
+        view_bounds: RectF {
+            x: 4.0,
+            y: 4.0,
+            width: 8.0,
+            height: 8.0,
+        },
+        background: Some(ColorRgba8::rgba(255, 0, 0, 255)),
+        border: Default::default(),
+        outline: Default::default(),
+        corner_radii: Default::default(),
+        shadows: Default::default(),
+        opacity: 1.0,
+        clip: ClipId(0),
+        spatial: SpatialId(0),
+    };
+    source.boxes.upsert(node, box_instance.clone());
+    source.set_draw_order(vec![DrawItem {
+        kind: PrimitiveKind::Box,
+        index: 0,
+        batch: BatchKey {
+            pipeline: PipelineKind::AnalyticBox,
+            resource: 0,
+            clip: ClipId(0),
+            blend: BlendMode::Alpha,
+            target: 0,
+        },
+    }]);
+    let delta = source.take_delta().expect("box scene delta");
+    let mut scene = device.create_scene().expect("create Vulkan scene");
+    device
+        .apply_scene_delta(&mut scene, &delta)
+        .expect("apply Vulkan scene delta");
+
+    let mut frame = device.begin_owned_frame().expect("begin Vulkan frame");
+    let (initial_stats, pending) = {
+        let mut context = frame.context_mut();
+        let stats = device
+            .render(
+                &mut scene,
+                &mut context,
+                &target.target(),
+                &RenderRequest {
+                    force: true,
+                    load: TargetLoad::Clear(ColorRgba8::rgba(0, 0, 0, 255)),
+                    store: TargetStore::Store,
+                    region: None,
+                },
+            )
+            .expect("record Vulkan box rendering");
+        let pending = context
+            .record_readback(
+                &target.target(),
+                &ReadbackRequest {
+                    region: RectI {
+                        x: 0,
+                        y: 0,
+                        width: 16,
+                        height: 16,
+                    },
+                    format: ReadbackFormat::Rgba8,
+                },
+            )
+            .expect("record Vulkan readback");
+        (stats, pending)
+    };
+    assert_eq!(initial_stats.buffer_allocations, 3);
+    assert_eq!(initial_stats.buffer_copies, 3);
+    assert_eq!(initial_stats.descriptor_writes, 3);
+    assert_eq!(
+        initial_stats.upload_bytes_recorded,
+        (size_of::<GpuBoxInstance>() + size_of::<GpuSpatial>() + size_of::<u32>()) as u64
+    );
+    assert_eq!(initial_stats.batches, 1);
+    assert_eq!(initial_stats.draws, 1);
+    assert_eq!(scene.metrics().buffer_allocations, 3);
+    assert_eq!(scene.metrics().buffer_growths, 0);
+    assert!(device.memory_metrics().device_local_reserved_bytes > 0);
+    let receipt = frame
+        .finish()
+        .expect("finish Vulkan frame")
+        .submit()
+        .expect("submit Vulkan frame");
+    let image = pending
+        .bind_to_submission(receipt)
+        .expect("bind readback completion")
+        .wait(Duration::from_secs(10))
+        .expect("complete Vulkan readback");
+
+    assert_eq!(
+        &image.pixels[(8 * 16 + 8) * 4..(8 * 16 + 8) * 4 + 4],
+        &[255, 0, 0, 255]
+    );
+    assert_eq!(&image.pixels[0..4], &[0, 0, 0, 255]);
+
+    let mut changed_box = box_instance;
+    changed_box.opacity = 0.5;
+    source.boxes.upsert(node, changed_box);
+    let changed_delta = source.take_delta().expect("single box property delta");
+    let update = device
+        .apply_scene_delta(&mut scene, &changed_delta)
+        .expect("apply single box property delta");
+    assert_eq!(
+        update.upload_bytes_queued,
+        size_of::<GpuBoxInstance>() as u64
+    );
+    assert_eq!(update.descriptor_writes_queued, 0);
+
+    let mut changed_frame = device
+        .begin_owned_frame()
+        .expect("begin changed retained frame");
+    let changed_stats = {
+        let mut context = changed_frame.context_mut();
+        device
+            .render(
+                &mut scene,
+                &mut context,
+                &target.target(),
+                &RenderRequest {
+                    force: true,
+                    load: TargetLoad::Clear(ColorRgba8::rgba(0, 0, 0, 255)),
+                    store: TargetStore::Store,
+                    region: None,
+                },
+            )
+            .expect("record single-property retained update")
+    };
+    assert_eq!(
+        changed_stats.upload_bytes_recorded,
+        size_of::<GpuBoxInstance>() as u64
+    );
+    assert_eq!(changed_stats.buffer_copies, 1);
+    assert_eq!(changed_stats.buffer_allocations, 0);
+    assert_eq!(changed_stats.descriptor_writes, 0);
+    let mut changed_receipt = changed_frame
+        .finish()
+        .expect("finish changed retained frame")
+        .submit()
+        .expect("submit changed retained frame");
+    changed_receipt
+        .wait(Duration::from_secs(10))
+        .expect("complete changed retained frame");
+
+    let mut warm_frame = device
+        .begin_owned_frame()
+        .expect("begin warm retained frame");
+    let warm_stats = {
+        let mut context = warm_frame.context_mut();
+        device
+            .render(
+                &mut scene,
+                &mut context,
+                &target.target(),
+                &RenderRequest {
+                    force: true,
+                    load: TargetLoad::Clear(ColorRgba8::rgba(0, 0, 0, 255)),
+                    store: TargetStore::Store,
+                    region: None,
+                },
+            )
+            .expect("record warm retained frame")
+    };
+    assert_eq!(warm_stats.upload_bytes_recorded, 0);
+    assert_eq!(warm_stats.buffer_copies, 0);
+    assert_eq!(warm_stats.buffer_allocations, 0);
+    assert_eq!(warm_stats.descriptor_writes, 0);
+    assert_eq!(scene.metrics().buffer_allocations, 3);
+    assert_eq!(scene.metrics().buffer_growths, 0);
+    let mut warm_receipt = warm_frame
+        .finish()
+        .expect("finish warm retained frame")
+        .submit()
+        .expect("submit warm retained frame");
+    warm_receipt
+        .wait(Duration::from_secs(10))
+        .expect("complete warm retained frame");
+
+    let deferred = device
+        .begin_owned_frame()
+        .expect("begin deferred-retirement frame")
+        .finish()
+        .expect("finish deferred-retirement frame")
+        .submit()
+        .expect("submit deferred-retirement frame");
+    assert!(deferred.completion().value() > 0);
+    drop(deferred);
+    drop(
+        device
+            .begin_owned_frame()
+            .expect("begin frame while prior resources retire asynchronously"),
+    );
+    assert_eq!(
+        instance.diagnostics().error_count(),
+        0,
+        "validation messages: {:#?}",
+        instance.diagnostics().messages()
+    );
+    assert_eq!(
+        instance.diagnostics().warning_count(),
+        0,
+        "validation messages: {:#?}",
+        instance.diagnostics().messages()
+    );
+    println!(
+        "TELORGON_EVIDENCE case=vulkan.retained-box-dirty-upload-and-warm-reuse layer=E4 outcome=pass changed_upload_bytes={} changed_buffer_copies={} changed_allocations={} warm_upload_bytes={} warm_allocations={} validation_errors=0",
+        changed_stats.upload_bytes_recorded,
+        changed_stats.buffer_copies,
+        changed_stats.buffer_allocations,
+        warm_stats.upload_bytes_recorded,
+        warm_stats.buffer_allocations,
+    );
+}
+
+#[test]
+#[ignore = "requires TELORGON_TEST_MODE=developer-hardware and a non-CPU Vulkan 1.3 adapter"]
+fn mixed_scene_matches_the_software_reference_on_real_vulkan_hardware() {
+    assert_eq!(
+        std::env::var("TELORGON_TEST_MODE").as_deref(),
+        Ok("developer-hardware"),
+        "hardware test must be selected explicitly"
+    );
+    let config = VulkanConfig {
+        enable_validation: true,
+        ..VulkanConfig::default()
+    };
+    let instance = VulkanInstance::load(&config, &[]).expect("load Vulkan 1.3 with validation");
+    let adapters = instance.adapters().expect("enumerate Vulkan adapters");
+    let selection = DeviceSelection::best(&adapters)
+        .unwrap_or_else(|| panic!("no eligible non-CPU Vulkan adapter; reports: {adapters:#?}"));
+    let device = VulkanDevice::create_owned(instance.clone(), &config, &selection, None)
+        .expect("create Vulkan device");
+    let extent_i = SizeI {
+        width: 16,
+        height: 8,
+    };
+    let target = OffscreenVulkanTarget::new(&device, extent_i).expect("create offscreen target");
+
+    let mut source = RenderScene::default();
+    source.extent = SizeF {
+        width: 16.0,
+        height: 8.0,
+    };
+    let box_node = NodeId::new(0, 1);
+    let image_node = NodeId::new(1, 1);
+    let glyph_node = NodeId::new(2, 1);
+    let material_node = NodeId::new(3, 1);
+    source.spatial_nodes.upsert(
+        box_node,
+        RenderSpatialNode {
+            id: SpatialId(0),
+            transform: telorgon::core::Affine2D::IDENTITY,
+        },
+    );
+    source.clips.upsert(
+        material_node,
+        RenderClip {
+            id: ClipId(1),
+            rect: RectF {
+                x: 7.0,
+                y: 1.0,
+                width: 7.0,
+                height: 2.0,
+            },
+            corner_radii: telorgon::ui::CornerRadii::all(1.0),
+        },
+    );
+    source.boxes.upsert(
+        box_node,
+        BoxInstance {
+            node: box_node,
+            rect: RectF {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 8.0,
+            },
+            view_bounds: RectF {
+                x: 0.0,
+                y: 0.0,
+                width: 16.0,
+                height: 8.0,
+            },
+            background: Some(ColorRgba8::rgba(96, 96, 96, 255)),
+            border: Default::default(),
+            outline: Default::default(),
+            corner_radii: telorgon::ui::CornerRadii::all(2.0),
+            shadows: Default::default(),
+            opacity: 1.0,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        },
+    );
+    source
+        .set_image_resource(ImageResource {
+            image: ImageId(9),
+            content_version: 1,
+            extent: SizeI {
+                width: 2,
+                height: 2,
+            },
+            color_encoding: ImageColorEncoding::Srgb,
+            alpha_mode: ImageAlphaMode::Opaque,
+            pixels_rgba8: Arc::from([
+                255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+            ]),
+        })
+        .unwrap();
+    source.images.upsert(
+        image_node,
+        ImageInstance {
+            node: image_node,
+            image: ImageId(9),
+            rect: RectF {
+                x: 1.0,
+                y: 1.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            view_bounds: RectF {
+                x: 1.0,
+                y: 1.0,
+                width: 2.0,
+                height: 2.0,
+            },
+            content_version: 1,
+            opacity: 1.0,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        },
+    );
+    source.set_atlas_updates(
+        SizeI {
+            width: 2,
+            height: 2,
+        },
+        vec![AtlasPageUpdate {
+            page: 0,
+            x: 0,
+            y: 0,
+            width: 2,
+            height: 2,
+            pixels_a8: Arc::from([255, 255, 255, 255]),
+        }],
+    );
+    source.set_glyphs(vec![GlyphInstance {
+        node: glyph_node,
+        rect: RectF {
+            x: 4.0,
+            y: 1.0,
+            width: 2.0,
+            height: 2.0,
+        },
+        view_bounds: RectF {
+            x: 4.0,
+            y: 1.0,
+            width: 2.0,
+            height: 2.0,
+        },
+        atlas_x: 0,
+        atlas_y: 0,
+        color: ColorRgba8::rgba(255, 255, 0, 255),
+        opacity: 1.0,
+        clip: ClipId(0),
+        spatial: SpatialId(0),
+    }]);
+    source.set_material_resource(MaterialResource {
+        material: MaterialId(5),
+        content_version: 1,
+        kind: MaterialKind::LinearGradientHorizontal,
+        colors: [
+            ColorRgba8::rgba(255, 0, 0, 255),
+            ColorRgba8::rgba(0, 0, 255, 255),
+        ],
+    });
+    source.materials.upsert(
+        material_node,
+        MaterialInstance {
+            node: material_node,
+            material: MaterialId(5),
+            rect: RectF {
+                x: 7.0,
+                y: 1.0,
+                width: 8.0,
+                height: 2.0,
+            },
+            view_bounds: RectF {
+                x: 7.0,
+                y: 1.0,
+                width: 8.0,
+                height: 2.0,
+            },
+            opacity: 1.0,
+            clip: ClipId(1),
+            spatial: SpatialId(0),
+        },
+    );
+    source.set_draw_order(vec![
+        draw(
+            PrimitiveKind::Box,
+            PipelineKind::AnalyticBox,
+            0,
+            0,
+            ClipId(0),
+        ),
+        draw(PrimitiveKind::Image, PipelineKind::Image, 0, 9, ClipId(0)),
+        draw(PrimitiveKind::Glyph, PipelineKind::Glyph, 0, 0, ClipId(0)),
+        draw(
+            PrimitiveKind::Material,
+            PipelineKind::Material,
+            0,
+            5,
+            ClipId(1),
+        ),
+    ]);
+    let delta = source.take_delta().expect("mixed scene delta");
+
+    let software = SoftwareRenderer;
+    let mut software_scene = software.create_scene().unwrap();
+    software
+        .apply_scene_delta(&mut software_scene, &delta)
+        .unwrap();
+    let mut software_surface = SoftwareSurface::default();
+    let software_target = SoftwareTarget::new(telorgon::render::RenderTargetInfo::full(extent_i));
+    {
+        let mut frame = software_surface.begin_frame();
+        software
+            .render(
+                &mut software_scene,
+                &mut frame,
+                &software_target,
+                &RenderRequest {
+                    force: true,
+                    load: TargetLoad::Clear(ColorRgba8::rgba(0, 0, 0, 255)),
+                    store: TargetStore::Store,
+                    region: None,
+                },
+            )
+            .unwrap();
+    }
+
+    let mut scene = device.create_scene().expect("create Vulkan scene");
+    device
+        .apply_scene_delta(&mut scene, &delta)
+        .expect("apply mixed Vulkan delta");
+    let mut frame = device
+        .begin_owned_frame()
+        .expect("begin mixed Vulkan frame");
+    let pending = {
+        let mut context = frame.context_mut();
+        let stats = device
+            .render(
+                &mut scene,
+                &mut context,
+                &target.target(),
+                &RenderRequest {
+                    force: true,
+                    load: TargetLoad::Clear(ColorRgba8::rgba(0, 0, 0, 255)),
+                    store: TargetStore::Store,
+                    region: None,
+                },
+            )
+            .expect("record mixed Vulkan rendering");
+        assert_eq!(stats.draws, 4);
+        context
+            .record_readback(
+                &target.target(),
+                &ReadbackRequest {
+                    region: RectI {
+                        x: 0,
+                        y: 0,
+                        width: 16,
+                        height: 8,
+                    },
+                    format: ReadbackFormat::Rgba8,
+                },
+            )
+            .expect("record mixed Vulkan readback")
+    };
+    let receipt = frame.finish().unwrap().submit().unwrap();
+    let hardware = pending
+        .bind_to_submission(receipt)
+        .unwrap()
+        .wait(Duration::from_secs(10))
+        .unwrap();
+    let converted = linear_rgba_to_srgba(&hardware.pixels);
+    let reference = software_surface.pixels_rgba8();
+    let maximum_error = converted
+        .iter()
+        .zip(reference)
+        .map(|(actual, expected)| actual.abs_diff(*expected))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        maximum_error <= 3,
+        "maximum mixed-scene channel error was {maximum_error}"
+    );
+    assert_eq!(
+        instance.diagnostics().error_count(),
+        0,
+        "validation messages: {:#?}",
+        instance.diagnostics().messages()
+    );
+    println!(
+        "TELORGON_EVIDENCE case=vulkan.mixed-box-glyph-image-material-clip-spatial-reference layer=E4 outcome=pass draws=4 max_channel_error={maximum_error} validation_errors=0"
+    );
+}
+
+fn draw(
+    kind: PrimitiveKind,
+    pipeline: PipelineKind,
+    index: u32,
+    resource: u32,
+    clip: ClipId,
+) -> DrawItem {
+    DrawItem {
+        kind,
+        index,
+        batch: BatchKey {
+            pipeline,
+            resource,
+            clip,
+            blend: BlendMode::Alpha,
+            target: 0,
+        },
+    }
+}
+
+fn linear_rgba_to_srgba(pixels: &[u8]) -> Vec<u8> {
+    let mut converted = pixels.to_vec();
+    for pixel in converted.chunks_exact_mut(4) {
+        for channel in &mut pixel[..3] {
+            let linear = f32::from(*channel) / 255.0;
+            let srgb = if linear <= 0.003_130_8 {
+                linear * 12.92
+            } else {
+                1.055 * linear.powf(1.0 / 2.4) - 0.055
+            };
+            *channel = (srgb * 255.0).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    converted
+}

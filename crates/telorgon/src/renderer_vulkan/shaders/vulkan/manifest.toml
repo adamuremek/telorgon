@@ -1,0 +1,78 @@
+schema_version = 1
+interface_major = 2
+interface_minor = 0
+target = "vulkan1.3-spirv1.6"
+source_config_hash = "981dd26af327ed61d87bc384a17826b6fabae63ddb9948b6cbf4a049f1936409"
+bundle_hash = "327bb1fb50dd43479913e09351c2cda8663f12102cb25d63b8f55d929f31d1cd"
+
+[[shader]]
+name = "box_vertex"
+source = "shaders/vulkan/box/box.vert"
+source_hash = "be79f4689ef6b14a6771759acc2d42abc9d3ce81988bb801f345db46e0f80057"
+artifact = "box.vert.spv"
+artifact_hash = "3bdd3491bf549d4bb6c8b248ead08befd8099078f5ecf1641ae2b8def3f141df"
+stage = "vertex"
+entry_point = "main"
+
+[[shader]]
+name = "box_fragment"
+source = "shaders/vulkan/box/box.frag"
+source_hash = "7bd992b6142c2c4090a65df7c957ddaade07e9a8432feb91c3f1434083249188"
+artifact = "box.frag.spv"
+artifact_hash = "b730bc9ae067b3c29aafd5dd05791446f10daacf7b3440f141ccf5fdd4da0bf9"
+stage = "fragment"
+entry_point = "main"
+
+[[shader]]
+name = "glyph_vertex"
+source = "shaders/vulkan/box/glyph.vert"
+source_hash = "b1945e564522ccc4ffde06bd1afd0acd1ad12a74e3fc915901b51ef946a87098"
+artifact = "glyph.vert.spv"
+artifact_hash = "999e530eeafadc9465abbd15523c15177a97d01a25f5c9c823567bafa6380656"
+stage = "vertex"
+entry_point = "main"
+
+[[shader]]
+name = "glyph_fragment"
+source = "shaders/vulkan/box/glyph.frag"
+source_hash = "265b8d2631208da6880e0e6095eefd2df79b177059f6341f14fc49f4f0e47231"
+artifact = "glyph.frag.spv"
+artifact_hash = "2845d8acce83c5a70f3291f1d9237a545d268b94dcf4b2cf5f8b5235c05292b7"
+stage = "fragment"
+entry_point = "main"
+
+[[shader]]
+name = "image_vertex"
+source = "shaders/vulkan/box/image.vert"
+source_hash = "2cad14281ab003b582b2e6d2ee1e13d5138976d2880059d6c1272e46f33f3a74"
+artifact = "image.vert.spv"
+artifact_hash = "0b02a16d34e2e2a6cf3973a6665748315154eb16107ecaffc43814629964f47b"
+stage = "vertex"
+entry_point = "main"
+
+[[shader]]
+name = "image_fragment"
+source = "shaders/vulkan/box/image.frag"
+source_hash = "689b91bd8738192de5ca8cf514a1dadd3beb8934d9b6b3ba160b6be285825562"
+artifact = "image.frag.spv"
+artifact_hash = "c9b4ae27c60cf19284ba931b89cdc0dc77601f9cee7b900bbb12b6f3a6cbbd7f"
+stage = "fragment"
+entry_point = "main"
+
+[[shader]]
+name = "material_vertex"
+source = "shaders/vulkan/box/material.vert"
+source_hash = "07e03644d2de74512b2f12fec8324d772d2d87e09752f00679f9522e5c25eb98"
+artifact = "material.vert.spv"
+artifact_hash = "3bca7cb419fe89471c49558500be274fcb4a21d9f76993ee1d7521bdb2e5b307"
+stage = "vertex"
+entry_point = "main"
+
+[[shader]]
+name = "material_fragment"
+source = "shaders/vulkan/box/material.frag"
+source_hash = "a8d7471eed57d9d588f313e94034feb7f5b0c7528f0c806f29c4f46f187e95bb"
+artifact = "material.frag.spv"
+artifact_hash = "dbafa9f3adc0e5e030a9e0fe932d32340258e0568f40dcb56cbe4a928db08693"
+stage = "fragment"
+entry_point = "main"

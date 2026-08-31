@@ -1,7 +1,0 @@
-[package]
-name = "lithic-render"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-lithic-core.workspace = true

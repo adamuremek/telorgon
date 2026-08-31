@@ -1,7 +1,0 @@
-[package]
-name = "lithic-ui"
-version.workspace = true
-edition.workspace = true
-
-[dependencies]
-lithic-core.workspace = true
