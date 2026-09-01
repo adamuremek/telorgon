@@ -3212,7 +3212,7 @@ window.addEventListener("resize", () => {
   scheduleRender();
 });
 
-updatePointerMovesButton();
+renderInputRecordingControls();
 applyInspectorWidth();
 applyStoredTableSorts(document);
 connect();

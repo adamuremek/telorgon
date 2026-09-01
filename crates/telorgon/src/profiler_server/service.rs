@@ -720,6 +720,8 @@ mod tests {
         assert!(PROFILER_JS.contains("set_input_recording"));
         assert!(PROFILER_JS.contains("renderInputPerformance"));
         assert!(PROFILER_JS.contains("input_recording_sources"));
+        assert!(PROFILER_JS.contains("renderInputRecordingControls();"));
+        assert!(!PROFILER_JS.contains("updatePointerMovesButton"));
         assert!(PROFILER_JS.contains("if (state.paused) return;"));
         assert!(PROFILER_JS.contains("followLiveSelection"));
         assert!(PROFILER_JS.contains("button.setAttribute(\"aria-label\", label)"));
