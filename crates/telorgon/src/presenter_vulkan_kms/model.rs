@@ -10,6 +10,9 @@ const fn drm_fourcc(a: u8, b: u8, c: u8, d: u8) -> u32 {
 pub const DRM_FORMAT_ARGB8888: u32 = drm_fourcc(b'A', b'R', b'2', b'4');
 pub const DRM_FORMAT_XRGB8888: u32 = drm_fourcc(b'X', b'R', b'2', b'4');
 pub const DRM_FORMAT_MOD_LINEAR: u64 = 0;
+pub const DRM_FORMAT_MOD_INVALID: u64 = u64::MAX;
+pub const DRM_PLANE_TYPE_PRIMARY: u64 = 1;
+pub const DRM_PLANE_TYPE_CURSOR: u64 = 2;
 
 macro_rules! id {
     ($name:ident) => {

@@ -22,8 +22,10 @@ use crate::platform_linux::{
     KeyDirection, LibInputContext, LinuxInputEventKind, LinuxSeat, SeatState, XkbKeyboard,
 };
 use crate::presenter_vulkan_kms::{
-    ConnectorStatus, DRM_FORMAT_MOD_LINEAR, DRM_FORMAT_XRGB8888, FrameSlot, FrameSlotState,
-    GbmBuffer, GbmDevice, KmsCrtcId, KmsDevice, KmsPropertyObject, KmsTopology, ScanoutFormat,
+    AtomicRequest, ConnectorStatus, DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR,
+    DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, DRM_PLANE_TYPE_PRIMARY, FrameSlot, FrameSlotState,
+    GbmBuffer, GbmDevice, KmsCrtcId, KmsDevice, KmsFramebuffer, KmsObjectProperties, KmsPlaneId,
+    KmsPropertyObject, KmsTopology, ScanoutFormat,
 };
 use crate::render::{
     BatchKey, BlendMode, DrawItem, ImageAlphaMode, ImageColorEncoding, ImageId, ImageInstance,
@@ -72,8 +74,6 @@ struct RenderedCursor {
 #[cfg(feature = "profiler")]
 #[derive(Clone, Copy)]
 enum PointerCursorPath {
-    Hardware,
-    HardwareFailed,
     SoftwareDamage,
     Hidden,
     Deferred,
@@ -87,7 +87,6 @@ struct PointerBatchProbe {
     dispatch_duration_ns: u64,
     handler_started: Option<Instant>,
     events: u64,
-    oldest_event_us: Option<u64>,
     newest_event_us: Option<u64>,
 }
 
@@ -103,7 +102,6 @@ impl PointerBatchProbe {
             dispatch_duration_ns: 0,
             handler_started: None,
             events: 0,
-            oldest_event_us: None,
             newest_event_us: None,
         }
     }
@@ -120,10 +118,6 @@ impl PointerBatchProbe {
             return;
         }
         self.events = self.events.saturating_add(1);
-        self.oldest_event_us = Some(
-            self.oldest_event_us
-                .map_or(event_time_us, |oldest| oldest.min(event_time_us)),
-        );
         self.newest_event_us = Some(
             self.newest_event_us
                 .map_or(event_time_us, |newest| newest.max(event_time_us)),
@@ -138,12 +132,7 @@ impl PointerBatchProbe {
         self.enabled && self.events != 0
     }
 
-    fn finish(
-        &self,
-        path: PointerCursorPath,
-        cursor_ioctl_duration_ns: Option<u64>,
-        cursor_submitted_us: Option<u64>,
-    ) {
+    fn finish(&self, path: PointerCursorPath) {
         if !self.enabled || self.events == 0 {
             return;
         }
@@ -160,33 +149,7 @@ impl PointerBatchProbe {
             self.handler_started
                 .map_or(0, |started| duration_ns(started.elapsed())),
         );
-        if let Some(duration) = cursor_ioctl_duration_ns {
-            crate::profiler::record_instant_value(
-                "input.libinput.pointer_motion.pipeline.cursor_ioctl_duration_ns",
-                duration,
-            );
-        }
-        if let Some(submitted_us) = cursor_submitted_us {
-            if let Some(newest) = self.newest_event_us {
-                crate::profiler::record_instant_value(
-                    "input.libinput.pointer_motion.pipeline.freshest_event_to_cursor_submit_ns",
-                    submitted_us.saturating_sub(newest).saturating_mul(1_000),
-                );
-            }
-            if let Some(oldest) = self.oldest_event_us {
-                crate::profiler::record_instant_value(
-                    "input.libinput.pointer_motion.pipeline.oldest_event_to_cursor_submit_ns",
-                    submitted_us.saturating_sub(oldest).saturating_mul(1_000),
-                );
-            }
-        }
         crate::profiler::record_instant(match path {
-            PointerCursorPath::Hardware => {
-                "input.libinput.pointer_motion.pipeline.path.hardware_cursor"
-            }
-            PointerCursorPath::HardwareFailed => {
-                "input.libinput.pointer_motion.pipeline.path.hardware_failed"
-            }
             PointerCursorPath::SoftwareDamage => {
                 "input.libinput.pointer_motion.pipeline.path.software_damage"
             }
@@ -219,48 +182,201 @@ fn record_pointer_event_latency(label: &'static str, event_time_us: u64) {
     }
 }
 
-struct HardwareCursor<'gbm, 'fd> {
+const HARDWARE_CURSOR_BUFFER_COUNT: usize = 3;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct CursorSnapshot {
+    serial: u64,
+    buffer: Option<usize>,
+    position: PointI,
+    hotspot: PointI,
+    visible: bool,
+}
+
+#[derive(Debug, Default)]
+struct CursorCommitTracker {
+    desired: CursorSnapshot,
+    applied_serial: u64,
+    current_buffer: Option<usize>,
+    in_flight: Option<CursorSnapshot>,
+    software_fallback_requested: bool,
+}
+
+impl CursorCommitTracker {
+    fn move_to(&mut self, position: PointI) {
+        if self.desired.position != position {
+            self.desired.position = position;
+            if self.desired.visible {
+                self.bump_serial();
+            }
+        }
+    }
+
+    fn show(&mut self, buffer: usize, hotspot: PointI) {
+        if !self.desired.visible
+            || self.desired.buffer != Some(buffer)
+            || self.desired.hotspot != hotspot
+        {
+            self.desired.visible = true;
+            self.desired.buffer = Some(buffer);
+            self.desired.hotspot = hotspot;
+            self.bump_serial();
+        }
+    }
+
+    fn hide(&mut self) {
+        if self.desired.visible {
+            self.desired.visible = false;
+            self.bump_serial();
+        }
+    }
+
+    fn request_software_fallback(&mut self) {
+        self.software_fallback_requested = true;
+        self.hide();
+    }
+
+    fn desired_submission(&self) -> Option<CursorSnapshot> {
+        (self.in_flight.is_none() && self.desired.serial != self.applied_serial)
+            .then_some(self.desired)
+    }
+
+    fn mark_submitted(&mut self, snapshot: CursorSnapshot) -> AppResult<()> {
+        if self.in_flight.is_some() || snapshot.serial != self.desired.serial {
+            return Err(AppError::new(
+                "atomic cursor submission did not match the desired cursor generation",
+            ));
+        }
+        self.in_flight = Some(snapshot);
+        Ok(())
+    }
+
+    fn mark_completed(&mut self, snapshot: CursorSnapshot) -> AppResult<()> {
+        if self.in_flight != Some(snapshot) {
+            return Err(AppError::new(
+                "DRM completed an unexpected atomic cursor generation",
+            ));
+        }
+        self.in_flight = None;
+        self.applied_serial = snapshot.serial;
+        self.current_buffer = snapshot.visible.then_some(snapshot.buffer).flatten();
+        Ok(())
+    }
+
+    fn reusable_buffer(&self, count: usize) -> Option<usize> {
+        let in_flight = self.in_flight.and_then(|snapshot| snapshot.buffer);
+        self.desired
+            .buffer
+            .filter(|buffer| Some(*buffer) != self.current_buffer && Some(*buffer) != in_flight)
+            .or_else(|| {
+                (0..count).find(|buffer| {
+                    Some(*buffer) != self.current_buffer && Some(*buffer) != in_flight
+                })
+            })
+    }
+
+    fn ready_to_retire(&self) -> bool {
+        self.software_fallback_requested
+            && self.current_buffer.is_none()
+            && self.in_flight.is_none()
+    }
+
+    fn bump_serial(&mut self) {
+        self.desired.serial = self.desired.serial.wrapping_add(1).max(1);
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingKmsCommit {
+    primary_slot: Option<usize>,
+    cursor: Option<CursorSnapshot>,
+    #[cfg(feature = "profiler")]
+    cursor_event_us: Option<u64>,
+}
+
+struct HardwareCursor<'gbm, 'kms, 'fd> {
+    // Framebuffers must be removed before the GBM buffers that back them are destroyed.
+    framebuffers: Vec<KmsFramebuffer<'kms>>,
     buffers: Vec<GbmBuffer<'gbm, 'fd>>,
     extent: SizeI,
-    current: usize,
-    visible: bool,
+    plane: KmsPlaneId,
+    properties: KmsObjectProperties,
+    has_hotspot_properties: bool,
+    state: CursorCommitTracker,
     image_signature: Option<u64>,
 }
 
-impl<'gbm, 'fd> HardwareCursor<'gbm, 'fd> {
-    fn new(gbm: &'gbm GbmDevice<'fd>, kms: &KmsDevice) -> AppResult<Self> {
+impl<'gbm, 'kms, 'fd> HardwareCursor<'gbm, 'kms, 'fd> {
+    fn new(
+        gbm: &'gbm GbmDevice<'fd>,
+        kms: &'kms KmsDevice,
+        plane: KmsPlaneId,
+        properties: KmsObjectProperties,
+    ) -> AppResult<Self> {
+        for name in [
+            "FB_ID", "CRTC_ID", "SRC_X", "SRC_Y", "SRC_W", "SRC_H", "CRTC_X", "CRTC_Y", "CRTC_W",
+            "CRTC_H",
+        ] {
+            if properties.named(name).is_none() {
+                return Err(AppError::new(format!(
+                    "DRM cursor plane has no required atomic property {name}"
+                )));
+            }
+        }
+        let has_hotspot_properties = kms.cursor_plane_hotspot_capable();
+        if has_hotspot_properties
+            && (properties.named("HOTSPOT_X").is_none() || properties.named("HOTSPOT_Y").is_none())
+        {
+            return Err(AppError::new(
+                "DRM cursor-hotspot capability was enabled without hotspot properties",
+            ));
+        }
         let extent = kms.cursor_size().map_err(app_error)?;
+        let mut buffers = Vec::with_capacity(HARDWARE_CURSOR_BUFFER_COUNT);
+        for _ in 0..HARDWARE_CURSOR_BUFFER_COUNT {
+            buffers.push(gbm.allocate_cursor(extent).map_err(app_error)?);
+        }
+        let framebuffers = buffers
+            .iter()
+            .map(|buffer| kms.add_framebuffer(buffer).map_err(app_error))
+            .collect::<AppResult<Vec<_>>>()?;
         Ok(Self {
-            buffers: vec![
-                gbm.allocate_cursor(extent).map_err(app_error)?,
-                gbm.allocate_cursor(extent).map_err(app_error)?,
-            ],
+            framebuffers,
+            buffers,
             extent,
-            current: 0,
-            visible: false,
+            plane,
+            properties,
+            has_hotspot_properties,
+            state: CursorCommitTracker::default(),
             image_signature: None,
         })
     }
 
-    fn set_image(
-        &mut self,
-        kms: &KmsDevice,
-        crtc: KmsCrtcId,
-        cursor: &RenderedCursor,
-    ) -> AppResult<()> {
-        if cursor.size.width > self.extent.width || cursor.size.height > self.extent.height {
+    fn set_image(&mut self, cursor: &RenderedCursor) -> AppResult<()> {
+        if cursor.size.width <= 0
+            || cursor.size.height <= 0
+            || cursor.size.width > self.extent.width
+            || cursor.size.height > self.extent.height
+        {
             return Err(AppError::new(
-                "cursor image exceeds the DRM hardware-cursor extent",
+                "cursor image has an invalid DRM hardware-cursor extent",
+            ));
+        }
+        let source_length = (cursor.size.width as usize)
+            .checked_mul(cursor.size.height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| AppError::new("cursor image byte length overflow"))?;
+        if cursor.rgba.len() != source_length {
+            return Err(AppError::new(
+                "cursor image pixels do not match its declared extent",
             ));
         }
         let signature = cursor_image_signature(cursor);
         if self.image_signature == Some(signature) {
-            if !self.visible {
-                let handle = self.buffers[self.current].handle().map_err(app_error)?;
-                kms.set_cursor(crtc, handle, self.extent, cursor.hotspot)
-                    .map_err(app_error)?;
-                self.visible = true;
-            }
+            let buffer = self.state.desired.buffer.ok_or_else(|| {
+                AppError::new("atomic cursor image signature has no staged buffer")
+            })?;
+            self.state.show(buffer, cursor.hotspot);
             return Ok(());
         }
         let mut pixels = vec![0_u8; self.extent.width as usize * self.extent.height as usize * 4];
@@ -279,41 +395,102 @@ impl<'gbm, 'fd> HardwareCursor<'gbm, 'fd> {
                 }
             }
         }
-        let next = (self.current + 1) % self.buffers.len();
+        let next = self
+            .state
+            .reusable_buffer(self.buffers.len())
+            .ok_or_else(|| AppError::new("no retired hardware-cursor buffer is available"))?;
         self.buffers[next]
             .map_write()
             .map_err(app_error)?
             .write_rgba8(&pixels)
             .map_err(app_error)?;
-        let handle = self.buffers[next].handle().map_err(app_error)?;
-        kms.set_cursor(crtc, handle, self.extent, cursor.hotspot)
-            .map_err(app_error)?;
-        self.current = next;
-        self.visible = true;
+        self.state.show(next, cursor.hotspot);
         self.image_signature = Some(signature);
         Ok(())
     }
 
-    fn move_to(&self, kms: &KmsDevice, crtc: KmsCrtcId, position: PointF) -> AppResult<()> {
-        if self.visible {
-            kms.move_cursor(
-                crtc,
-                PointI {
-                    x: position.x.round() as i32,
-                    y: position.y.round() as i32,
-                },
-            )
-            .map_err(app_error)?;
-        }
-        Ok(())
+    fn move_to(&mut self, position: PointF) {
+        self.state.move_to(PointI {
+            x: position.x.round() as i32,
+            y: position.y.round() as i32,
+        });
     }
 
-    fn hide(&mut self, kms: &KmsDevice, crtc: KmsCrtcId) -> AppResult<()> {
-        if self.visible {
-            kms.hide_cursor(crtc).map_err(app_error)?;
-            self.visible = false;
+    fn hide(&mut self) {
+        self.state.hide();
+    }
+
+    fn append_desired(
+        &self,
+        request: &mut AtomicRequest<'_>,
+        crtc: KmsCrtcId,
+    ) -> AppResult<Option<CursorSnapshot>> {
+        let Some(snapshot) = self.state.desired_submission() else {
+            return Ok(None);
+        };
+        if snapshot.visible {
+            let buffer = snapshot.buffer.ok_or_else(|| {
+                AppError::new("visible atomic cursor generation has no framebuffer")
+            })?;
+            let framebuffer = self.framebuffers.get(buffer).ok_or_else(|| {
+                AppError::new("atomic cursor generation names an invalid framebuffer")
+            })?;
+            let destination = RectI {
+                x: snapshot.position.x.saturating_sub(snapshot.hotspot.x),
+                y: snapshot.position.y.saturating_sub(snapshot.hotspot.y),
+                width: self.extent.width,
+                height: self.extent.height,
+            };
+            request
+                .set_plane(
+                    self.plane,
+                    &self.properties,
+                    crtc,
+                    framebuffer.id(),
+                    RectI {
+                        x: 0,
+                        y: 0,
+                        width: self.extent.width,
+                        height: self.extent.height,
+                    },
+                    destination,
+                )
+                .map_err(app_error)?;
+            if self.has_hotspot_properties {
+                request
+                    .set_cursor_hotspot(self.plane, &self.properties, snapshot.hotspot)
+                    .map_err(app_error)?;
+            }
+        } else {
+            request
+                .disable_plane(self.plane, &self.properties)
+                .map_err(app_error)?;
         }
-        Ok(())
+        Ok(Some(snapshot))
+    }
+
+    fn mark_submitted(&mut self, snapshot: CursorSnapshot) -> AppResult<()> {
+        self.state.mark_submitted(snapshot)
+    }
+
+    fn mark_completed(&mut self, snapshot: CursorSnapshot) -> AppResult<()> {
+        self.state.mark_completed(snapshot)
+    }
+
+    fn needs_commit(&self) -> bool {
+        self.state.desired_submission().is_some()
+    }
+
+    fn request_software_fallback(&mut self) {
+        self.state.request_software_fallback();
+    }
+
+    fn software_fallback_requested(&self) -> bool {
+        self.state.software_fallback_requested
+    }
+
+    fn ready_to_retire(&self) -> bool {
+        self.state.ready_to_retire()
     }
 }
 
@@ -957,7 +1134,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 && topology.planes.iter().any(|plane| {
                     plane.possible_crtcs_mask & mask != 0
                         && plane.formats.contains(&DRM_FORMAT_XRGB8888)
-                        && is_primary_plane(&kms, plane.id.get())
+                        && is_plane_type(&kms, plane.id.get(), DRM_PLANE_TYPE_PRIMARY)
                 })
         })
         .ok_or_else(|| AppError::new("no KMS CRTC has an XRGB8888 primary-plane candidate"))?;
@@ -969,7 +1146,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .find(|plane| {
             plane.possible_crtcs_mask & (1_u32.checked_shl(crtc_index as u32).unwrap_or(0)) != 0
                 && plane.formats.contains(&DRM_FORMAT_XRGB8888)
-                && is_primary_plane(&kms, plane.id.get())
+                && is_plane_type(&kms, plane.id.get(), DRM_PLANE_TYPE_PRIMARY)
         })
         .ok_or_else(|| AppError::new("no compatible KMS plane was found"))?;
     let connector_properties =
@@ -1008,7 +1185,17 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         Renderer::Auto => VulkanScanout::new(&scanout_buffers, extent).ok(),
         Renderer::Software => None,
     };
-    let mut hardware_cursor = HardwareCursor::new(&gbm, &kms).ok();
+    let cursor_plane = topology.planes.iter().find(|candidate| {
+        candidate.possible_crtcs_mask & (1_u32.checked_shl(crtc_index as u32).unwrap_or(0)) != 0
+            && candidate.formats.contains(&DRM_FORMAT_ARGB8888)
+            && is_plane_type(&kms, candidate.id.get(), DRM_PLANE_TYPE_CURSOR)
+    });
+    let mut hardware_cursor = cursor_plane.and_then(|cursor_plane| {
+        KmsTopology::object_properties(&kms, cursor_plane.id.get(), KmsPropertyObject::Plane)
+            .map_err(app_error)
+            .and_then(|properties| HardwareCursor::new(&gbm, &kms, cursor_plane.id, properties))
+            .ok()
+    });
     #[cfg(feature = "profiler")]
     crate::profiler::record_instant(if hardware_cursor.is_some() {
         "presentation.cursor.hardware_available"
@@ -1199,6 +1386,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         x: extent.width as f32 * 0.5,
         y: extent.height as f32 * 0.5,
     };
+    if let Some(cursor) = &mut hardware_cursor {
+        cursor.move_to(pointer_position);
+    }
     let mut drag_position = pointer_position;
     let mut pointer_focus = None;
     let mut touch_targets = BTreeMap::<i32, WaylandSurfaceId>::new();
@@ -1210,7 +1400,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut next_window_offset = 0_i32;
     let mut next_frame_id = 1_u64;
     let mut ready_scanout = VecDeque::<usize>::new();
-    let mut pending_page_flip = None::<usize>;
+    let mut pending_kms_commit = None::<PendingKmsCommit>;
     let mut current_scanout = None::<usize>;
     let mut first_modeset = true;
     let mut repaint = true;
@@ -1221,7 +1411,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut software_content_version = 0_u64;
     let mut software_target_versions = vec![0_u64; frame_slots.len()];
     let mut software_damage_history = VecDeque::<(u64, Option<RectI>)>::new();
-    let mut activate_hardware_cursor_after_modeset = false;
     #[cfg(feature = "profiler")]
     let mut pending_primary_pointer_event_us = None::<u64>;
     #[cfg(feature = "profiler")]
@@ -1237,7 +1426,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         let mut pointer_motion_seen = false;
         let mut cursor_position_dirty = false;
         let mut pointer_primary_dirty = false;
-        let mut hardware_cursor_moved_this_turn = false;
         #[cfg(feature = "profiler")]
         let mut latest_pointer_event_this_turn = None::<u64>;
         let mut other_work_seen = repaint;
@@ -1255,8 +1443,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         let scanout_available = frame_slots
             .iter()
             .any(|slot| slot.state == FrameSlotState::Available);
+        let cursor_commit_ready = !first_modeset
+            && hardware_cursor
+                .as_ref()
+                .is_some_and(HardwareCursor::needs_commit);
         let immediate_work = ((repaint || runtime_immediate) && scanout_available)
-            || (pending_page_flip.is_none() && !ready_scanout.is_empty())
+            || (pending_kms_commit.is_none() && (!ready_scanout.is_empty() || cursor_commit_ready))
             || runtime_ready.load(Ordering::Acquire)
             || seat_ready.load(Ordering::Acquire)
             || input_ready.ready.load(Ordering::Acquire)
@@ -1270,7 +1462,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             Some(Duration::from_nanos(
                 deadline.as_nanos().saturating_sub(schedule_now.as_nanos()),
             ))
-        } else if runtime_animation && pending_page_flip.is_none() {
+        } else if runtime_animation && pending_kms_commit.is_none() {
             Some(refresh_period)
         } else {
             None
@@ -1672,62 +1864,26 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             #[cfg(feature = "profiler")]
             let mut cursor_path = PointerCursorPath::Unchanged;
             #[cfg(feature = "profiler")]
-            let mut cursor_ioctl_duration_ns = None;
-            #[cfg(feature = "profiler")]
-            let mut cursor_submitted_us = None;
-            #[cfg(feature = "profiler")]
             {
                 latest_pointer_event_this_turn = pointer_probe.newest_event_us();
             }
             if cursor_position_dirty {
                 if cursor_hidden {
+                    if let Some(cursor) = &mut hardware_cursor {
+                        cursor.hide();
+                    }
                     #[cfg(feature = "profiler")]
                     {
                         cursor_path = PointerCursorPath::Hidden;
                     }
                 } else if hardware_cursor
                     .as_ref()
-                    .is_some_and(|cursor| cursor.visible)
+                    .is_some_and(|cursor| !cursor.software_fallback_requested())
                 {
-                    #[cfg(feature = "profiler")]
-                    let ioctl_started = pointer_probe.enabled.then(Instant::now);
-                    let move_result = hardware_cursor
-                        .as_ref()
-                        .expect("visible hardware cursor checked")
-                        .move_to(&kms, crtc, pointer_position);
-                    #[cfg(feature = "profiler")]
-                    {
-                        cursor_ioctl_duration_ns =
-                            ioctl_started.map(|started| duration_ns(started.elapsed()));
-                    }
-                    match move_result {
-                        Ok(()) => {
-                            hardware_cursor_moved_this_turn = true;
-                            #[cfg(feature = "profiler")]
-                            {
-                                cursor_path = PointerCursorPath::Hardware;
-                                if pointer_probe.enabled {
-                                    cursor_submitted_us =
-                                        crate::platform_linux::monotonic_time_microseconds();
-                                    crate::profiler::record_instant(
-                                        "presentation.cursor.hardware_move",
-                                    );
-                                }
-                            }
-                        }
-                        Err(_) => {
-                            hardware_cursor = None;
-                            pointer_primary_dirty = true;
-                            #[cfg(feature = "profiler")]
-                            {
-                                cursor_path = PointerCursorPath::HardwareFailed;
-                                crate::profiler::record_instant(
-                                    "presentation.cursor.hardware_failed",
-                                );
-                            }
-                        }
-                    }
-                } else if hardware_cursor.is_some() {
+                    hardware_cursor
+                        .as_mut()
+                        .expect("atomic hardware cursor checked")
+                        .move_to(pointer_position);
                     #[cfg(feature = "profiler")]
                     {
                         cursor_path = PointerCursorPath::Deferred;
@@ -1747,7 +1903,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 if pointer_primary_dirty {
                     pending_primary_pointer_event_us = latest_pointer_event_this_turn;
                 }
-                pointer_probe.finish(cursor_path, cursor_ioctl_duration_ns, cursor_submitted_us);
+                pointer_probe.finish(cursor_path);
                 if pointer_probe.has_motion()
                     && input_callback_time_us != 0
                     && let Some(dispatch_started_us) = input_dispatch_started_us
@@ -1792,27 +1948,55 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         if kms_ready.swap(false, Ordering::AcqRel) {
             kms.dispatch_events().map_err(app_error)?;
             for _ in 0..kms.take_completed_page_flips() {
-                let completed = pending_page_flip.take().ok_or_else(|| {
-                    AppError::new("DRM completed a page flip with no tracked scanout slot")
+                let completed = pending_kms_commit.take().ok_or_else(|| {
+                    AppError::new("DRM completed a page flip with no tracked atomic commit")
                 })?;
-                frame_slots[completed]
-                    .page_flip_completed()
-                    .map_err(app_error)?;
-                if let Some(previous) = current_scanout.replace(completed) {
-                    frame_slots[previous]
-                        .page_flip_replaced()
+                if let Some(completed_slot) = completed.primary_slot {
+                    frame_slots[completed_slot]
+                        .page_flip_completed()
                         .map_err(app_error)?;
-                }
-                presentation_completed = true;
-                #[cfg(feature = "profiler")]
-                {
-                    crate::profiler::record_instant("presentation.kms.page_flip_completed");
-                    if let Some(event_time_us) = frame_pointer_event_us[completed].take() {
+                    if let Some(previous) = current_scanout.replace(completed_slot) {
+                        frame_slots[previous]
+                            .page_flip_replaced()
+                            .map_err(app_error)?;
+                    }
+                    presentation_completed = true;
+                    #[cfg(feature = "profiler")]
+                    if let Some(event_time_us) = frame_pointer_event_us[completed_slot].take() {
                         record_pointer_event_latency(
                             "input.libinput.pointer_motion.pipeline.event_to_primary_scanout_ns",
                             event_time_us,
                         );
                     }
+                }
+                if let Some(cursor_snapshot) = completed.cursor {
+                    hardware_cursor
+                        .as_mut()
+                        .ok_or_else(|| {
+                            AppError::new(
+                                "DRM completed an atomic cursor commit after cursor retirement",
+                            )
+                        })?
+                        .mark_completed(cursor_snapshot)?;
+                    #[cfg(feature = "profiler")]
+                    if let Some(event_time_us) = completed.cursor_event_us {
+                        record_pointer_event_latency(
+                            "input.libinput.pointer_motion.pipeline.event_to_cursor_scanout_ns",
+                            event_time_us,
+                        );
+                    }
+                }
+                #[cfg(feature = "profiler")]
+                {
+                    crate::profiler::record_instant("presentation.kms.page_flip_completed");
+                }
+                if hardware_cursor
+                    .as_ref()
+                    .is_some_and(HardwareCursor::ready_to_retire)
+                {
+                    hardware_cursor = None;
+                    #[cfg(feature = "profiler")]
+                    crate::profiler::record_instant("presentation.cursor.software_fallback");
                 }
             }
         }
@@ -2108,9 +2292,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
 
         let pointer_motion_only = repaint && pointer_motion_seen && !other_work_seen;
 
-        // Mailbox scheduling: when more than one completed frame accumulated while a flip was
-        // pending, present only the newest state and immediately release older unpresented slots.
-        if pending_page_flip.is_none() && !ready_scanout.is_empty() {
+        // One atomic commit per CRTC may be outstanding. Primary frames retain mailbox behavior,
+        // while cursor-only motion reuses the current primary plane and commits only cursor state.
+        let cursor_commit_ready = !first_modeset
+            && hardware_cursor
+                .as_ref()
+                .is_some_and(HardwareCursor::needs_commit);
+        if pending_kms_commit.is_none() && (!ready_scanout.is_empty() || cursor_commit_ready) {
             while ready_scanout.len() > 1 {
                 let stale = ready_scanout.pop_front().expect("length checked");
                 frame_slots[stale].discard_ready().map_err(app_error)?;
@@ -2120,9 +2308,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     frame_pointer_event_us[stale] = None;
                 }
             }
-            let slot_index = ready_scanout.pop_back().expect("nonempty checked");
-            let request = kms
-                .primary_modeset_request(
+            let primary_slot = ready_scanout.pop_back();
+            let mut request = if let Some(slot_index) = primary_slot {
+                kms.primary_modeset_request(
                     connector.id,
                     &connector_properties,
                     crtc,
@@ -2134,91 +2322,142 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     extent.width as u32,
                     extent.height as u32,
                 )
-                .map_err(app_error)?;
+                .map_err(app_error)?
+            } else {
+                let mut request = kms.atomic_request().map_err(app_error)?;
+                // A plane-disable sets its CRTC_ID to zero. Retaining ACTIVE in cursor-only
+                // requests keeps the affected CRTC explicit so PAGE_FLIP_EVENT has one owner.
+                request
+                    .include_active_crtc(crtc, &crtc_properties)
+                    .map_err(app_error)?;
+                request
+            };
+            let cursor_snapshot = hardware_cursor
+                .as_ref()
+                .map(|cursor| cursor.append_desired(&mut request, crtc))
+                .transpose()?
+                .flatten();
+            let cursor_fallback_submission = cursor_snapshot.is_some()
+                && hardware_cursor
+                    .as_ref()
+                    .is_some_and(HardwareCursor::software_fallback_requested);
             #[cfg(feature = "profiler")]
             let _kms_commit = crate::profiler::span!("presentation.kms.atomic_commit");
-            if first_modeset {
-                request.test(true).map_err(app_error)?;
-                let request = kms
-                    .primary_modeset_request(
-                        connector.id,
-                        &connector_properties,
-                        crtc,
-                        &crtc_properties,
-                        plane.id,
-                        &plane_properties,
-                        mode_blob.id(),
-                        frame_slots[slot_index].framebuffer,
-                        extent.width as u32,
-                        extent.height as u32,
-                    )
-                    .map_err(app_error)?;
-                request.commit(true, false).map_err(app_error)?;
-                frame_slots[slot_index]
-                    .page_flip_submitted()
-                    .and_then(|_| frame_slots[slot_index].page_flip_completed())
-                    .map_err(app_error)?;
-                current_scanout = Some(slot_index);
-                first_modeset = false;
-                presentation_completed = true;
-                #[cfg(feature = "profiler")]
-                if let Some(event_time_us) = frame_pointer_event_us[slot_index].take() {
-                    record_pointer_event_latency(
-                        "input.libinput.pointer_motion.pipeline.event_to_primary_scanout_ns",
-                        event_time_us,
-                    );
-                }
-                if activate_hardware_cursor_after_modeset {
-                    activate_hardware_cursor_after_modeset = false;
-                    let cursor_image = wayland
-                        .core()
-                        .seats
-                        .get(&1)
-                        .expect("seat registered")
-                        .cursor;
-                    let now = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
-                    let rendered_cursor = render_cursor_image(
-                        cursor_image,
-                        &mut pointer,
-                        &mut icon_layers,
-                        &windows,
-                        config.pointer_extent,
-                        now,
-                    )?;
-                    let update = match (hardware_cursor.as_mut(), rendered_cursor.as_ref()) {
-                        (Some(cursor), Some(image)) => cursor
-                            .set_image(&kms, crtc, image)
-                            .and_then(|_| cursor.move_to(&kms, crtc, pointer_position)),
-                        (Some(cursor), None) => cursor.hide(&kms, crtc),
-                        (None, _) => Ok(()),
-                    };
-                    if update.is_err() {
-                        hardware_cursor = None;
-                        repaint = true;
-                        #[cfg(feature = "profiler")]
-                        {
-                            pending_primary_pointer_event_us =
-                                pending_deferred_cursor_event_us.take();
-                            crate::profiler::record_instant("presentation.cursor.hardware_failed");
-                        }
-                    } else {
-                        #[cfg(feature = "profiler")]
-                        if let Some(event_time_us) = pending_deferred_cursor_event_us.take() {
-                            if rendered_cursor.is_some() {
-                                record_pointer_event_latency(
-                                    "input.libinput.pointer_motion.pipeline.freshest_event_to_cursor_submit_ns",
-                                    event_time_us,
-                                );
-                            }
-                        }
-                    }
+            let commit_result = if first_modeset {
+                match request.test(true) {
+                    Ok(()) => request.commit(true, false),
+                    Err(error) => Err(error),
                 }
             } else {
-                request.commit(false, true).map_err(app_error)?;
-                frame_slots[slot_index]
-                    .page_flip_submitted()
-                    .map_err(app_error)?;
-                pending_page_flip = Some(slot_index);
+                request.commit(false, true)
+            };
+            match commit_result {
+                Ok(()) if first_modeset => {
+                    let slot_index = primary_slot
+                        .expect("the initial modeset is scheduled only with a primary frame");
+                    frame_slots[slot_index]
+                        .page_flip_submitted()
+                        .and_then(|_| frame_slots[slot_index].page_flip_completed())
+                        .map_err(app_error)?;
+                    current_scanout = Some(slot_index);
+                    if let Some(snapshot) = cursor_snapshot {
+                        let cursor = hardware_cursor
+                            .as_mut()
+                            .expect("submitted atomic cursor remains owned");
+                        cursor.mark_submitted(snapshot)?;
+                        cursor.mark_completed(snapshot)?;
+                        #[cfg(feature = "profiler")]
+                        if let Some(event_time_us) = pending_deferred_cursor_event_us.take() {
+                            record_pointer_event_latency(
+                                "input.libinput.pointer_motion.pipeline.freshest_event_to_cursor_submit_ns",
+                                event_time_us,
+                            );
+                            record_pointer_event_latency(
+                                "input.libinput.pointer_motion.pipeline.event_to_cursor_scanout_ns",
+                                event_time_us,
+                            );
+                        }
+                    }
+                    first_modeset = false;
+                    presentation_completed = true;
+                    #[cfg(feature = "profiler")]
+                    if let Some(event_time_us) = frame_pointer_event_us[slot_index].take() {
+                        record_pointer_event_latency(
+                            "input.libinput.pointer_motion.pipeline.event_to_primary_scanout_ns",
+                            event_time_us,
+                        );
+                    }
+                    if hardware_cursor
+                        .as_ref()
+                        .is_some_and(HardwareCursor::ready_to_retire)
+                    {
+                        hardware_cursor = None;
+                    }
+                }
+                Ok(()) => {
+                    if let Some(slot_index) = primary_slot {
+                        frame_slots[slot_index]
+                            .page_flip_submitted()
+                            .map_err(app_error)?;
+                    }
+                    if let Some(snapshot) = cursor_snapshot {
+                        hardware_cursor
+                            .as_mut()
+                            .expect("submitted atomic cursor remains owned")
+                            .mark_submitted(snapshot)?;
+                    }
+                    #[cfg(feature = "profiler")]
+                    let cursor_event_us = if cursor_snapshot.is_some() {
+                        let event_time_us = pending_deferred_cursor_event_us.take();
+                        if let Some(event_time_us) = event_time_us {
+                            record_pointer_event_latency(
+                                "input.libinput.pointer_motion.pipeline.freshest_event_to_cursor_submit_ns",
+                                event_time_us,
+                            );
+                        }
+                        event_time_us
+                    } else {
+                        None
+                    };
+                    pending_kms_commit = Some(PendingKmsCommit {
+                        primary_slot,
+                        cursor: cursor_snapshot,
+                        #[cfg(feature = "profiler")]
+                        cursor_event_us,
+                    });
+                    #[cfg(feature = "profiler")]
+                    if cursor_snapshot.is_some() {
+                        crate::profiler::record_instant(
+                            "presentation.cursor.hardware_atomic_submit",
+                        );
+                    }
+                }
+                Err(error) if cursor_snapshot.is_some() && !cursor_fallback_submission => {
+                    if let Some(slot_index) = primary_slot {
+                        frame_slots[slot_index].discard_ready().map_err(app_error)?;
+                        #[cfg(feature = "profiler")]
+                        {
+                            frame_pointer_event_us[slot_index] = None;
+                        }
+                    }
+                    let cursor = hardware_cursor
+                        .as_mut()
+                        .expect("failed atomic cursor remains owned");
+                    cursor.request_software_fallback();
+                    if cursor.ready_to_retire() {
+                        hardware_cursor = None;
+                    }
+                    repaint = true;
+                    #[cfg(feature = "profiler")]
+                    {
+                        pending_primary_pointer_event_us = pending_deferred_cursor_event_us.take();
+                        crate::profiler::record_instant(
+                            "presentation.cursor.hardware_atomic_failed",
+                        );
+                    }
+                    let _ = error;
+                }
+                Err(error) => return Err(app_error(error)),
             }
         }
 
@@ -2291,12 +2530,15 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 );
                 crate::profiler::counter!(
                     "presentation.scanout.flip_pending",
-                    u8::from(pending_page_flip.is_some())
+                    u8::from(pending_kms_commit.is_some())
                 );
             }
             let now = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
+            let software_cursor_active = hardware_cursor
+                .as_ref()
+                .is_none_or(HardwareCursor::software_fallback_requested);
             let partial_cursor_update =
-                pointer_motion_only && hardware_cursor.is_none() && retained_output_valid;
+                pointer_motion_only && software_cursor_active && retained_output_valid;
             let mut frame_damage = None::<RectI>;
             if partial_cursor_update {
                 let cursor_image = wayland
@@ -2486,37 +2728,41 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     config.pointer_extent,
                     now,
                 )?;
-                let mut cursor_on_hardware = first_modeset && hardware_cursor.is_some();
-                if cursor_on_hardware {
-                    // Legacy cursor ioctls need not work until the CRTC has a mode. Keep the
-                    // first primary plane cursor-free and activate the cursor immediately after
-                    // the synchronous initial modeset completes.
-                    activate_hardware_cursor_after_modeset = true;
-                } else if let Some(cursor) = &mut hardware_cursor {
-                    let update = match &rendered_cursor {
-                        Some(image) => cursor.set_image(&kms, crtc, image).and_then(|_| {
-                            if hardware_cursor_moved_this_turn {
+                let mut cursor_on_hardware = false;
+                if let Some(cursor) = &mut hardware_cursor {
+                    cursor.move_to(pointer_position);
+                    if !cursor.software_fallback_requested() {
+                        let update = match &rendered_cursor {
+                            Some(image) => cursor.set_image(image),
+                            None => {
+                                cursor.hide();
                                 Ok(())
-                            } else {
-                                cursor.move_to(&kms, crtc, pointer_position)
                             }
-                        }),
-                        None => cursor.hide(&kms, crtc),
-                    };
-                    if update.is_ok() {
-                        cursor_on_hardware = true;
-                        #[cfg(feature = "profiler")]
-                        crate::profiler::record_instant("presentation.cursor.hardware_image");
-                    } else {
-                        let _ = cursor.hide(&kms, crtc);
-                        hardware_cursor = None;
-                        #[cfg(feature = "profiler")]
-                        {
-                            pending_primary_pointer_event_us = latest_pointer_event_this_turn
-                                .or_else(|| pending_deferred_cursor_event_us.take());
-                            crate::profiler::record_instant("presentation.cursor.hardware_failed");
+                        };
+                        if update.is_ok() {
+                            cursor_on_hardware = true;
+                            #[cfg(feature = "profiler")]
+                            crate::profiler::record_instant(
+                                "presentation.cursor.hardware_image_staged",
+                            );
+                        } else {
+                            cursor.request_software_fallback();
+                            #[cfg(feature = "profiler")]
+                            {
+                                pending_primary_pointer_event_us = latest_pointer_event_this_turn
+                                    .or_else(|| pending_deferred_cursor_event_us.take());
+                                crate::profiler::record_instant(
+                                    "presentation.cursor.hardware_image_failed",
+                                );
+                            }
                         }
                     }
+                }
+                if hardware_cursor
+                    .as_ref()
+                    .is_some_and(HardwareCursor::ready_to_retire)
+                {
+                    hardware_cursor = None;
                 }
                 if !cursor_on_hardware && let Some(cursor) = &rendered_cursor {
                     composite_cursor_image(&mut output, extent, cursor, pointer_position);
@@ -2714,11 +2960,11 @@ fn output_state(
     .map_err(app_error)
 }
 
-fn is_primary_plane(kms: &KmsDevice, plane: u32) -> bool {
+fn is_plane_type(kms: &KmsDevice, plane: u32, expected: u64) -> bool {
     KmsTopology::object_properties(kms, plane, KmsPropertyObject::Plane)
         .ok()
         .and_then(|properties| properties.named("type").map(|property| property.value))
-        == Some(1)
+        == Some(expected)
 }
 
 fn render_cursor_image(
@@ -3598,6 +3844,65 @@ fn app_error(error: impl std::fmt::Display) -> AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_cursor_motion_coalesces_while_a_commit_is_in_flight() {
+        let mut cursor = CursorCommitTracker::default();
+        cursor.move_to(PointI { x: 10, y: 20 });
+        assert_eq!(cursor.desired_submission(), None);
+
+        cursor.show(0, PointI::default());
+        let submitted = cursor
+            .desired_submission()
+            .expect("visible cursor is dirty");
+        cursor.mark_submitted(submitted).unwrap();
+        cursor.move_to(PointI { x: 30, y: 40 });
+        assert_eq!(cursor.desired_submission(), None);
+
+        cursor.mark_completed(submitted).unwrap();
+        let coalesced = cursor
+            .desired_submission()
+            .expect("newest position follows the completed generation");
+        assert_eq!(coalesced.position, PointI { x: 30, y: 40 });
+        assert_eq!(coalesced.buffer, Some(0));
+    }
+
+    #[test]
+    fn atomic_cursor_staging_never_reuses_current_or_in_flight_buffers() {
+        let mut cursor = CursorCommitTracker::default();
+        cursor.show(0, PointI::default());
+        let first = cursor.desired_submission().unwrap();
+        cursor.mark_submitted(first).unwrap();
+        cursor.mark_completed(first).unwrap();
+
+        cursor.show(1, PointI::default());
+        let second = cursor.desired_submission().unwrap();
+        cursor.mark_submitted(second).unwrap();
+
+        assert_eq!(cursor.current_buffer, Some(0));
+        assert_eq!(cursor.in_flight.and_then(|state| state.buffer), Some(1));
+        assert_eq!(
+            cursor.reusable_buffer(HARDWARE_CURSOR_BUFFER_COUNT),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn hardware_cursor_fallback_waits_for_plane_disable_completion() {
+        let mut cursor = CursorCommitTracker::default();
+        cursor.show(0, PointI::default());
+        let visible = cursor.desired_submission().unwrap();
+        cursor.mark_submitted(visible).unwrap();
+        cursor.mark_completed(visible).unwrap();
+
+        cursor.request_software_fallback();
+        assert!(!cursor.ready_to_retire());
+        let hidden = cursor.desired_submission().expect("plane disable is dirty");
+        assert!(!hidden.visible);
+        cursor.mark_submitted(hidden).unwrap();
+        cursor.mark_completed(hidden).unwrap();
+        assert!(cursor.ready_to_retire());
+    }
 
     #[test]
     fn vulkan_staging_budget_covers_one_full_hd_upload_per_slot() {

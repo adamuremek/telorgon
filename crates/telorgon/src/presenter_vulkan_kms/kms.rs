@@ -3,17 +3,21 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::core::{PointI, SizeI};
+use crate::core::{PointI, RectI, SizeI};
 use crate::presenter_vulkan_kms::ffi;
-use crate::presenter_vulkan_kms::{AtomicProperty, GbmBuffer, KmsFramebufferId, KmsPropertyId};
+use crate::presenter_vulkan_kms::{
+    AtomicProperty, DRM_FORMAT_MOD_INVALID, GbmBuffer, KmsFramebufferId, KmsPropertyId,
+};
 use crate::presenter_vulkan_kms::{KmsConnectorId, KmsCrtcId, KmsObjectProperties, KmsPlaneId};
 
 const DRM_CLIENT_CAP_UNIVERSAL_PLANES: u64 = 2;
 const DRM_CLIENT_CAP_ATOMIC: u64 = 3;
+const DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT: u64 = 6;
 
 pub struct KmsDevice {
     fd: OwnedFd,
     page_flip_events: Box<AtomicU64>,
+    cursor_plane_hotspot: bool,
 }
 
 impl KmsDevice {
@@ -28,9 +32,15 @@ impl KmsDevice {
                 ));
             }
         }
+        // Only para-virtualized drivers require this capability. Physical drivers commonly return
+        // EOPNOTSUPP, so failure here is an expected indication that no hotspot properties exist.
+        let cursor_plane_hotspot = unsafe {
+            ffi::drmSetClientCap(fd.as_raw_fd(), DRM_CLIENT_CAP_CURSOR_PLANE_HOTSPOT, 1) == 0
+        };
         Ok(Self {
             fd,
             page_flip_events: Box::new(AtomicU64::new(0)),
+            cursor_plane_hotspot,
         })
     }
 
@@ -40,6 +50,10 @@ impl KmsDevice {
 
     pub fn atomic_request(&self) -> Result<AtomicRequest<'_>, KmsError> {
         AtomicRequest::new(self)
+    }
+
+    pub const fn cursor_plane_hotspot_capable(&self) -> bool {
+        self.cursor_plane_hotspot
     }
 
     /// Dispatches readable DRM events and records completed nonblocking page flips.
@@ -96,70 +110,6 @@ impl KmsDevice {
         })
     }
 
-    pub fn set_cursor(
-        &self,
-        crtc: KmsCrtcId,
-        handle: u32,
-        size: SizeI,
-        hotspot: PointI,
-    ) -> Result<(), KmsError> {
-        if handle == 0 || size.width <= 0 || size.height <= 0 {
-            return Err(KmsError::new(
-                KmsErrorKind::InvalidState,
-                "hardware cursor requires a buffer and positive extent",
-            ));
-        }
-        let result = unsafe {
-            ffi::drmModeSetCursor2(
-                self.fd.as_raw_fd(),
-                crtc.get(),
-                handle,
-                size.width as u32,
-                size.height as u32,
-                hotspot.x,
-                hotspot.y,
-            )
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(KmsError::native(
-                KmsErrorKind::Unsupported,
-                "DRM hardware-cursor image update failed",
-                result,
-            ))
-        }
-    }
-
-    pub fn move_cursor(&self, crtc: KmsCrtcId, position: PointI) -> Result<(), KmsError> {
-        let result = unsafe {
-            ffi::drmModeMoveCursor(self.fd.as_raw_fd(), crtc.get(), position.x, position.y)
-        };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(KmsError::native(
-                KmsErrorKind::Native,
-                "DRM hardware-cursor move failed",
-                result,
-            ))
-        }
-    }
-
-    pub fn hide_cursor(&self, crtc: KmsCrtcId) -> Result<(), KmsError> {
-        let result =
-            unsafe { ffi::drmModeSetCursor2(self.fd.as_raw_fd(), crtc.get(), 0, 0, 0, 0, 0) };
-        if result == 0 {
-            Ok(())
-        } else {
-            Err(KmsError::native(
-                KmsErrorKind::Native,
-                "DRM hardware cursor could not be hidden",
-                result,
-            ))
-        }
-    }
-
     fn page_flip_user_data(&self) -> *mut std::ffi::c_void {
         std::ptr::from_ref(self.page_flip_events.as_ref())
             .cast_mut()
@@ -191,19 +141,35 @@ impl KmsDevice {
             }
         }
         let mut id = 0;
-        let result = unsafe {
-            ffi::drmModeAddFB2WithModifiers(
-                self.fd.as_raw_fd(),
-                size.width as u32,
-                size.height as u32,
-                format.fourcc,
-                handles.as_ptr(),
-                pitches.as_ptr(),
-                offsets.as_ptr(),
-                modifiers.as_ptr(),
-                &mut id,
-                ffi::DRM_MODE_FB_MODIFIERS,
-            )
+        let result = if format.modifier == DRM_FORMAT_MOD_INVALID {
+            unsafe {
+                ffi::drmModeAddFB2(
+                    self.fd.as_raw_fd(),
+                    size.width as u32,
+                    size.height as u32,
+                    format.fourcc,
+                    handles.as_ptr(),
+                    pitches.as_ptr(),
+                    offsets.as_ptr(),
+                    &mut id,
+                    0,
+                )
+            }
+        } else {
+            unsafe {
+                ffi::drmModeAddFB2WithModifiers(
+                    self.fd.as_raw_fd(),
+                    size.width as u32,
+                    size.height as u32,
+                    format.fourcc,
+                    handles.as_ptr(),
+                    pitches.as_ptr(),
+                    offsets.as_ptr(),
+                    modifiers.as_ptr(),
+                    &mut id,
+                    ffi::DRM_MODE_FB_MODIFIERS,
+                )
+            }
         };
         if result != 0 {
             return Err(KmsError::native(
@@ -262,7 +228,12 @@ impl KmsDevice {
         width: u32,
         height: u32,
     ) -> Result<AtomicRequest<'_>, KmsError> {
-        if mode_blob == 0 || width == 0 || height == 0 {
+        if mode_blob == 0
+            || width == 0
+            || height == 0
+            || width > i32::MAX as u32
+            || height > i32::MAX as u32
+        {
             return Err(KmsError::new(
                 KmsErrorKind::InvalidState,
                 "atomic modeset requires a mode blob and positive extent",
@@ -284,20 +255,24 @@ impl KmsDevice {
             u64::from(mode_blob),
         )?;
         add_named(&mut request, crtc.get(), crtc_properties, "ACTIVE", 1)?;
-        for (name, value) in [
-            ("FB_ID", u64::from(framebuffer.get())),
-            ("CRTC_ID", u64::from(crtc.get())),
-            ("SRC_X", 0),
-            ("SRC_Y", 0),
-            ("SRC_W", u64::from(width) << 16),
-            ("SRC_H", u64::from(height) << 16),
-            ("CRTC_X", 0),
-            ("CRTC_Y", 0),
-            ("CRTC_W", u64::from(width)),
-            ("CRTC_H", u64::from(height)),
-        ] {
-            add_named(&mut request, plane.get(), plane_properties, name, value)?;
-        }
+        request.set_plane(
+            plane,
+            plane_properties,
+            crtc,
+            framebuffer,
+            RectI {
+                x: 0,
+                y: 0,
+                width: width as i32,
+                height: height as i32,
+            },
+            RectI {
+                x: 0,
+                y: 0,
+                width: width as i32,
+                height: height as i32,
+            },
+        )?;
         Ok(request)
     }
 }
@@ -406,6 +381,99 @@ impl<'device> AtomicRequest<'device> {
         Ok(())
     }
 
+    pub fn set_plane(
+        &mut self,
+        plane: KmsPlaneId,
+        properties: &KmsObjectProperties,
+        crtc: KmsCrtcId,
+        framebuffer: KmsFramebufferId,
+        source: RectI,
+        destination: RectI,
+    ) -> Result<(), KmsError> {
+        if source.x < 0
+            || source.y < 0
+            || source.width <= 0
+            || source.height <= 0
+            || destination.width <= 0
+            || destination.height <= 0
+        {
+            return Err(KmsError::new(
+                KmsErrorKind::InvalidState,
+                "atomic plane rectangles are invalid",
+            ));
+        }
+        let source_x = u64::try_from(source.x)
+            .ok()
+            .and_then(|value| value.checked_shl(16))
+            .ok_or_else(|| KmsError::new(KmsErrorKind::InvalidState, "plane source overflow"))?;
+        let source_y = u64::try_from(source.y)
+            .ok()
+            .and_then(|value| value.checked_shl(16))
+            .ok_or_else(|| KmsError::new(KmsErrorKind::InvalidState, "plane source overflow"))?;
+        let source_width = u64::try_from(source.width)
+            .ok()
+            .and_then(|value| value.checked_shl(16))
+            .ok_or_else(|| KmsError::new(KmsErrorKind::InvalidState, "plane source overflow"))?;
+        let source_height = u64::try_from(source.height)
+            .ok()
+            .and_then(|value| value.checked_shl(16))
+            .ok_or_else(|| KmsError::new(KmsErrorKind::InvalidState, "plane source overflow"))?;
+        for (name, value) in [
+            ("FB_ID", u64::from(framebuffer.get())),
+            ("CRTC_ID", u64::from(crtc.get())),
+            ("SRC_X", source_x),
+            ("SRC_Y", source_y),
+            ("SRC_W", source_width),
+            ("SRC_H", source_height),
+            ("CRTC_X", signed_property_value(destination.x)),
+            ("CRTC_Y", signed_property_value(destination.y)),
+            ("CRTC_W", destination.width as u64),
+            ("CRTC_H", destination.height as u64),
+        ] {
+            add_named(self, plane.get(), properties, name, value)?;
+        }
+        Ok(())
+    }
+
+    pub fn disable_plane(
+        &mut self,
+        plane: KmsPlaneId,
+        properties: &KmsObjectProperties,
+    ) -> Result<(), KmsError> {
+        add_named(self, plane.get(), properties, "FB_ID", 0)?;
+        add_named(self, plane.get(), properties, "CRTC_ID", 0)
+    }
+
+    pub fn include_active_crtc(
+        &mut self,
+        crtc: KmsCrtcId,
+        properties: &KmsObjectProperties,
+    ) -> Result<(), KmsError> {
+        add_named(self, crtc.get(), properties, "ACTIVE", 1)
+    }
+
+    pub fn set_cursor_hotspot(
+        &mut self,
+        plane: KmsPlaneId,
+        properties: &KmsObjectProperties,
+        hotspot: PointI,
+    ) -> Result<(), KmsError> {
+        add_named(
+            self,
+            plane.get(),
+            properties,
+            "HOTSPOT_X",
+            signed_property_value(hotspot.x),
+        )?;
+        add_named(
+            self,
+            plane.get(),
+            properties,
+            "HOTSPOT_Y",
+            signed_property_value(hotspot.y),
+        )
+    }
+
     pub fn properties(&self) -> &[AtomicProperty] {
         &self.properties
     }
@@ -463,6 +531,10 @@ impl<'device> AtomicRequest<'device> {
             Ok(())
         }
     }
+}
+
+const fn signed_property_value(value: i32) -> u64 {
+    (value as i64) as u64
 }
 
 unsafe extern "C" fn page_flip_handler(

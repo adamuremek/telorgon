@@ -173,16 +173,6 @@ pub const GBM_BO_TRANSFER_WRITE: u32 = 1 << 0;
 unsafe extern "C" {
     pub fn drmGetCap(fd: c_int, capability: u64, value: *mut u64) -> c_int;
     pub fn drmHandleEvent(fd: c_int, context: *mut drmEventContext) -> c_int;
-    pub fn drmModeSetCursor2(
-        fd: c_int,
-        crtc_id: c_uint,
-        handle: c_uint,
-        width: c_uint,
-        height: c_uint,
-        hotspot_x: c_int,
-        hotspot_y: c_int,
-    ) -> c_int;
-    pub fn drmModeMoveCursor(fd: c_int, crtc_id: c_uint, x: c_int, y: c_int) -> c_int;
     pub fn drmModeGetResources(fd: c_int) -> *mut drmModeRes;
     pub fn drmModeFreeResources(resources: *mut drmModeRes);
     pub fn drmModeGetConnector(fd: c_int, connector_id: c_uint) -> *mut drmModeConnector;
@@ -232,6 +222,17 @@ unsafe extern "C" {
         pitches: *const c_uint,
         offsets: *const c_uint,
         modifier: *const u64,
+        buffer_id: *mut c_uint,
+        flags: c_uint,
+    ) -> c_int;
+    pub fn drmModeAddFB2(
+        fd: c_int,
+        width: c_uint,
+        height: c_uint,
+        pixel_format: c_uint,
+        bo_handles: *const c_uint,
+        pitches: *const c_uint,
+        offsets: *const c_uint,
         buffer_id: *mut c_uint,
         flags: c_uint,
     ) -> c_int;

@@ -197,10 +197,14 @@ The operational managed path is entirely Telorgon-rendered:
    Telorgon `ImageResource` with explicit alpha/color metadata, then applies the committed
    `wl_surface` transform/scale and viewporter crop/destination using bounded deterministic
    sampling.
-3. Client images, composed policy, composed server frames, composed shell widgets, and the composed
-   pointer are rendered through `telorgon-renderer-software` into one RGBA output.
-4. A pair of linear GBM scanout buffers receives the output and is submitted with libdrm atomic
-   modesetting to a connector-compatible CRTC and primary XRGB8888 plane.
+3. Client images, composed policy, composed server frames, and composed shell widgets are rendered
+   through `telorgon-renderer-software` into one RGBA output. The composed pointer is uploaded into
+   three completion-retired ARGB8888 GBM cursor buffers when an atomic cursor plane is available;
+   otherwise it is damage-composited into the primary output.
+4. Three linear GBM scanout buffers receive the primary output. Primary and cursor state are
+   submitted through one serialized libdrm atomic-commit scheduler to a connector-compatible CRTC.
+   Cursor-only motion coalesces to the newest position and commits without repainting the primary
+   plane; it does not use the legacy cursor ioctls or asynchronous page-flip flag.
 
 `telorgon-compositor-render::DmaBufImporter` is the zero-copy Vulkan client-buffer bridge. It exposes
 only exact single-plane format/modifier tuples queried from the selected `VulkanDevice`, validates
@@ -208,21 +212,22 @@ allocation bounds, consumes an optional acquire sync FD, creates a generation-sc
 external-image lease, and binds it into `VulkanScene`. The external-image path can export the
 matching release requirement.
 
-The managed KMS path also has an owned Vulkan scanout route. Both GBM buffers are imported with
+The managed KMS path also has an owned Vulkan scanout route. All three primary GBM buffers are imported with
 their explicit modifier and row layout as Vulkan color targets. Telorgon renders the completed
 desktop image into the selected target, transfers queue ownership back to
-`VK_QUEUE_FAMILY_FOREIGN_EXT`, waits for GPU completion, and only then performs the blocking atomic
-KMS commit. `Renderer::Vulkan` requires this route. `Renderer::Auto` attempts it on each supported
+`VK_QUEUE_FAMILY_FOREIGN_EXT`, waits for GPU completion, and only then makes that frame eligible for
+the serialized atomic KMS scheduler. `Renderer::Vulkan` requires this route. `Renderer::Auto`
+attempts it on each supported
 adapter and falls back to the mapped software scanout route; `Renderer::Software` selects the
 mapped route directly. Client surfaces and all shell visuals remain Telorgon render resources in both
 cases; the current managed Vulkan route uses one final retained-image upload after reference
 software composition while direct per-surface GPU composition is the next optimization step.
 
 The GBM/KMS bindings are Telorgon-owned and use the original libgbm/libdrm ABIs. Scanout allocation,
-mapping, framebuffer creation, connector/encoder/CRTC/plane discovery, primary-plane filtering,
-mode blobs, atomic test commits, initial modesets, and subsequent double-buffered commits are
-implemented. Page-flip events, nonblocking retirement, direct scanout, overlays, color management,
-VRR, HDR, and hardware qualification are still open.
+mapping, modifier-aware framebuffer creation, connector/encoder/CRTC/plane discovery, primary and
+cursor-plane filtering, mode blobs, atomic test commits, initial modesets, nonblocking page-flip
+events, primary/cursor buffer retirement, and mailbox scheduling are implemented. Direct scanout,
+general overlays, color management, VRR, HDR, and hardware qualification are still open.
 
 ## FD, synchronization, and lifetime invariants
 
@@ -233,6 +238,10 @@ VRR, HDR, and hardware qualification are still open.
 - Vulkan explicit modifier imports use `VkSubresourceLayout::size == 0`, as required by the Vulkan
   specification, while allocation size is retained separately for bounds checking.
 - A GBM buffer outlives its KMS framebuffer, and both outlive the atomic request that references it.
+- A cursor buffer is never mapped while it is current or named by the one pending CRTC commit. A
+  software fallback retains an active cursor framebuffer until an atomic plane-disable completion.
+- Only one nonblocking atomic commit is outstanding per CRTC. Pointer events received while it is
+  outstanding replace desired cursor position rather than enqueueing additional commits.
 - A libseat-managed DRM FD remains owned by the seat; KMS receives a duplicate.
 - Wayland globals are destroyed before bind contexts and native protocol descriptors.
 - No callback is allowed to unwind across a C ABI boundary.
@@ -246,6 +255,68 @@ The implementation is based on the following primary specifications and source a
 - [DRM KMS documentation](https://docs.kernel.org/gpu/drm-kms.html) and the official libdrm [`xf86drmMode.h`](https://cgit.freedesktop.org/drm/libdrm/tree/xf86drmMode.h) define atomic presentation and exact ABI layouts. The source audit caught the legacy coordinate fields that precede `possible_crtcs` in `drmModePlane`.
 - The [Vulkan explicit DRM modifier structure](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageDrmFormatModifierExplicitCreateInfoEXT.html) requires each explicit plane layout's `size` to be zero.
 - wgpu commit `d99c241a3b9dcc0f6674d990d007d79e94d39862` was inspected for DMA-BUF import capability and ownership invariants; Flutter commit `51fd9afadf309ba5337320bd3653f5345c156cb9` was inspected for sync-FD ownership and frame-slot reuse. Those projects are references only; no framework code or abstraction was copied.
+
+### Atomic cursor-plane audit
+
+```text
+Concern:
+Tear-free hardware-cursor positioning, atomic primary/cursor scheduling, and completion-safe cursor
+framebuffer reuse.
+
+Telorgon files/contracts affected:
+crates/telorgon/src/application_host/desktop_wayland.rs;
+crates/telorgon/src/presenter_vulkan_kms/{ffi.rs,kms.rs,model.rs}; this document.
+
+Reference revisions, paths, and symbols inspected:
+Android platform/base 1cdfff555f4a21f71ccc978290e2e212e2f8b168,
+core/java/android/view/SurfaceControl.java Transaction, apply, setPosition, setBuffer, and fences;
+Flutter 51fd9afadf309ba5337320bd3653f5345c156cb9,
+engine/src/flutter/shell/platform/embedder/embedder_external_view_embedder.{h,cc} layer collection,
+single present callback, and post-present recycling;
+wlroots 0855cdacb2eeeff35849e2e9c4db0aa996d78d10, backend/drm/drm.c cursor desired-state
+updates and atomic CRTC commit;
+Smithay e3d461a057ba244d213a8498ec372b0799cca103,
+src/backend/drm/compositor/mod.rs and src/backend/drm/surface/atomic.rs plane assignment, test-only
+validation, atomic commit, and vblank completion.
+
+Official specification sections checked:
+Linux DRM KMS standard cursor-plane properties and legacy/atomic non-mixing rule; DRM client atomic,
+universal-plane, and cursor-hotspot capabilities; DRM_MODE_PAGE_FLIP_EVENT,
+DRM_MODE_ATOMIC_NONBLOCK, DRM_MODE_PAGE_FLIP_ASYNC, and test-only atomic commits; libdrm
+drmModeAddFB2 and drmModeAtomicCommit declarations.
+
+Invariants extracted:
+All visible plane changes form one explicit atomic state; one CRTC commit is outstanding at a time;
+new pointer events coalesce to newest desired state; nonblocking does not mean asynchronous scanout;
+current or pending cursor buffers are immutable; replacement is reusable only after flip completion;
+cursor-only commits do not imply client-surface presentation.
+
+Failure and recovery cases extracted:
+Missing cursor plane/ARGB8888/properties, unsupported modifier allocation, cursor image larger than
+the reported hardware extent, rejected test or runtime commit, a cursor update arriving during an
+outstanding primary flip, and software fallback while a cursor framebuffer remains active.
+
+Approaches rejected and why:
+Legacy drmModeMoveCursor/drmModeSetCursor2 is an untracked driver-dependent update beside the atomic
+primary path; software-only cursors force primary damage on every move; DRM_MODE_PAGE_FLIP_ASYNC may
+tear; one commit per raw input event ignores CRTC back-pressure and loses mailbox coalescing.
+
+Telorgon-specific decision:
+Auto-select an atomic ARGB8888 cursor plane, use three GBM/DRM framebuffer slots, append the newest
+cursor generation to a primary or cursor-only vblank commit, and disable that plane atomically in
+the same primary commit that introduces the software cursor fallback.
+
+Tests/diagnostics derived:
+Pure cursor-state tests cover in-flight motion coalescing, current/pending buffer exclusion, and
+fallback retirement after disable completion. Linux feature and profiler feature cross-target
+checks compile the complete path. Profiler events distinguish atomic cursor submit, scanout
+completion latency, image-stage failure, and atomic-commit failure.
+
+Known gaps requiring hardware or vendor validation:
+No physical/vGPU matrix has yet qualified cursor-plane format/modifier restrictions, negative edge
+coordinates, hotspot properties, visual tear behavior, latency, runtime fallback, or driver-specific
+atomic commit behavior.
+```
 
 Smithay and wlroots were rejected as implementation dependencies because Telorgon owns protocol
 state, policy, composition, and rendering. They remain useful external compatibility references.
@@ -262,5 +333,5 @@ The current path is **operational by integration and compile evidence, but not
 production-qualified**. A Linux TTY/hardware run is still required for socket/client conformance,
 atomic modesetting and page-flip behavior, libseat transitions, input devices, multiple GPUs,
 multiple outputs, failure recovery, and performance. The largest remaining gaps are
-multi-output/hotplug, direct per-surface Vulkan composition, page-flip timestamp/retirement,
+multi-output/hotplug, direct per-surface Vulkan composition, page-flip timestamps,
 input-method/text-input integration, and newer DMA-BUF feedback/syncobj protocol generations.
