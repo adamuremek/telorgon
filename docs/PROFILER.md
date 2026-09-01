@@ -7,9 +7,9 @@ server packages, a target-neutral managed-host activation contract, application-
 project-local `cargo profile` aliases for Gallery and Theme Studio, bounded CPU instrumentation,
 completion-delayed Vulkan timestamp queries, stable per-view correlation/filtering, an embedded
 vanilla HTML/CSS/JavaScript viewer, and in-memory capture export. Unit, compile, feature, and
-protocol checks exercise these paths without launching an application or server. The ordinary
-application host is operational; desktop, widget, and compositor hosts can select the same session
-contract when their native host implementations become operational.
+protocol checks exercise these paths without launching an application or server. The ordinary GUI
+host and Linux desktop-environment/compositor host automatically own the managed profiler session;
+widget hosts can select the same contract when their native host implementations become operational.
 
 This is not production-qualified performance tooling yet. Its overhead budgets, browser behavior,
 and Vulkan timestamp behavior still need the named manual and hardware evidence in Sections 15 and

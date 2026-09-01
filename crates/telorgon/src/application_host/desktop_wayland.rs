@@ -336,6 +336,9 @@ enum DecorationHit {
 }
 
 pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
+    let _profiler = crate::application_host::profiler::ManagedProfiler::start(
+        crate::application_host::profiler::ProfileTarget::DesktopEnvironment,
+    )?;
     let (_name, compositor, widgets, renderer, config) = application.into_parts()?;
     let (policy, window_frame, pointer, icons) = compositor.into_runtime_parts();
 

@@ -19,7 +19,8 @@ mod interaction;
 mod native;
 #[cfg(any(
     feature = "application-software",
-    all(feature = "application-vulkan-windows", target_os = "windows")
+    all(feature = "application-vulkan-windows", target_os = "windows"),
+    all(feature = "desktop-wayland-linux", target_os = "linux")
 ))]
 mod profiler;
 mod runtime;

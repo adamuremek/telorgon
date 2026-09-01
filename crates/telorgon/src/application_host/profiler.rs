@@ -40,7 +40,7 @@ impl ManagedProfiler {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Reserved for the corresponding native hosts as they become operational.
+#[allow(dead_code)] // Each feature-selected managed host constructs its corresponding target.
 pub(crate) enum ProfileTarget {
     Gui,
     DesktopEnvironment,
