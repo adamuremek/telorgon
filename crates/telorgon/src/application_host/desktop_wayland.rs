@@ -1866,16 +1866,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         config.pointer_extent,
                         now,
                     )?;
-                    let update = hardware_cursor.as_mut().map_or(Ok(()), |cursor| {
-                        rendered_cursor.as_ref().map_or_else(
-                            || cursor.hide(&kms, crtc),
-                            |image| {
-                                cursor
-                                    .set_image(&kms, crtc, image)
-                                    .and_then(|_| cursor.move_to(&kms, crtc, pointer_position))
-                            },
-                        )
-                    });
+                    let update = match (hardware_cursor.as_mut(), rendered_cursor.as_ref()) {
+                        (Some(cursor), Some(image)) => cursor
+                            .set_image(&kms, crtc, image)
+                            .and_then(|_| cursor.move_to(&kms, crtc, pointer_position)),
+                        (Some(cursor), None) => cursor.hide(&kms, crtc),
+                        (None, _) => Ok(()),
+                    };
                     if update.is_err() {
                         hardware_cursor = None;
                         repaint = true;
