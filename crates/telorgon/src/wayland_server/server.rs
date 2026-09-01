@@ -64,18 +64,6 @@ impl Display {
         }
     }
 
-    pub fn dispatch_pending(&self) -> ServerResult<()> {
-        let result = unsafe { ffi::wl_display_dispatch_pending(self.raw.as_ptr()) };
-        if result < 0 {
-            Err(WaylandServerError::new(
-                WaylandServerErrorKind::Dispatch,
-                "libwayland failed to dispatch pending client requests",
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
     pub fn flush_clients(&self) {
         unsafe { ffi::wl_display_flush_clients(self.raw.as_ptr()) };
     }

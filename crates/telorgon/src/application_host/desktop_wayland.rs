@@ -510,7 +510,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             .event_loop()
             .dispatch(Some(Duration::from_millis(8)))
             .map_err(app_error)?;
-        display.dispatch_pending().map_err(app_error)?;
         seat.dispatch(0).map_err(app_error)?;
         if seat.state() == SeatState::Enabled {
             input.dispatch().map_err(app_error)?;

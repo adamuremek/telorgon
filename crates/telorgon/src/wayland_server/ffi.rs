@@ -105,7 +105,6 @@ unsafe extern "C" {
     pub fn wl_display_get_event_loop(display: *mut wl_display) -> *mut wl_event_loop;
     pub fn wl_display_add_socket(display: *mut wl_display, name: *const c_char) -> c_int;
     pub fn wl_display_add_socket_auto(display: *mut wl_display) -> *const c_char;
-    pub fn wl_display_dispatch_pending(display: *mut wl_display) -> c_int;
     pub fn wl_display_flush_clients(display: *mut wl_display);
     pub fn wl_display_get_serial(display: *mut wl_display) -> u32;
     pub fn wl_display_next_serial(display: *mut wl_display) -> u32;
