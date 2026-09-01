@@ -77,9 +77,10 @@ pub enum FrameSlotState {
     #[default]
     Available,
     Rendering,
-    Queued,
+    GpuSubmitted,
+    ReadyForScanout,
+    FlipQueued,
     ScanningOut,
-    Retired,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,24 +110,35 @@ impl FrameSlot {
         Ok(())
     }
 
-    pub fn queue(&mut self) -> Result<(), FrameSlotError> {
-        self.transition(FrameSlotState::Rendering, FrameSlotState::Queued)
+    pub fn gpu_submitted(&mut self) -> Result<(), FrameSlotError> {
+        self.transition(FrameSlotState::Rendering, FrameSlotState::GpuSubmitted)
+    }
+
+    pub fn gpu_completed(&mut self) -> Result<(), FrameSlotError> {
+        self.transition(
+            FrameSlotState::GpuSubmitted,
+            FrameSlotState::ReadyForScanout,
+        )
     }
 
     pub fn page_flip_submitted(&mut self) -> Result<(), FrameSlotError> {
-        self.transition(FrameSlotState::Queued, FrameSlotState::ScanningOut)
+        self.transition(FrameSlotState::ReadyForScanout, FrameSlotState::FlipQueued)
+    }
+
+    pub fn page_flip_completed(&mut self) -> Result<(), FrameSlotError> {
+        self.transition(FrameSlotState::FlipQueued, FrameSlotState::ScanningOut)
     }
 
     pub fn page_flip_replaced(&mut self) -> Result<(), FrameSlotError> {
-        self.transition(FrameSlotState::ScanningOut, FrameSlotState::Retired)
-    }
-
-    pub fn release_after_completion(&mut self) -> Result<(), FrameSlotError> {
-        self.transition(FrameSlotState::Retired, FrameSlotState::Available)
+        self.transition(FrameSlotState::ScanningOut, FrameSlotState::Available)
     }
 
     pub fn cancel_render(&mut self) -> Result<(), FrameSlotError> {
         self.transition(FrameSlotState::Rendering, FrameSlotState::Available)
+    }
+
+    pub fn discard_ready(&mut self) -> Result<(), FrameSlotError> {
+        self.transition(FrameSlotState::ReadyForScanout, FrameSlotState::Available)
     }
 
     fn transition(
@@ -164,11 +176,23 @@ mod tests {
     fn scanout_buffer_reuse_requires_page_flip_retirement() {
         let mut slot = FrameSlot::new(0, KmsFramebufferId::from_raw(5).unwrap());
         slot.begin_render(1).unwrap();
-        slot.queue().unwrap();
+        slot.gpu_submitted().unwrap();
+        slot.gpu_completed().unwrap();
         slot.page_flip_submitted().unwrap();
         assert_eq!(slot.begin_render(2), Err(FrameSlotError::InvalidTransition));
+        slot.page_flip_completed().unwrap();
+        assert_eq!(slot.begin_render(2), Err(FrameSlotError::InvalidTransition));
         slot.page_flip_replaced().unwrap();
-        slot.release_after_completion().unwrap();
+        slot.begin_render(2).unwrap();
+    }
+
+    #[test]
+    fn completed_but_unpresented_frame_can_be_discarded_for_mailbox_scheduling() {
+        let mut slot = FrameSlot::new(1, KmsFramebufferId::from_raw(6).unwrap());
+        slot.begin_render(1).unwrap();
+        slot.gpu_submitted().unwrap();
+        slot.gpu_completed().unwrap();
+        slot.discard_ready().unwrap();
         slot.begin_render(2).unwrap();
     }
 }

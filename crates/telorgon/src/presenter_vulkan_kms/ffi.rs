@@ -11,6 +11,37 @@ macro_rules! opaque {
 
 opaque!(drmModeAtomicReq, gbm_device, gbm_bo);
 
+pub type drmEventHandler = Option<
+    unsafe extern "C" fn(
+        fd: c_int,
+        sequence: c_uint,
+        tv_sec: c_uint,
+        tv_usec: c_uint,
+        user_data: *mut c_void,
+    ),
+>;
+pub type drmPageFlipHandler2 = Option<
+    unsafe extern "C" fn(
+        fd: c_int,
+        sequence: c_uint,
+        tv_sec: c_uint,
+        tv_usec: c_uint,
+        crtc_id: c_uint,
+        user_data: *mut c_void,
+    ),
+>;
+pub type drmSequenceHandler =
+    Option<unsafe extern "C" fn(fd: c_int, sequence: u64, ns: u64, user_data: u64)>;
+
+#[repr(C)]
+pub struct drmEventContext {
+    pub version: c_int,
+    pub vblank_handler: drmEventHandler,
+    pub page_flip_handler: drmEventHandler,
+    pub page_flip_handler2: drmPageFlipHandler2,
+    pub sequence_handler: drmSequenceHandler,
+}
+
 #[repr(C)]
 pub struct drmModeRes {
     pub count_fbs: c_int,
@@ -127,14 +158,31 @@ pub const DRM_MODE_ATOMIC_NONBLOCK: u32 = 0x0200;
 pub const DRM_MODE_ATOMIC_ALLOW_MODESET: u32 = 0x0400;
 pub const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
 pub const DRM_MODE_FB_MODIFIERS: u32 = 0x02;
+pub const DRM_EVENT_CONTEXT_VERSION: c_int = 4;
+pub const DRM_CAP_CURSOR_WIDTH: u64 = 0x8;
+pub const DRM_CAP_CURSOR_HEIGHT: u64 = 0x9;
 
 pub const GBM_BO_USE_SCANOUT: u32 = 1 << 0;
+pub const GBM_BO_USE_CURSOR: u32 = 1 << 1;
 pub const GBM_BO_USE_RENDERING: u32 = 1 << 2;
+pub const GBM_BO_USE_WRITE: u32 = 1 << 3;
 pub const GBM_BO_USE_LINEAR: u32 = 1 << 4;
 pub const GBM_BO_TRANSFER_WRITE: u32 = 1 << 0;
 
 #[link(name = "drm")]
 unsafe extern "C" {
+    pub fn drmGetCap(fd: c_int, capability: u64, value: *mut u64) -> c_int;
+    pub fn drmHandleEvent(fd: c_int, context: *mut drmEventContext) -> c_int;
+    pub fn drmModeSetCursor2(
+        fd: c_int,
+        crtc_id: c_uint,
+        handle: c_uint,
+        width: c_uint,
+        height: c_uint,
+        hotspot_x: c_int,
+        hotspot_y: c_int,
+    ) -> c_int;
+    pub fn drmModeMoveCursor(fd: c_int, crtc_id: c_uint, x: c_int, y: c_int) -> c_int;
     pub fn drmModeGetResources(fd: c_int) -> *mut drmModeRes;
     pub fn drmModeFreeResources(resources: *mut drmModeRes);
     pub fn drmModeGetConnector(fd: c_int, connector_id: c_uint) -> *mut drmModeConnector;
@@ -205,6 +253,13 @@ unsafe extern "C" {
         format: c_uint,
         modifiers: *const u64,
         count: c_uint,
+        flags: c_uint,
+    ) -> *mut gbm_bo;
+    pub fn gbm_bo_create(
+        device: *mut gbm_device,
+        width: c_uint,
+        height: c_uint,
+        format: c_uint,
         flags: c_uint,
     ) -> *mut gbm_bo;
     pub fn gbm_bo_destroy(buffer: *mut gbm_bo);

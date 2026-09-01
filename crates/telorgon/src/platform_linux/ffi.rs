@@ -3,6 +3,8 @@
 use std::ffi::{c_char, c_double, c_int, c_long, c_uint, c_void};
 
 pub const CLOCK_MONOTONIC: c_int = 1;
+pub const EFD_CLOEXEC: c_int = 0x80000;
+pub const EFD_NONBLOCK: c_int = 0x800;
 
 #[repr(C)]
 pub struct timespec {
@@ -153,6 +155,9 @@ unsafe extern "C" {
 #[link(name = "c")]
 unsafe extern "C" {
     pub fn clock_gettime(clock_id: c_int, time: *mut timespec) -> c_int;
+    pub fn eventfd(initial_value: c_uint, flags: c_int) -> c_int;
+    pub fn read(fd: c_int, buffer: *mut c_void, count: usize) -> isize;
+    pub fn write(fd: c_int, buffer: *const c_void, count: usize) -> isize;
     pub fn free(pointer: *mut c_void);
     pub fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
     pub fn ftruncate(fd: c_int, length: i64) -> c_int;

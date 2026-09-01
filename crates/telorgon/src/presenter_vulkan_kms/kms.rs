@@ -1,7 +1,9 @@
 use std::fmt;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::core::{PointI, SizeI};
 use crate::presenter_vulkan_kms::ffi;
 use crate::presenter_vulkan_kms::{AtomicProperty, GbmBuffer, KmsFramebufferId, KmsPropertyId};
 use crate::presenter_vulkan_kms::{KmsConnectorId, KmsCrtcId, KmsObjectProperties, KmsPlaneId};
@@ -11,6 +13,7 @@ const DRM_CLIENT_CAP_ATOMIC: u64 = 3;
 
 pub struct KmsDevice {
     fd: OwnedFd,
+    page_flip_events: Box<AtomicU64>,
 }
 
 impl KmsDevice {
@@ -25,7 +28,10 @@ impl KmsDevice {
                 ));
             }
         }
-        Ok(Self { fd })
+        Ok(Self {
+            fd,
+            page_flip_events: Box::new(AtomicU64::new(0)),
+        })
     }
 
     pub fn fd(&self) -> &OwnedFd {
@@ -34,6 +40,130 @@ impl KmsDevice {
 
     pub fn atomic_request(&self) -> Result<AtomicRequest<'_>, KmsError> {
         AtomicRequest::new(self)
+    }
+
+    /// Dispatches readable DRM events and records completed nonblocking page flips.
+    pub fn dispatch_events(&self) -> Result<(), KmsError> {
+        let mut context = ffi::drmEventContext {
+            version: ffi::DRM_EVENT_CONTEXT_VERSION,
+            vblank_handler: None,
+            page_flip_handler: Some(page_flip_handler),
+            page_flip_handler2: None,
+            sequence_handler: None,
+        };
+        let result = unsafe { ffi::drmHandleEvent(self.fd.as_raw_fd(), &mut context) };
+        if result != 0 {
+            Err(KmsError::native(
+                KmsErrorKind::Native,
+                "DRM event dispatch failed",
+                result,
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Takes the number of page flips completed since the previous call.
+    pub fn take_completed_page_flips(&self) -> u64 {
+        self.page_flip_events.swap(0, Ordering::AcqRel)
+    }
+
+    pub fn cursor_size(&self) -> Result<SizeI, KmsError> {
+        let mut width = 0_u64;
+        let mut height = 0_u64;
+        for (capability, value) in [
+            (ffi::DRM_CAP_CURSOR_WIDTH, &mut width),
+            (ffi::DRM_CAP_CURSOR_HEIGHT, &mut height),
+        ] {
+            let result = unsafe { ffi::drmGetCap(self.fd.as_raw_fd(), capability, value) };
+            if result != 0 {
+                return Err(KmsError::native(
+                    KmsErrorKind::Unsupported,
+                    "DRM cursor-size capability query failed",
+                    result,
+                ));
+            }
+        }
+        if width == 0 || height == 0 || width > 1024 || height > 1024 {
+            return Err(KmsError::new(
+                KmsErrorKind::Unsupported,
+                "DRM reported an unusable hardware-cursor extent",
+            ));
+        }
+        Ok(SizeI {
+            width: width as i32,
+            height: height as i32,
+        })
+    }
+
+    pub fn set_cursor(
+        &self,
+        crtc: KmsCrtcId,
+        handle: u32,
+        size: SizeI,
+        hotspot: PointI,
+    ) -> Result<(), KmsError> {
+        if handle == 0 || size.width <= 0 || size.height <= 0 {
+            return Err(KmsError::new(
+                KmsErrorKind::InvalidState,
+                "hardware cursor requires a buffer and positive extent",
+            ));
+        }
+        let result = unsafe {
+            ffi::drmModeSetCursor2(
+                self.fd.as_raw_fd(),
+                crtc.get(),
+                handle,
+                size.width as u32,
+                size.height as u32,
+                hotspot.x,
+                hotspot.y,
+            )
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(KmsError::native(
+                KmsErrorKind::Unsupported,
+                "DRM hardware-cursor image update failed",
+                result,
+            ))
+        }
+    }
+
+    pub fn move_cursor(&self, crtc: KmsCrtcId, position: PointI) -> Result<(), KmsError> {
+        let result = unsafe {
+            ffi::drmModeMoveCursor(self.fd.as_raw_fd(), crtc.get(), position.x, position.y)
+        };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(KmsError::native(
+                KmsErrorKind::Native,
+                "DRM hardware-cursor move failed",
+                result,
+            ))
+        }
+    }
+
+    pub fn hide_cursor(&self, crtc: KmsCrtcId) -> Result<(), KmsError> {
+        let result =
+            unsafe { ffi::drmModeSetCursor2(self.fd.as_raw_fd(), crtc.get(), 0, 0, 0, 0, 0) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(KmsError::native(
+                KmsErrorKind::Native,
+                "DRM hardware cursor could not be hidden",
+                result,
+            ))
+        }
+    }
+
+    fn page_flip_user_data(&self) -> *mut std::ffi::c_void {
+        std::ptr::from_ref(self.page_flip_events.as_ref())
+            .cast_mut()
+            .cast()
     }
 
     pub fn add_framebuffer<'device>(
@@ -316,7 +446,11 @@ impl<'device> AtomicRequest<'device> {
                 self.device.fd.as_raw_fd(),
                 self.raw.as_ptr(),
                 flags,
-                std::ptr::null_mut(),
+                if flags & ffi::DRM_MODE_PAGE_FLIP_EVENT != 0 {
+                    self.device.page_flip_user_data()
+                } else {
+                    std::ptr::null_mut()
+                },
             )
         };
         if result != 0 {
@@ -329,6 +463,19 @@ impl<'device> AtomicRequest<'device> {
             Ok(())
         }
     }
+}
+
+unsafe extern "C" fn page_flip_handler(
+    _fd: i32,
+    _sequence: u32,
+    _tv_sec: u32,
+    _tv_usec: u32,
+    user_data: *mut std::ffi::c_void,
+) {
+    let Some(events) = NonNull::new(user_data.cast::<AtomicU64>()) else {
+        return;
+    };
+    unsafe { events.as_ref() }.fetch_add(1, Ordering::Release);
 }
 
 impl Drop for AtomicRequest<'_> {

@@ -3,7 +3,7 @@ use std::os::fd::{FromRawFd, OwnedFd};
 use std::ptr::NonNull;
 use std::slice;
 
-use crate::core::SizeI;
+use crate::core::{RectI, SizeI};
 
 use crate::presenter_vulkan_kms::ffi;
 use crate::presenter_vulkan_kms::{
@@ -39,10 +39,70 @@ impl<'fd> GbmDevice<'fd> {
         format: ScanoutFormat,
         candidate_modifiers: &[u64],
     ) -> Result<GbmBuffer<'_, 'fd>, KmsError> {
+        self.allocate_with_usage(
+            size,
+            format,
+            candidate_modifiers,
+            ffi::GBM_BO_USE_SCANOUT | ffi::GBM_BO_USE_RENDERING,
+        )
+    }
+
+    pub fn allocate_cursor(&self, size: SizeI) -> Result<GbmBuffer<'_, 'fd>, KmsError> {
+        let format = ScanoutFormat {
+            fourcc: DRM_FORMAT_ARGB8888,
+            modifier: crate::presenter_vulkan_kms::DRM_FORMAT_MOD_LINEAR,
+        };
+        let usage = ffi::GBM_BO_USE_CURSOR | ffi::GBM_BO_USE_WRITE | ffi::GBM_BO_USE_LINEAR;
+        self.allocate_with_usage(
+            size,
+            format,
+            &[crate::presenter_vulkan_kms::DRM_FORMAT_MOD_LINEAR],
+            usage,
+        )
+        .or_else(|_| self.allocate_legacy(size, format.fourcc, usage))
+    }
+
+    fn allocate_legacy(
+        &self,
+        size: SizeI,
+        format: u32,
+        usage: u32,
+    ) -> Result<GbmBuffer<'_, 'fd>, KmsError> {
+        if size.width <= 0 || size.height <= 0 {
+            return Err(KmsError::new(
+                KmsErrorKind::InvalidState,
+                "GBM allocation needs positive dimensions",
+            ));
+        }
+        let raw = unsafe {
+            ffi::gbm_bo_create(
+                self.raw.as_ptr(),
+                size.width as u32,
+                size.height as u32,
+                format,
+                usage,
+            )
+        };
+        let raw = NonNull::new(raw).ok_or_else(|| {
+            KmsError::new(
+                KmsErrorKind::Allocation,
+                "legacy GBM cursor-buffer allocation failed",
+            )
+        })?;
+        Ok(GbmBuffer { raw, device: self })
+    }
+
+    fn allocate_with_usage(
+        &self,
+        size: SizeI,
+        format: ScanoutFormat,
+        candidate_modifiers: &[u64],
+        usage: u32,
+    ) -> Result<GbmBuffer<'_, 'fd>, KmsError> {
         if size.width <= 0 || size.height <= 0 || candidate_modifiers.is_empty() {
             return Err(KmsError::new(
                 KmsErrorKind::InvalidState,
-                "GBM scanout allocation needs positive dimensions and at least one modifier",
+                "GBM allocation needs positive dimensions and at least one modifier",
             ));
         }
         let count = u32::try_from(candidate_modifiers.len())
@@ -55,7 +115,7 @@ impl<'fd> GbmDevice<'fd> {
                 format.fourcc,
                 candidate_modifiers.as_ptr(),
                 count,
-                ffi::GBM_BO_USE_SCANOUT | ffi::GBM_BO_USE_RENDERING,
+                usage,
             )
         };
         let raw = NonNull::new(raw).ok_or_else(|| {
@@ -173,6 +233,18 @@ impl GbmBuffer<'_, '_> {
         self.raw.as_ptr()
     }
 
+    pub fn handle(&self) -> Result<u32, KmsError> {
+        let handle = unsafe { ffi::gbm_bo_get_handle_for_plane(self.raw.as_ptr(), 0) };
+        if handle == 0 {
+            Err(KmsError::new(
+                KmsErrorKind::Native,
+                "GBM returned cursor buffer handle zero",
+            ))
+        } else {
+            Ok(handle)
+        }
+    }
+
     pub fn device(&self) -> &GbmDevice<'_> {
         self.device
     }
@@ -212,6 +284,18 @@ impl GbmWriteMapping<'_> {
     }
 
     pub fn write_rgba8(&mut self, source: &[u8]) -> Result<(), KmsError> {
+        self.write_rgba8_region(
+            source,
+            RectI {
+                x: 0,
+                y: 0,
+                width: self.size.width,
+                height: self.size.height,
+            },
+        )
+    }
+
+    pub fn write_rgba8_region(&mut self, source: &[u8], region: RectI) -> Result<(), KmsError> {
         if !matches!(
             self.format.fourcc,
             DRM_FORMAT_ARGB8888 | DRM_FORMAT_XRGB8888
@@ -219,6 +303,18 @@ impl GbmWriteMapping<'_> {
             return Err(KmsError::new(
                 KmsErrorKind::Unsupported,
                 "software scanout supports DRM ARGB8888 and XRGB8888",
+            ));
+        }
+        if region.x < 0
+            || region.y < 0
+            || region.width <= 0
+            || region.height <= 0
+            || region.x.saturating_add(region.width) > self.size.width
+            || region.y.saturating_add(region.height) > self.size.height
+        {
+            return Err(KmsError::new(
+                KmsErrorKind::InvalidState,
+                "software scanout update region is outside the buffer",
             ));
         }
         let source_stride = self.size.width as usize * 4;
@@ -232,9 +328,11 @@ impl GbmWriteMapping<'_> {
             ));
         }
         let target = unsafe { slice::from_raw_parts_mut(self.pixels.as_ptr(), self.length) };
-        for row in 0..self.size.height as usize {
-            let source = &source[row * source_stride..(row + 1) * source_stride];
-            let target = &mut target[row * self.stride..row * self.stride + source_stride];
+        let row_bytes = region.width as usize * 4;
+        let x = region.x as usize * 4;
+        for row in region.y as usize..(region.y + region.height) as usize {
+            let source = &source[row * source_stride + x..row * source_stride + x + row_bytes];
+            let target = &mut target[row * self.stride + x..row * self.stride + x + row_bytes];
             for (source, target) in source.chunks_exact(4).zip(target.chunks_exact_mut(4)) {
                 // DRM ARGB/XRGB8888 are native-endian packed values, which are BGRA/BGRX bytes on
                 // the little-endian Linux systems supported by this KMS path.
