@@ -103,16 +103,12 @@ impl SurfaceState {
         }
     }
 
-    pub fn stage(&mut self, commit: SurfaceCommit) -> Result<(), SurfaceError> {
+    pub fn stage(&mut self, mut commit: SurfaceCommit) -> Result<(), SurfaceError> {
+        commit
+            .damage
+            .retain(|rectangle| rectangle.width > 0 && rectangle.height > 0);
         if commit.damage.len() > 256 {
             return Err(SurfaceError::TooManyDamageRectangles);
-        }
-        if commit
-            .damage
-            .iter()
-            .any(|rect| rect.width <= 0 || rect.height <= 0)
-        {
-            return Err(SurfaceError::InvalidDamageRectangle);
         }
         if commit.buffer_scale.is_some_and(|scale| scale <= 0) {
             return Err(SurfaceError::InvalidBufferScale);
@@ -127,7 +123,7 @@ impl SurfaceState {
 
     pub fn damage(&mut self, rectangle: RectI) -> Result<(), SurfaceError> {
         if rectangle.width <= 0 || rectangle.height <= 0 {
-            return Err(SurfaceError::InvalidDamageRectangle);
+            return Ok(());
         }
         if self.pending.damage.len() >= 256 {
             return Err(SurfaceError::TooManyDamageRectangles);
@@ -296,5 +292,78 @@ mod tests {
                 assert_eq!(outcome.previous_buffer, Some(buffer(2)));
             }
         }
+    }
+
+    #[test]
+    fn empty_damage_is_ignored_without_consuming_the_rectangle_limit() {
+        let mut state = SurfaceState::new(surface());
+        for rectangle in [
+            RectI {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: 0,
+            },
+            RectI {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 10,
+            },
+            RectI {
+                x: 0,
+                y: 0,
+                width: -1,
+                height: 10,
+            },
+            RectI {
+                x: 0,
+                y: 0,
+                width: 10,
+                height: -1,
+            },
+        ] {
+            for _ in 0..257 {
+                state.damage(rectangle).unwrap();
+            }
+        }
+        let visible = RectI {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        state.damage(visible).unwrap();
+        state.commit().unwrap();
+        assert_eq!(state.snapshot().damage, vec![visible]);
+    }
+
+    #[test]
+    fn staged_commits_filter_empty_damage_before_enforcing_the_limit() {
+        let visible = RectI {
+            x: 1,
+            y: 2,
+            width: 3,
+            height: 4,
+        };
+        let mut damage = vec![
+            RectI {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 10,
+            };
+            257
+        ];
+        damage.push(visible);
+        let mut state = SurfaceState::new(surface());
+        state
+            .stage(SurfaceCommit {
+                damage,
+                ..SurfaceCommit::default()
+            })
+            .unwrap();
+        state.commit().unwrap();
+        assert_eq!(state.snapshot().damage, vec![visible]);
     }
 }
