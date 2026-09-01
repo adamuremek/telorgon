@@ -44,6 +44,8 @@ pub enum ProtocolObjectKind {
     LinuxBufferRelease,
     CursorShapeManager,
     CursorShapeDevice,
+    ToplevelIconManager,
+    ToplevelIcon,
     FractionalScaleManager,
     FractionalScale,
     RelativePointerManager,

@@ -412,18 +412,27 @@ impl Default for ScrollBarStyle {
     fn default() -> Self {
         Self {
             container: BoxStyle {
-                background: Background::None,
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::None,
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             track: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(74, 84, 103, 190)),
-                corner_radii: CornerRadii::all(4.0),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(74, 84, 103, 190)),
+                    corner_radii: CornerRadii::all(4.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             thumb: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(205, 212, 226, 255)),
-                border: Border::all(1.0, ColorRgba8::rgba(99, 112, 139, 255)),
-                corner_radii: CornerRadii::all(4.0),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(205, 212, 226, 255)),
+                    border: Border::all(1.0, ColorRgba8::rgba(99, 112, 139, 255)),
+                    corner_radii: CornerRadii::all(4.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             track_extent: 160.0,

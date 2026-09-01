@@ -244,11 +244,11 @@ fn snapshot(ui: &MountedUi, node: NodeId) -> StylePropertyPatch {
         max_size: Some(style.max_size),
         margin: Some(style.margin),
         padding: Some(style.padding),
-        background: Some(style.background),
-        border: Some(style.border),
-        outline: Some(style.outline),
-        corner_radii: Some(style.corner_radii),
-        shadows: Some(style.shadows),
+        background: Some(style.decoration.background),
+        border: Some(style.decoration.border),
+        outline: Some(style.decoration.outline),
+        corner_radii: Some(style.decoration.corner_radii),
+        shadows: Some(style.decoration.shadows),
         overflow: Some(style.overflow),
         opacity: Some(style.opacity),
         transform: Some(style.transform),
@@ -754,7 +754,10 @@ translation_x = 4
             writer.root(BoxStyle::default(), LayoutStyle::default(), |writer| {
                 button = Some(writer.button_node(
                     BoxStyle {
-                        background: Background::Color(ColorRgba8::rgba(20, 30, 40, 255)),
+                        decoration: crate::ui::BoxDecoration {
+                            background: Background::Color(ColorRgba8::rgba(20, 30, 40, 255)),
+                            ..crate::ui::BoxDecoration::default()
+                        },
                         ..BoxStyle::default()
                     },
                     |_| {},

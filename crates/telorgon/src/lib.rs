@@ -57,6 +57,7 @@ pub mod accessibility;
 pub mod application_components;
 pub mod application_host;
 pub mod application_primitives;
+pub mod assets;
 #[cfg(all(feature = "application-vulkan-windows", target_os = "windows"))]
 pub mod bridge_vulkan_dxgi;
 pub mod compose;
@@ -117,6 +118,7 @@ pub mod theme;
 pub mod ui;
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
 pub mod wayland_server;
+pub mod window_chrome;
 
 pub use accessibility::{
     AssistiveActionData, AssistiveActionError, AssistiveActionRequest, MAX_ACTION_TEXT_BYTES,
@@ -127,25 +129,45 @@ pub use accessibility::{
     SemanticTreePublication, SemanticTreePublicationKind, SemanticTreeRetirement,
     SemanticTreeRevision, SemanticTreeSnapshot,
 };
+pub use assets::{
+    AppIconProfile, AppIconProfileError, AppIconVariant, AssetBundle, AssetCatalog,
+    AssetCatalogError, AssetEntry, AssetError, AssetKey, AssetKind, AssetMediaCache,
+    AssetMediaError, AssetRasterSize, ClientCursorMode, CursorAsset, CursorThemeAsset,
+    CursorThemeError, DecodedAssetImage, Icon, IconAsset, ImageAsset, ImageSource,
+    PointerConfiguration, PointerFrame, PointerGraphic, PointerHotspot, PointerRequest,
+    PointerResolution, PointerTheme, PointerThemeFallback, PointerThemeOverrides, asset_image_id,
+    resolve_pointer,
+};
 #[cfg(feature = "embedded-profiler")]
 pub use profiler as embedded_profiler_events;
-pub use telorgon_macros::component;
+pub use telorgon_macros::{asset_catalog, component};
+pub use window_chrome::{
+    WindowAction, WindowChromeCapabilities, WindowChromeError, WindowChromeModel,
+    WindowChromeRegion, WindowChromeRole, WindowChromeSnapshot, WindowChromeState,
+    WindowResizeEdge,
+};
 
 /// Imports shared by Telorgon's high-level application facade.
 ///
 /// This module is intentionally private: application authors should import one of the entry-point
 /// modules instead, such as `use telorgon::app::*`.
 mod authoring {
-    pub use crate::compose::{Button, Checkbox, Container, Slider, Switch, Text};
+    pub use crate::compose::{
+        Button, Checkbox, Container, Image, PointerViewExt, Slider, Switch, Text,
+        WindowChromeViewExt, WindowContentSlot, WindowFrame,
+    };
     pub use crate::{
-        Alignment, Background, Border, BorderSide, BoxSizing, BoxStyle, ColorRgba8, Component,
+        Alignment, AppIconProfile, AssetBundle, AssetCatalog, AssetKey, Background, Border,
+        BorderSide, BoxDecoration, BoxDecorationError, BoxSizing, BoxStyle, ColorRgba8, Component,
         ComponentFields, ComponentInstanceId, CornerRadii, CrossAxisAlignment, Dimension,
-        EdgeInsets, Element, EventContext, EventHandler, Flow, InputsChangedContext, Insets, Key,
-        LayoutStyle, MainAxisAlignment, MountContext, Outline, Overflow, PointF, RectF, Result,
-        RuntimeTarget, SemanticCheckState, Shadow, ShadowList, Signal, SignalSnapshot,
-        SignalWriter, SizeF, SizeI, SizeRule, SizeRule2D, StyleOverride, TextStyle, Transform2D,
-        View, ViewError, button, card, checkbox, column, component, hashed_key, row, slider,
-        spacer, stack, switch, text,
+        EdgeInsets, Element, EventContext, EventHandler, Flow, Icon, IconAsset, ImageAsset,
+        ImageSource, InputsChangedContext, Insets, Key, LayoutStyle, MainAxisAlignment,
+        MountContext, Outline, Overflow, PointF, RectF, Result, RuntimeTarget, SemanticCheckState,
+        Shadow, ShadowList, Signal, SignalSnapshot, SignalWriter, SizeF, SizeI, SizeRule,
+        SizeRule2D, StyleOverride, TextStyle, Transform2D, View, ViewError, WindowAction,
+        WindowChromeCapabilities, WindowChromeModel, WindowChromeRole, WindowChromeState,
+        WindowResizeEdge, asset_catalog, button, card, checkbox, column, component, hashed_key,
+        image, row, slider, spacer, stack, switch, text, window_content_slot, window_frame,
     };
 }
 
@@ -157,7 +179,7 @@ pub mod app {
     pub use super::authoring::*;
     pub use crate::application_host::{
         Application, Compositor, LinuxDesktopConfig, Renderer, ShellWidget, ShellWidgetAnchor,
-        ShellWidgetExtent, Window,
+        ShellWidgetExtent, Window, WindowDecorationMode, WindowFrameFactory,
     };
 }
 #[cfg(feature = "application-software")]
@@ -174,7 +196,7 @@ pub use application_host::{
     ManagedTaskDiagnostics, ManagedTaskExecutor, ManagedTaskHost, ManagedTaskPoll, PlatformInput,
     PreparedFrame, ReadyCompositor, ReadyDesktopEnvironment, ReadyGuiApplication, ReadyShellWidget,
     ReadyWindow, Renderer, SceneDeltaQueue, ShellWidget, ShellWidgetAnchor, ShellWidgetExtent,
-    Window, WindowOptions,
+    Window, WindowDecorationMode, WindowFrameFactory, WindowOptions,
 };
 pub type Result<T> = application_host::AppResult<T>;
 pub use application_components::{
@@ -318,10 +340,10 @@ pub use application_primitives::{
 };
 pub use compose::{
     Alignment, Component, ComponentFields, ComponentInstanceId, Dimension, Element, EventContext,
-    EventHandler, InputsChangedContext, Insets, Key, MountContext, RuntimeTarget, Signal,
-    SignalSnapshot, SignalWriter, TextStyle, UnmountContext as CompositionUnmountContext, View,
-    ViewError, button, card, checkbox, column, hashed_key, row, slider, spacer, stack, switch,
-    text,
+    EventHandler, InputsChangedContext, Insets, Key, MountContext, PointerViewExt, RuntimeTarget,
+    Signal, SignalSnapshot, SignalWriter, TextStyle, UnmountContext as CompositionUnmountContext,
+    View, ViewError, button, card, checkbox, column, hashed_key, image, row, slider, spacer, stack,
+    switch, text, window_content_slot, window_frame,
 };
 pub use core::{ColorRgba8, EdgeInsets, PointF, PointI, RectF, RectI, SizeF, SizeI, Transform2D};
 pub use input::{
@@ -443,16 +465,16 @@ pub use platform::{
     NotificationResponseSource, NotificationRevision, NotificationService, NotificationServiceKey,
     NotificationSnapshotId, NotificationTextError, NotificationTitle, PendingHostFacts,
     PermissionState, PhysicalExtent, PlatformError, PlatformErrorKind, PlatformErrorSource,
-    PlatformEvent, PlatformResult, PostTurnSchedule, PowerAdmissionError, PowerCapability,
-    PowerCapabilityQuery, PowerInhibitionAdmission, PowerInhibitionKind, PowerInhibitionLease,
-    PowerInhibitionLeaseHandle, PowerInhibitionLeaseId, PowerInhibitionLeaseStatus,
-    PowerInhibitionReason, PowerInhibitionRequest, PowerInhibitionRevocation, PowerInhibitionScope,
-    PowerLimitError, PowerLimits, PowerOperations, PowerPolicyState, PowerService, PowerServiceKey,
-    RemainingWork, RequestAdmission, RequestCompletion, RequestId, RequestOutcome,
-    RestorationAdmissionError, RestorationCapability, RestorationCapabilityQuery,
-    RestorationClearAdmission, RestorationClearApplied, RestorationClearRequest,
-    RestorationConsumptionAdmission, RestorationConsumptionApplied, RestorationConsumptionRequest,
-    RestorationLimitError, RestorationLimits, RestorationOperations,
+    PlatformEvent, PlatformResult, PointerIcon, PostTurnSchedule, PowerAdmissionError,
+    PowerCapability, PowerCapabilityQuery, PowerInhibitionAdmission, PowerInhibitionKind,
+    PowerInhibitionLease, PowerInhibitionLeaseHandle, PowerInhibitionLeaseId,
+    PowerInhibitionLeaseStatus, PowerInhibitionReason, PowerInhibitionRequest,
+    PowerInhibitionRevocation, PowerInhibitionScope, PowerLimitError, PowerLimits, PowerOperations,
+    PowerPolicyState, PowerService, PowerServiceKey, RemainingWork, RequestAdmission,
+    RequestCompletion, RequestId, RequestOutcome, RestorationAdmissionError, RestorationCapability,
+    RestorationCapabilityQuery, RestorationClearAdmission, RestorationClearApplied,
+    RestorationClearRequest, RestorationConsumptionAdmission, RestorationConsumptionApplied,
+    RestorationConsumptionRequest, RestorationLimitError, RestorationLimits, RestorationOperations,
     RestorationPublicationAdmission, RestorationPublicationApplied, RestorationPublicationError,
     RestorationPublicationRequest, RestorationRecord, RestorationRevision, RestorationScope,
     RestorationService, RestorationServiceKey, RestorationSessionId, RestorationSnapshotId,
@@ -523,19 +545,19 @@ pub use theme::{
     ValueSource, VariantStyleSource, foundation_catalog, validate_archive_header,
 };
 pub use ui::{
-    Background, Border, BorderSide, BoxSizing, BoxStyle, ComponentStyleId, ControlBehavior,
-    ControlHandle, CornerRadii, CrossAxisAlignment, DismissReason, Flow, ImageId, ImageVisual,
-    InteractionFlags, InteractionSnapshot, LayoutStyle, MainAxisAlignment, MaterialId, MountWriter,
-    MountedUi, NodeKind, Outline, OutsidePressPolicy, Overflow, OverlayAnchor, OverlayCloseOutcome,
-    OverlayDiagnostics, OverlayDismissPolicy, OverlayDismissResult, OverlayDismissed, OverlayEntry,
-    OverlayError, OverlayFocusContainment, OverlayFocusLifecycle, OverlayFocusRequest,
-    OverlayFocusRestoration, OverlayHost, OverlayId, OverlayInitialFocus, OverlayModality,
-    OverlayOpenRequest, OverlayOpened, Property, SemanticAction, SemanticActions,
-    SemanticCheckState, SemanticCollection, SemanticError, SemanticName, SemanticNode,
-    SemanticParticipation, SemanticRelationship, SemanticRelationshipKind, SemanticRole,
-    SemanticState, SemanticValue, Shadow, ShadowList, SizeRule, SizeRule2D, StringId, StyleBinding,
-    StyleId, StyleOverride, StylePropertyPatch, StyleSlotBinding, StyleSlotId,
-    StyleVariantSelection, TextAlign, TextHandle, TextVisual, ThemeDomainId, ThemeScopeId,
-    TransactionResult, UiDiagnostics, UiEvent, UiEventKind, UiMemoryReport, UiRoot, UiTransaction,
-    VariantAxisId, VariantValueId,
+    Background, Border, BorderSide, BoxDecoration, BoxDecorationError, BoxSizing, BoxStyle,
+    ComponentStyleId, ControlBehavior, ControlHandle, CornerRadii, CrossAxisAlignment,
+    DismissReason, Flow, ImageId, ImageVisual, InteractionFlags, InteractionSnapshot, LayoutStyle,
+    MainAxisAlignment, MaterialId, MountWriter, MountedUi, NodeKind, Outline, OutsidePressPolicy,
+    Overflow, OverlayAnchor, OverlayCloseOutcome, OverlayDiagnostics, OverlayDismissPolicy,
+    OverlayDismissResult, OverlayDismissed, OverlayEntry, OverlayError, OverlayFocusContainment,
+    OverlayFocusLifecycle, OverlayFocusRequest, OverlayFocusRestoration, OverlayHost, OverlayId,
+    OverlayInitialFocus, OverlayModality, OverlayOpenRequest, OverlayOpened, Property,
+    SemanticAction, SemanticActions, SemanticCheckState, SemanticCollection, SemanticError,
+    SemanticName, SemanticNode, SemanticParticipation, SemanticRelationship,
+    SemanticRelationshipKind, SemanticRole, SemanticState, SemanticValue, Shadow, ShadowList,
+    SizeRule, SizeRule2D, StringId, StyleBinding, StyleId, StyleOverride, StylePropertyPatch,
+    StyleSlotBinding, StyleSlotId, StyleVariantSelection, TextAlign, TextHandle, TextVisual,
+    ThemeDomainId, ThemeScopeId, TransactionResult, UiDiagnostics, UiEvent, UiEventKind,
+    UiMemoryReport, UiRoot, UiTransaction, VariantAxisId, VariantValueId,
 };

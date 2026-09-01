@@ -16,9 +16,10 @@ pub use component::{
     Component, ComponentFields, ComponentInstanceId, ErasedComponent, RenderedView,
 };
 pub use components::{
-    Button, ButtonElement, Checkbox, Container, ContainerElement, Image, ImageElement, Slider,
-    SliderElement, Switch, Text, TextElement, ToggleElement, ToggleKind, button, card, checkbox,
-    column, image, row, slider, spacer, stack, switch, text,
+    Button, ButtonElement, Checkbox, Container, ContainerElement, HasContent, Image, ImageElement,
+    MissingContent, Slider, SliderElement, Switch, Text, TextElement, ToggleElement, ToggleKind,
+    WindowChromeViewExt, WindowContentSlot, WindowFrame, button, card, checkbox, column, image,
+    row, slider, spacer, stack, switch, text, window_content_slot, window_frame,
 };
 pub use context::{InputsChangedContext, MountContext, RuntimeTarget, UnmountContext};
 pub use element::{Element, ElementKind, ElementType, View, ViewError};
@@ -26,6 +27,24 @@ pub use event::{ComponentCallback, EventContext, EventDispatch, EventHandler};
 pub use key::{Key, hashed_key};
 pub use signal::{Signal, SignalDependency, SignalSnapshot, SignalSubscription, SignalWriter};
 pub use style::{Alignment, Dimension, Insets, TextStyle};
+
+/// Adds a semantic pointer request to any composed view.
+///
+/// The host resolves the request through the application's pointer overrides, registered cursor
+/// theme, and finally the system cursor. This keeps cursor artwork out of component layout code.
+pub trait PointerViewExt: View + Sized {
+    fn pointer_icon(self, icon: crate::PointerIcon) -> Element {
+        self.into_element()
+            .with_pointer_request(crate::PointerRequest::Semantic(icon))
+    }
+
+    fn hide_pointer(self) -> Element {
+        self.into_element()
+            .with_pointer_request(crate::PointerRequest::Hidden)
+    }
+}
+
+impl<T: View> PointerViewExt for T {}
 
 /// Items used by the generated component implementation. Not a stable direct-use API.
 #[doc(hidden)]

@@ -36,7 +36,7 @@ pub const MAX_CUSTOM_CURSOR_FRAME_DURATION_MS: u32 = 60_000;
 pub const MAX_CUSTOM_CURSOR_ANIMATION_DURATION_MS: u64 = 10 * 60 * 1_000;
 
 /// Platform-neutral standard cursor vocabulary.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StandardCursor {
     #[default]
     Default,
@@ -75,6 +75,94 @@ pub enum StandardCursor {
     ZoomOut,
     DndAsk,
     AllResize,
+}
+
+/// Preferred application-facing name for the semantic pointer shape vocabulary.
+pub type PointerIcon = StandardCursor;
+
+impl StandardCursor {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::ContextMenu => "context-menu",
+            Self::Help => "help",
+            Self::Pointer => "pointer",
+            Self::Progress => "progress",
+            Self::Wait => "wait",
+            Self::Cell => "cell",
+            Self::Crosshair => "crosshair",
+            Self::Text => "text",
+            Self::VerticalText => "vertical-text",
+            Self::Alias => "alias",
+            Self::Copy => "copy",
+            Self::Move => "move",
+            Self::NoDrop => "no-drop",
+            Self::NotAllowed => "not-allowed",
+            Self::Grab => "grab",
+            Self::Grabbing => "grabbing",
+            Self::EResize => "e-resize",
+            Self::NResize => "n-resize",
+            Self::NeResize => "ne-resize",
+            Self::NwResize => "nw-resize",
+            Self::SResize => "s-resize",
+            Self::SeResize => "se-resize",
+            Self::SwResize => "sw-resize",
+            Self::WResize => "w-resize",
+            Self::EwResize => "ew-resize",
+            Self::NsResize => "ns-resize",
+            Self::NeswResize => "nesw-resize",
+            Self::NwseResize => "nwse-resize",
+            Self::ColResize => "col-resize",
+            Self::RowResize => "row-resize",
+            Self::AllScroll => "all-scroll",
+            Self::ZoomIn => "zoom-in",
+            Self::ZoomOut => "zoom-out",
+            Self::DndAsk => "dnd-ask",
+            Self::AllResize => "all-resize",
+        }
+    }
+
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "default" => Self::Default,
+            "context-menu" => Self::ContextMenu,
+            "help" => Self::Help,
+            "pointer" => Self::Pointer,
+            "progress" => Self::Progress,
+            "wait" => Self::Wait,
+            "cell" => Self::Cell,
+            "crosshair" => Self::Crosshair,
+            "text" => Self::Text,
+            "vertical-text" => Self::VerticalText,
+            "alias" => Self::Alias,
+            "copy" => Self::Copy,
+            "move" => Self::Move,
+            "no-drop" => Self::NoDrop,
+            "not-allowed" => Self::NotAllowed,
+            "grab" => Self::Grab,
+            "grabbing" => Self::Grabbing,
+            "e-resize" => Self::EResize,
+            "n-resize" => Self::NResize,
+            "ne-resize" => Self::NeResize,
+            "nw-resize" => Self::NwResize,
+            "s-resize" => Self::SResize,
+            "se-resize" => Self::SeResize,
+            "sw-resize" => Self::SwResize,
+            "w-resize" => Self::WResize,
+            "ew-resize" => Self::EwResize,
+            "ns-resize" => Self::NsResize,
+            "nesw-resize" => Self::NeswResize,
+            "nwse-resize" => Self::NwseResize,
+            "col-resize" => Self::ColResize,
+            "row-resize" => Self::RowResize,
+            "all-scroll" => Self::AllScroll,
+            "zoom-in" => Self::ZoomIn,
+            "zoom-out" => Self::ZoomOut,
+            "dnd-ask" => Self::DndAsk,
+            "all-resize" => Self::AllResize,
+            _ => return None,
+        })
+    }
 }
 
 /// One bounded physical-pixel custom cursor image.

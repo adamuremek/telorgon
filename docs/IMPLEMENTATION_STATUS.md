@@ -3522,6 +3522,24 @@ native-resource contract is specified in
 [PLATFORM_INTEGRATION_CONTRACT.md](PLATFORM_INTEGRATION_CONTRACT.md); the current Winit/Softbuffer
 proof does not satisfy it merely because it opens a window and delivers basic input.
 
+## Composable window chrome, assets, icons, and pointers
+
+This package is operational at the portable/unit and compile-integration evidence layers. A typed
+`asset_catalog!` embeds project media and supplies bounded raster/SVG decoding shared by GUI and
+desktop runtimes. `BoxDecoration` is the common background/border/outline/corner/shadow vocabulary
+for ordinary boxes and window frames. Managed windows may hide system decorations and mount a
+type-state `WindowFrame`; the Wayland compositor builds one frame per `WindowChromeModel`. Both
+hosts derive title, app-icon, drag, resize, content, and action regions from computed layout.
+
+`AppIconProfile` feeds native window metadata and compositor fallback art. The Linux server also
+implements staging `xdg_toplevel_icon_v1` name/SHM-buffer assignment with commit synchronization,
+immutability, reset, replacement, and lifetime tracking. Semantic pointer requests, code-local
+overrides, registered TOML themes, hotspots, different per-state sizes, and animation frames are
+resolved by both managed Winit and the Linux desktop runtime. This work has portable tests and
+Windows/Linux compilation evidence but is not production-qualified on a physical compositor or
+desktop hardware matrix. The complete API and invariants are documented in
+[Custom windows, assets, icons, and pointers](CUSTOM_WINDOWS_ASSETS_AND_POINTERS.md).
+
 ## Documentation rule
 
 Architecture documents describe the intended end state. Capability and release documentation must

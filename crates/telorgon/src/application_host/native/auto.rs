@@ -153,9 +153,9 @@ impl NativePresentation for AutoPresentation {
 }
 
 pub fn run_gui_auto(application: ReadyGuiApplication) -> AppResult<()> {
-    let (driver, options, renderer) = application.into_parts()?;
+    let (driver, options, renderer, assets, pointer) = application.into_parts()?;
     let event_loop = event_loop()?;
-    run_composed(event_loop, driver, options, renderer)
+    run_composed(event_loop, driver, options, renderer, assets, pointer)
 }
 
 fn event_loop() -> AppResult<ManagedEventLoop> {
@@ -171,15 +171,17 @@ fn run_composed(
     driver: CompositionDriver,
     options: WindowOptions,
     renderer: Renderer,
+    assets: crate::AssetBundle,
+    pointer: crate::PointerConfiguration,
 ) -> AppResult<()> {
     match renderer {
         Renderer::Vulkan => {
             let presentation = create_vulkan_presentation(event_loop.event_loop())?;
-            run_composed_managed(event_loop, driver, options, presentation)
+            run_composed_managed(event_loop, driver, options, assets, pointer, presentation)
         }
         Renderer::Software => {
             let presentation = software_presentation(&event_loop)?;
-            run_composed_managed(event_loop, driver, options, presentation)
+            run_composed_managed(event_loop, driver, options, assets, pointer, presentation)
         }
         Renderer::Auto => match create_vulkan_presentation(event_loop.event_loop()) {
             Ok(vulkan) => match software_presentation(&event_loop) {
@@ -187,16 +189,20 @@ fn run_composed(
                     event_loop,
                     driver,
                     options,
+                    assets,
+                    pointer,
                     AutoPresentation::new(vulkan, software),
                 ),
-                Err(_) => run_composed_managed(event_loop, driver, options, vulkan),
+                Err(_) => {
+                    run_composed_managed(event_loop, driver, options, assets, pointer, vulkan)
+                }
             },
             Err(vulkan_error) => {
                 eprintln!(
                     "telorgon-app: Vulkan initialization failed ({vulkan_error}); using the software renderer"
                 );
                 let software = software_presentation(&event_loop)?;
-                run_composed_managed(event_loop, driver, options, software)
+                run_composed_managed(event_loop, driver, options, assets, pointer, software)
             }
         },
     }

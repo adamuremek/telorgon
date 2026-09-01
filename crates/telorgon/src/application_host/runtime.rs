@@ -873,7 +873,10 @@ mod tests {
                     BoxStyle {
                         width: SizeRule::Px(80.0),
                         height: SizeRule::Px(30.0),
-                        background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                        decoration: crate::ui::BoxDecoration {
+                            background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                            ..crate::ui::BoxDecoration::default()
+                        },
                         ..BoxStyle::default()
                     },
                     |writer| {

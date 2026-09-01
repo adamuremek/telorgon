@@ -658,10 +658,10 @@ fn cross_axis_offset(alignment: CrossAxisAlignment, available: f32, occupied: f3
 
 fn border_insets(style: &BoxStyle) -> EdgeInsets {
     EdgeInsets {
-        top: style.border.top.width.max(0.0),
-        right: style.border.right.width.max(0.0),
-        bottom: style.border.bottom.width.max(0.0),
-        left: style.border.left.width.max(0.0),
+        top: style.decoration.border.top.width.max(0.0),
+        right: style.decoration.border.right.width.max(0.0),
+        bottom: style.decoration.border.bottom.width.max(0.0),
+        left: style.decoration.border.left.width.max(0.0),
     }
 }
 
@@ -817,9 +817,12 @@ mod tests {
                         BoxStyle {
                             width: SizeRule::Px(80.0),
                             height: SizeRule::Px(32.0),
-                            background: crate::ui::Background::Color(ColorRgba8::rgba(
-                                1, 2, 3, 255,
-                            )),
+                            decoration: crate::ui::BoxDecoration {
+                                background: crate::ui::Background::Color(ColorRgba8::rgba(
+                                    1, 2, 3, 255,
+                                )),
+                                ..crate::ui::BoxDecoration::default()
+                            },
                             ..BoxStyle::default()
                         },
                         |builder| {
@@ -1071,7 +1074,10 @@ mod tests {
                             height: SizeRule::Px(20.0),
                             margin: EdgeInsets::all(5.0),
                             padding: EdgeInsets::all(10.0),
-                            border: Border::all(2.0, ColorRgba8::rgba(1, 2, 3, 255)),
+                            decoration: crate::ui::BoxDecoration {
+                                border: Border::all(2.0, ColorRgba8::rgba(1, 2, 3, 255)),
+                                ..crate::ui::BoxDecoration::default()
+                            },
                             ..BoxStyle::default()
                         },
                         LayoutStyle::default(),

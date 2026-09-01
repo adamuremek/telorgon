@@ -63,7 +63,10 @@ impl Default for SeparatorStyle {
     fn default() -> Self {
         Self {
             line: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(104, 116, 139, 255)),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(104, 116, 139, 255)),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             layout: LayoutStyle::default(),
@@ -286,9 +289,12 @@ mod tests {
                 .root(BoxStyle::default(), LayoutStyle::default(), |_| {});
             let decorative_style = SeparatorStyle {
                 line: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
-                    border: Border::all(2.0, ColorRgba8::rgba(40, 50, 60, 255)),
-                    corner_radii: CornerRadii::all(3.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                        border: Border::all(2.0, ColorRgba8::rgba(40, 50, 60, 255)),
+                        corner_radii: CornerRadii::all(3.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 layout: LayoutStyle {
@@ -341,10 +347,13 @@ mod tests {
         assert_eq!(decorative_style.width, SizeRule::Px(120.0));
         assert_eq!(decorative_style.height, SizeRule::Px(2.0));
         assert_eq!(
-            decorative_style.background,
+            decorative_style.decoration.background,
             Background::Color(ColorRgba8::rgba(10, 20, 30, 255))
         );
-        assert_eq!(decorative_style.corner_radii, CornerRadii::all(3.0));
+        assert_eq!(
+            decorative_style.decoration.corner_radii,
+            CornerRadii::all(3.0)
+        );
         assert_eq!(
             runtime.ui().layouts.get(decorative_node).unwrap(),
             &LayoutStyle {

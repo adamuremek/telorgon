@@ -424,24 +424,36 @@ impl Default for SliderStyle {
                         height: SizeRule::Px(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
-                    background: container_background,
-                    corner_radii: CornerRadii::all(4.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: container_background,
+                        corner_radii: CornerRadii::all(4.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 track: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(78, 87, 105, opacity)),
-                    corner_radii: CornerRadii::all(3.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(78, 87, 105, opacity)),
+                        corner_radii: CornerRadii::all(3.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 fill: BoxStyle {
-                    background: Background::Color(accent),
-                    corner_radii: CornerRadii::all(3.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(accent),
+                        corner_radii: CornerRadii::all(3.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 thumb: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(245, 247, 251, opacity)),
-                    border: Border::all(1.0, accent),
-                    corner_radii: CornerRadii::all(9.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(245, 247, 251, opacity)),
+                        border: Border::all(1.0, accent),
+                        corner_radii: CornerRadii::all(9.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 label_color: ColorRgba8::rgba(235, 238, 244, opacity),

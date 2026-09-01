@@ -272,13 +272,19 @@ impl Default for NavigationRailStyle {
             container: BoxStyle::default(),
             destination: BoxStyle {
                 padding: EdgeInsets::all(7.0),
-                corner_radii: CornerRadii::all(6.0),
+                decoration: crate::ui::BoxDecoration {
+                    corner_radii: CornerRadii::all(6.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             selected_destination: BoxStyle {
                 padding: EdgeInsets::all(7.0),
-                background: Background::Color(ColorRgba8::rgba(61, 84, 128, 180)),
-                corner_radii: CornerRadii::all(6.0),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(61, 84, 128, 180)),
+                    corner_radii: CornerRadii::all(6.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             label_color: ColorRgba8::rgba(213, 220, 233, 255),

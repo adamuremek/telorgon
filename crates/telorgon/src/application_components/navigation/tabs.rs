@@ -328,7 +328,10 @@ impl Default for TabsStyle {
                     bottom: 6.0,
                     left: 12.0,
                 },
-                corner_radii: CornerRadii::all(5.0),
+                decoration: crate::ui::BoxDecoration {
+                    corner_radii: CornerRadii::all(5.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             selected_tab: BoxStyle {
@@ -338,8 +341,11 @@ impl Default for TabsStyle {
                     bottom: 6.0,
                     left: 12.0,
                 },
-                background: Background::Color(ColorRgba8::rgba(62, 83, 122, 180)),
-                corner_radii: CornerRadii::all(5.0),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(62, 83, 122, 180)),
+                    corner_radii: CornerRadii::all(5.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             panel: BoxStyle::default(),

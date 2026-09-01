@@ -1,5 +1,8 @@
 use crate::core::{ColorRgba8, EdgeInsets};
-use crate::ui::{Background, Border, BoxStyle, CornerRadii, Flow, LayoutStyle, SizeRule};
+use crate::ui::{
+    Background, Border, BoxDecoration, BoxStyle, CornerRadii, Flow, LayoutStyle, Outline, Shadow,
+    ShadowList, SizeRule,
+};
 
 use crate::compose::{Alignment, Dimension, Element, ElementKind, Insets, Key, View};
 
@@ -81,8 +84,18 @@ impl Container {
         self
     }
 
-    pub fn style(mut self, style: BoxStyle) -> Self {
+    pub fn box_style(mut self, style: BoxStyle) -> Self {
         self.element.style = style;
+        self
+    }
+
+    #[deprecated(since = "0.1.12", note = "use `box_style` for normalized vocabulary")]
+    pub fn style(self, style: BoxStyle) -> Self {
+        self.box_style(style)
+    }
+
+    pub fn decoration(mut self, decoration: BoxDecoration) -> Self {
+        self.element.style.decoration = decoration;
         self
     }
 
@@ -91,18 +104,54 @@ impl Container {
         self
     }
 
-    pub fn background(mut self, color: ColorRgba8) -> Self {
-        self.element.style.background = Background::Color(color);
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.element.style.decoration.background = background.into();
         self
     }
 
-    pub fn radius(mut self, radius: f32) -> Self {
-        self.element.style.corner_radii = CornerRadii::all(radius);
+    pub fn corner_radius(mut self, radius: f32) -> Self {
+        self.element.style.decoration.corner_radii = CornerRadii::all(radius);
         self
     }
 
+    pub fn corner_radii(mut self, radii: CornerRadii) -> Self {
+        self.element.style.decoration.corner_radii = radii;
+        self
+    }
+
+    #[deprecated(since = "0.1.12", note = "use `corner_radius`")]
+    pub fn radius(self, radius: f32) -> Self {
+        self.corner_radius(radius)
+    }
+
+    #[deprecated(since = "0.1.12", note = "use `uniform_border`")]
     pub fn border(mut self, width: f32, color: ColorRgba8) -> Self {
-        self.element.style.border = Border::all(width, color);
+        self.element.style.decoration.border = Border::all(width, color);
+        self
+    }
+
+    pub fn border_sides(mut self, border: Border) -> Self {
+        self.element.style.decoration.border = border;
+        self
+    }
+
+    pub fn uniform_border(mut self, width: f32, color: ColorRgba8) -> Self {
+        self.element.style.decoration.border = Border::all(width, color);
+        self
+    }
+
+    pub fn outline(mut self, outline: Outline) -> Self {
+        self.element.style.decoration.outline = outline;
+        self
+    }
+
+    pub fn shadow(mut self, shadow: Shadow) -> Self {
+        self.element.style.decoration.shadows = ShadowList::one(shadow);
+        self
+    }
+
+    pub fn shadows(mut self, shadows: ShadowList) -> Self {
+        self.element.style.decoration.shadows = shadows;
         self
     }
 
@@ -168,7 +217,7 @@ pub fn card() -> Container {
     column()
         .padding(16.0)
         .background(ColorRgba8::rgba(31, 37, 50, 255))
-        .radius(6.0)
+        .corner_radius(6.0)
 }
 
 #[cfg(test)]

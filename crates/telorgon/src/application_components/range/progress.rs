@@ -103,13 +103,19 @@ impl Default for ProgressStyle {
                     ..BoxStyle::default()
                 },
                 track: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(76, 84, 101, 255)),
-                    corner_radii: CornerRadii::all(track_thickness * 0.5),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(76, 84, 101, 255)),
+                        corner_radii: CornerRadii::all(track_thickness * 0.5),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 fill: BoxStyle {
-                    background: Background::Color(fill),
-                    corner_radii: CornerRadii::all(track_thickness * 0.5),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(fill),
+                        corner_radii: CornerRadii::all(track_thickness * 0.5),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 label_color: ColorRgba8::rgba(235, 238, 244, 255),
@@ -269,14 +275,20 @@ impl Default for ActivityIndicatorStyle {
                     ..BoxStyle::default()
                 },
                 track: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(76, 84, 101, 255)),
-                    corner_radii: CornerRadii::all(indicator_size * 0.5),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(76, 84, 101, 255)),
+                        corner_radii: CornerRadii::all(indicator_size * 0.5),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     opacity: track_opacity,
                     ..BoxStyle::default()
                 },
                 marker: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(93, 132, 218, 255)),
-                    corner_radii: CornerRadii::all(marker_size * 0.5),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(93, 132, 218, 255)),
+                        corner_radii: CornerRadii::all(marker_size * 0.5),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     opacity: marker_opacity,
                     ..BoxStyle::default()
                 },
@@ -881,11 +893,12 @@ mod tests {
         assert_eq!(touch.visual.label_size, 16.0);
         assert_eq!(indeterminate.mode, ProgressMode::Indeterminate);
         assert_ne!(
-            indeterminate.visual.fill.background,
+            indeterminate.visual.fill.decoration.background,
             style
                 .resolve(DensityClass::Standard, ProgressMode::Determinate)
                 .visual
                 .fill
+                .decoration
                 .background
         );
     }

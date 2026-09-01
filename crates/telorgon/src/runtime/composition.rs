@@ -136,6 +136,7 @@ enum MountedKind {
     },
     Button {
         node: UiNodeId,
+        icon_node: UiNodeId,
         label_node: UiNodeId,
         props: ButtonElement,
     },
@@ -232,7 +233,10 @@ impl CompositionDriver {
         Self::from_erased_for_target(component, RuntimeTarget::Application)
     }
 
-    fn from_erased_for_target(component: Box<dyn ErasedComponent>, target: RuntimeTarget) -> Self {
+    pub(crate) fn from_erased_for_target(
+        component: Box<dyn ErasedComponent>,
+        target: RuntimeTarget,
+    ) -> Self {
         Self {
             pending_root: Some(component),
             arena: CompositionArena::new(),
@@ -424,7 +428,7 @@ impl CompositionDriver {
         element: Element,
         owner: ComponentInstanceId,
     ) -> Result<MountedElement, ViewError> {
-        let (key, kind) = element.into_parts();
+        let (key, kind, window_chrome_role, pointer_request) = element.into_parts();
         let mut mounted = match kind {
             ElementKind::Container(ContainerElement {
                 style,
@@ -494,24 +498,37 @@ impl CompositionDriver {
                 }
             }
             ElementKind::Button(props) => {
+                let mut icon_node = None;
                 let mut label_node = None;
                 let control = writer.button_node(props.style, |writer| {
+                    icon_node = Some(
+                        writer
+                            .dynamic_image(
+                                props.icon.unwrap_or(crate::ui::ImageId(0)),
+                                1,
+                                button_icon_style(&props),
+                                crate::ui::LayoutStyle::default(),
+                            )
+                            .node,
+                    );
                     label_node = Some(
                         writer
                             .dynamic_text(
                                 props.label.clone(),
                                 props.label_style,
-                                BoxStyle::default(),
+                                button_label_box_style(&props),
                                 crate::ui::LayoutStyle::default(),
                             )
                             .node,
                     );
                 });
                 writer.style_id(control.node, props.style_id);
+                let icon_node = icon_node.expect("button always mounts its icon slot");
                 let label_node = label_node.expect("button always mounts its label");
                 writer.style_binding(
                     StyleBinding::new(control.node, ThemeScopeId::new(0, 1), props.style_id)
                         .slot(StyleSlotId::named("root"), control.node)
+                        .slot(StyleSlotId::named("icon"), icon_node)
                         .slot(StyleSlotId::named("label"), label_node),
                 );
                 if props.style_override != StylePropertyPatch::default() {
@@ -535,6 +552,7 @@ impl CompositionDriver {
                     key: None,
                     kind: MountedKind::Button {
                         node: control.node,
+                        icon_node,
                         label_node,
                         props,
                     },
@@ -545,6 +563,11 @@ impl CompositionDriver {
             ElementKind::Component(component) => self.mount_component(writer, component)?,
         };
         mounted.key = key;
+        let root = self
+            .root_node(&mounted)
+            .expect("every mounted composition element has a root node");
+        writer.window_chrome_role(root, window_chrome_role);
+        writer.pointer_request(root, pointer_request);
         self.diagnostics.elements_mounted += 1;
         Ok(mounted)
     }
@@ -1006,7 +1029,7 @@ impl CompositionDriver {
             return Ok(mounted);
         }
 
-        let (key, kind) = candidate.into_parts();
+        let (key, kind, window_chrome_role, pointer_request) = candidate.into_parts();
         let result = match (&mut old.kind, kind) {
             (
                 MountedKind::Container {
@@ -1066,14 +1089,22 @@ impl CompositionDriver {
             (
                 MountedKind::Button {
                     node,
+                    icon_node,
                     label_node,
                     props,
                 },
                 ElementKind::Button(candidate),
             ) => {
                 ui.set_box_style(*node, candidate.style);
+                ui.set_image_visual(
+                    *icon_node,
+                    candidate.icon.unwrap_or(crate::ui::ImageId(0)),
+                    1,
+                );
+                ui.set_box_style(*icon_node, button_icon_style(&candidate));
                 ui.set_dynamic_text(*label_node, &candidate.label);
                 ui.set_text_style(*label_node, candidate.label_style);
+                ui.set_box_style(*label_node, button_label_box_style(&candidate));
                 ui.set_disabled(*node, !candidate.enabled);
                 ui.set_busy(*node, candidate.busy);
                 ui.set_style_id(*node, candidate.style_id);
@@ -1218,6 +1249,11 @@ impl CompositionDriver {
         if let Err(error) = result {
             return Err((old, error));
         }
+        let root = self
+            .root_node(&old)
+            .expect("every reconciled composition element has a root node");
+        ui.set_window_chrome_role(root, window_chrome_role);
+        ui.set_pointer_request(root, pointer_request);
         old.key = key;
         self.diagnostics.elements_reused += 1;
         Ok(old)
@@ -1585,6 +1621,33 @@ fn button_semantics(name: crate::ui::StringId, props: &ButtonElement) -> Semanti
     }
 }
 
+fn button_icon_style(props: &ButtonElement) -> BoxStyle {
+    let (size, opacity) = if props.icon.is_some() {
+        (props.icon_size.max(1.0), 1.0)
+    } else {
+        (0.0, 0.0)
+    };
+    BoxStyle {
+        width: SizeRule::Px(size),
+        height: SizeRule::Px(size),
+        opacity,
+        ..BoxStyle::default()
+    }
+}
+
+fn button_label_box_style(props: &ButtonElement) -> BoxStyle {
+    if props.icon.is_none() {
+        BoxStyle::default()
+    } else {
+        BoxStyle {
+            width: SizeRule::Px(0.0),
+            height: SizeRule::Px(0.0),
+            opacity: 0.0,
+            ..BoxStyle::default()
+        }
+    }
+}
+
 fn control_label_style(enabled: bool) -> crate::ui::TextStyle {
     crate::ui::TextStyle {
         color: if enabled {
@@ -1675,13 +1738,16 @@ fn checkbox_styles(value: SemanticCheckState, enabled: bool) -> CheckboxStyles {
             width: SizeRule::Px(18.0),
             height: SizeRule::Px(18.0),
         },
-        background: if checked {
-            Background::Color(ColorRgba8::rgba(54, 104, 210, opacity))
-        } else {
-            Background::Color(ColorRgba8::rgba(28, 31, 39, opacity))
+        decoration: crate::ui::BoxDecoration {
+            background: if checked {
+                Background::Color(ColorRgba8::rgba(54, 104, 210, opacity))
+            } else {
+                Background::Color(ColorRgba8::rgba(28, 31, 39, opacity))
+            },
+            border: Border::all(1.0, ColorRgba8::rgba(118, 127, 145, opacity)),
+            corner_radii: CornerRadii::all(4.0),
+            ..crate::ui::BoxDecoration::default()
         },
-        border: Border::all(1.0, ColorRgba8::rgba(118, 127, 145, opacity)),
-        corner_radii: CornerRadii::all(4.0),
         ..BoxStyle::default()
     };
     let mark = ColorRgba8::rgba(255, 255, 255, opacity);
@@ -1737,8 +1803,11 @@ fn mark_segment(start: PointF, end: PointF, background: Background) -> BoxStyle 
             width: SizeRule::Px(length),
             height: SizeRule::Px(stroke),
         },
-        background,
-        corner_radii: CornerRadii::all(stroke * 0.5),
+        decoration: crate::ui::BoxDecoration {
+            background,
+            corner_radii: CornerRadii::all(stroke * 0.5),
+            ..crate::ui::BoxDecoration::default()
+        },
         transform: Transform2D {
             translation: PointF {
                 x: OFFSET + start.x * SCALE,
@@ -1783,9 +1852,12 @@ fn switch_styles(value: bool, enabled: bool) -> SwitchStyles {
                 height: SizeRule::Px(22.0),
             },
             padding: EdgeInsets::all(2.0),
-            background: Background::Color(track_color),
-            border: Border::all(1.0, ColorRgba8::rgba(118, 127, 145, opacity)),
-            corner_radii: CornerRadii::all(11.0),
+            decoration: crate::ui::BoxDecoration {
+                background: Background::Color(track_color),
+                border: Border::all(1.0, ColorRgba8::rgba(118, 127, 145, opacity)),
+                corner_radii: CornerRadii::all(11.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         },
         thumb: BoxStyle {
@@ -1795,8 +1867,11 @@ fn switch_styles(value: bool, enabled: bool) -> SwitchStyles {
                 width: SizeRule::Px(16.0),
                 height: SizeRule::Px(16.0),
             },
-            background: Background::Color(ColorRgba8::rgba(248, 249, 252, opacity)),
-            corner_radii: CornerRadii::all(8.0),
+            decoration: crate::ui::BoxDecoration {
+                background: Background::Color(ColorRgba8::rgba(248, 249, 252, opacity)),
+                corner_radii: CornerRadii::all(8.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             transform: Transform2D {
                 translation: PointF {
                     x: if value { 16.0 } else { 0.0 },
@@ -1837,15 +1912,21 @@ fn slider_styles(value: f32, enabled: bool) -> SliderStyles {
                 width: SizeRule::Px(160.0),
                 height: SizeRule::Px(6.0),
             },
-            background: Background::Color(ColorRgba8::rgba(78, 87, 105, opacity)),
-            corner_radii: CornerRadii::all(3.0),
+            decoration: crate::ui::BoxDecoration {
+                background: Background::Color(ColorRgba8::rgba(78, 87, 105, opacity)),
+                corner_radii: CornerRadii::all(3.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         },
         fill: BoxStyle {
             width: SizeRule::Px(160.0 * value),
             height: SizeRule::Px(6.0),
-            background: Background::Color(accent),
-            corner_radii: CornerRadii::all(3.0),
+            decoration: crate::ui::BoxDecoration {
+                background: Background::Color(accent),
+                corner_radii: CornerRadii::all(3.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         },
         thumb: BoxStyle {
@@ -1855,9 +1936,12 @@ fn slider_styles(value: f32, enabled: bool) -> SliderStyles {
                 width: SizeRule::Px(18.0),
                 height: SizeRule::Px(18.0),
             },
-            background: Background::Color(ColorRgba8::rgba(245, 247, 251, opacity)),
-            border: Border::all(1.0, accent),
-            corner_radii: CornerRadii::all(9.0),
+            decoration: crate::ui::BoxDecoration {
+                background: Background::Color(ColorRgba8::rgba(245, 247, 251, opacity)),
+                border: Border::all(1.0, accent),
+                corner_radii: CornerRadii::all(9.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             transform: Transform2D {
                 translation: PointF {
                     x: (160.0 - 18.0) * value,

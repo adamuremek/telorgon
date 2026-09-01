@@ -148,7 +148,7 @@ impl SceneCompiler {
                 continue;
             }
             let style = ui.box_styles.get(*node).cloned().unwrap_or_default();
-            let background = match style.background {
+            let background = match style.decoration.background {
                 Background::None => None,
                 Background::Color(color) => Some(color),
             };
@@ -160,10 +160,10 @@ impl SceneCompiler {
                     rect: computed.local_border_rect,
                     view_bounds,
                     background,
-                    border: style.border,
-                    outline: style.outline,
-                    corner_radii: style.corner_radii,
-                    shadows: style.shadows,
+                    border: style.decoration.border,
+                    outline: style.decoration.outline,
+                    corner_radii: style.decoration.corner_radii,
+                    shadows: style.decoration.shadows,
                     opacity: style.opacity,
                     // A box's own overflow clip applies to descendants, never to its outside
                     // focus outline or shadow. Its visual is constrained only by ancestors.
@@ -194,7 +194,7 @@ impl SceneCompiler {
                     RenderClip {
                         id: computed.clip,
                         rect: computed.visible_rect,
-                        corner_radii: style.corner_radii,
+                        corner_radii: style.decoration.corner_radii,
                     },
                 );
             } else {
@@ -443,13 +443,13 @@ impl SceneCompiler {
 
 fn has_box_visual(style: &crate::ui::BoxStyle) -> bool {
     style.opacity > 0.0
-        && (style.background != Background::None
-            || style.border.top.width > 0.0
-            || style.border.right.width > 0.0
-            || style.border.bottom.width > 0.0
-            || style.border.left.width > 0.0
-            || style.outline.width > 0.0
-            || !style.shadows.as_slice().is_empty())
+        && (style.decoration.background != Background::None
+            || style.decoration.border.top.width > 0.0
+            || style.decoration.border.right.width > 0.0
+            || style.decoration.border.bottom.width > 0.0
+            || style.decoration.border.left.width > 0.0
+            || style.decoration.outline.width > 0.0
+            || !style.decoration.shadows.as_slice().is_empty())
 }
 
 fn positive_constraint(value: f32) -> Option<f32> {
@@ -483,14 +483,14 @@ fn box_visual_bounds(
     transform: crate::core::Affine2D,
     style: &crate::ui::BoxStyle,
 ) -> RectF {
-    let outline = (style.outline.offset + style.outline.width).max(0.0);
+    let outline = (style.decoration.outline.offset + style.decoration.outline.width).max(0.0);
     let mut local = RectF {
         x: rect.x - outline,
         y: rect.y - outline,
         width: rect.width + outline * 2.0,
         height: rect.height + outline * 2.0,
     };
-    for shadow in style.shadows.as_slice() {
+    for shadow in style.decoration.shadows.as_slice() {
         let reach = (shadow.spread + shadow.blur * 2.0).max(0.0);
         local = local.union(RectF {
             x: rect.x + shadow.offset.x - reach,
@@ -521,7 +521,10 @@ mod tests {
                 BoxStyle {
                     width: SizeRule::Fill(1.0),
                     height: SizeRule::Fill(1.0),
-                    background: Background::Color(ColorRgba8::rgba(1, 2, 3, 255)),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(1, 2, 3, 255)),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 LayoutStyle::default(),
@@ -674,7 +677,10 @@ mod tests {
                     BoxStyle {
                         width: SizeRule::Px(100.0),
                         height: SizeRule::Px(36.0),
-                        background: Background::Color(ColorRgba8::rgba(40, 80, 120, 255)),
+                        decoration: crate::ui::BoxDecoration {
+                            background: Background::Color(ColorRgba8::rgba(40, 80, 120, 255)),
+                            ..crate::ui::BoxDecoration::default()
+                        },
                         ..BoxStyle::default()
                     },
                     |_| {},
@@ -752,7 +758,10 @@ mod tests {
                             BoxStyle {
                                 width: SizeRule::Px(10.0),
                                 height: SizeRule::Px(1.0),
-                                background: Background::Color(ColorRgba8::rgba(1, 2, 3, 255)),
+                                decoration: crate::ui::BoxDecoration {
+                                    background: Background::Color(ColorRgba8::rgba(1, 2, 3, 255)),
+                                    ..crate::ui::BoxDecoration::default()
+                                },
                                 ..BoxStyle::default()
                             },
                             |_| {},
@@ -808,7 +817,10 @@ mod tests {
                     BoxStyle {
                         width: SizeRule::Px(20.0),
                         height: SizeRule::Px(20.0),
-                        background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                        decoration: crate::ui::BoxDecoration {
+                            background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                            ..crate::ui::BoxDecoration::default()
+                        },
                         ..BoxStyle::default()
                     },
                     LayoutStyle::default(),
@@ -868,14 +880,20 @@ mod tests {
             let mut saved = None;
             builder.root(
                 BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(1, 1, 1, 255)),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(1, 1, 1, 255)),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 LayoutStyle::default(),
                 |builder| {
                     saved = Some(builder.container(
                         BoxStyle {
-                            background: Background::Color(ColorRgba8::rgba(2, 2, 2, 255)),
+                            decoration: crate::ui::BoxDecoration {
+                                background: Background::Color(ColorRgba8::rgba(2, 2, 2, 255)),
+                                ..crate::ui::BoxDecoration::default()
+                            },
                             ..BoxStyle::default()
                         },
                         LayoutStyle::default(),

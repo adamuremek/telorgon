@@ -40,10 +40,15 @@ use crate::renderer_vulkan::{
 use crate::runtime::CompositionDriver;
 use crate::scene::NodeId;
 use crate::wayland_server::{Display, ProtocolCatalog, ProtocolSourcePaths};
+use crate::{
+    AssetBundle, AssetMediaCache, AssetRasterSize, PointerConfiguration, PointerGraphic,
+    PointerIcon, PointerRequest, PointerResolution, PointerTheme, WindowAction, WindowChromeModel,
+    WindowChromeSnapshot, WindowChromeState, WindowResizeEdge, resolve_pointer,
+};
 
 use crate::application_host::{
     AppError, AppResult, ComposedAppRuntime, LinuxDesktopConfig, ReadyDesktopEnvironment, Renderer,
-    ShellWidgetAnchor, ShellWidgetExtent,
+    ShellWidgetAnchor, ShellWidgetExtent, WindowFrameFactory,
 };
 
 struct Layer {
@@ -953,11 +958,16 @@ impl VulkanScanout {
 }
 
 impl Layer {
-    fn new(driver: CompositionDriver, extent: SizeI) -> AppResult<Self> {
+    fn new(driver: CompositionDriver, extent: SizeI, assets: AssetBundle) -> AppResult<Self> {
         let renderer = SoftwareRenderer;
         let scene = renderer.create_scene().map_err(app_error)?;
+        let mut runtime = ComposedAppRuntime::from_composition_driver(driver, extent)?;
+        let mut media = AssetMediaCache::new(assets).map_err(app_error)?;
+        for resource in media.preload_render_resources().map_err(app_error)? {
+            runtime.set_image_resource(resource)?;
+        }
         Ok(Self {
-            runtime: ComposedAppRuntime::from_composition_driver(driver, extent)?,
+            runtime,
             renderer,
             scene,
             surface: SoftwareSurface::default(),
@@ -999,6 +1009,25 @@ impl Layer {
         Ok(self.surface.pixels_rgba8())
     }
 
+    fn pointer_motion(&mut self, position: PointF, now: MonotonicInstant) -> bool {
+        self.runtime
+            .queue_input(crate::input::InputEvent::mouse_moved(position));
+        self.runtime.flush_input(now).frame_needed_after
+    }
+
+    fn pointer_button(&mut self, pressed: bool, now: MonotonicInstant) -> bool {
+        self.runtime
+            .queue_input(crate::input::InputEvent::mouse_button(
+                crate::input::PointerButton::PRIMARY,
+                if pressed {
+                    crate::input::ButtonState::Pressed
+                } else {
+                    crate::input::ButtonState::Released
+                },
+            ));
+        self.runtime.flush_input(now).frame_needed_after
+    }
+
     fn has_pending_runtime_turn(&self, now: MonotonicInstant) -> bool {
         self.runtime.has_pending_runtime_turn(now)
             || (self.runtime.needs_frame() && !self.runtime.animation_active())
@@ -1013,6 +1042,220 @@ impl Layer {
     }
 }
 
+fn route_frame_pointer_motion(
+    frames: &mut BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    position: PointF,
+    now: MonotonicInstant,
+) -> bool {
+    let mut repaint = false;
+    for (surface, frame) in frames {
+        let local = windows.get(surface).map_or(
+            PointF {
+                x: -1_000_000.0,
+                y: -1_000_000.0,
+            },
+            |window| PointF {
+                x: position.x - window.position.x as f32,
+                y: position.y - window.position.y as f32,
+            },
+        );
+        repaint |= frame.layer.pointer_motion(local, now);
+    }
+    repaint
+}
+
+fn route_frame_pointer_button(
+    frames: &mut BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+    pressed: bool,
+    now: MonotonicInstant,
+) -> bool {
+    frames.values_mut().fold(false, |repaint, frame| {
+        repaint | frame.layer.pointer_button(pressed, now)
+    })
+}
+
+fn refresh_window_frames(
+    factory: Option<&WindowFrameFactory>,
+    frames: &mut BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    wayland: &NativeCompositor<'_>,
+    config: &LinuxDesktopConfig,
+    assets: AssetBundle,
+    fallback_icon: &crate::AppIconProfile,
+    wake: &EventNotifier,
+    now: u64,
+) -> AppResult<()> {
+    let Some(factory) = factory else {
+        frames.clear();
+        for window in windows.values_mut() {
+            window.chrome_outer = None;
+            window.chrome_content_offset = None;
+            window.chrome = None;
+        }
+        return Ok(());
+    };
+
+    frames.retain(|surface, _| {
+        windows.get(surface).is_some_and(|window| {
+            window.role == SurfaceRole::XdgToplevel && window_is_decorated(window)
+        })
+    });
+
+    let active = wayland
+        .core()
+        .seats
+        .get(&1)
+        .and_then(|seat| seat.keyboard_focus)
+        .map(|focus| focus.surface);
+    let surfaces = windows
+        .iter()
+        .filter(|(_, window)| {
+            window.role == SurfaceRole::XdgToplevel && window_is_decorated(window)
+        })
+        .map(|(surface, _)| *surface)
+        .collect::<Vec<_>>();
+    let mut updates = Vec::with_capacity(surfaces.len());
+
+    for surface in surfaces {
+        let window = windows
+            .get(&surface)
+            .expect("frame candidates came from live windows");
+        let metadata = wayland.toplevel_metadata(surface);
+        let title = metadata.map_or_else(String::new, |metadata| {
+            if metadata.title.is_empty() {
+                metadata.application_id.clone()
+            } else {
+                metadata.title.clone()
+            }
+        });
+        let state = if window.fullscreen {
+            WindowChromeState::Fullscreen
+        } else if window.maximized {
+            WindowChromeState::Maximized
+        } else {
+            WindowChromeState::Normal
+        };
+        let protocol_icon = wayland.toplevel_icon(surface);
+        let icon_name = protocol_icon
+            .and_then(|icon| icon.name.clone())
+            .or_else(|| fallback_icon.name().map(str::to_owned));
+        let icon_image = protocol_icon.and_then(|icon| {
+            icon.images
+                .iter()
+                .min_by_key(|image| {
+                    let logical = image.image.descriptor.size.width / image.scale.max(1);
+                    logical.abs_diff(32)
+                })
+                .map(|image| (icon.revision, image.clone()))
+        });
+        let icon_image_id = icon_image
+            .as_ref()
+            .map(|(revision, _)| toplevel_icon_image_id(surface, *revision));
+        let mut model = WindowChromeModel::new(u64::from(surface.get()), title)
+            .state(state)
+            .active(active == Some(surface));
+        if let Some(name) = icon_name {
+            model = model.app_icon_name(name);
+        }
+        if let Some(image) = icon_image_id {
+            model = model.app_icon_image(image);
+        } else if let Some(icon) = fallback_icon.preferred(32) {
+            model = model.app_icon(icon);
+        }
+        let fallback_outer = legacy_window_outer(window, config);
+        let previous_outer = frames
+            .get(&surface)
+            .map_or(fallback_outer, |frame| frame.outer);
+        let rebuild = frames
+            .get(&surface)
+            .is_none_or(|frame| frame.model != model);
+        if rebuild {
+            let mut driver = factory.compose(model.clone());
+            driver.set_wake({
+                let wake = wake.clone();
+                move || wake.notify()
+            });
+            let mut layer = Layer::new(driver, previous_outer, assets)?;
+            if let Some((revision, icon)) = &icon_image {
+                let mut resource =
+                    shm_image_resource(icon.buffer, (*revision).max(1), icon.image.clone())
+                        .map_err(app_error)?;
+                resource.image = icon_image_id.expect("image source produced an image id");
+                resource.content_version = (*revision).max(1);
+                layer.runtime.set_image_resource(resource)?;
+            }
+            frames.insert(
+                surface,
+                WindowFrameLayer {
+                    model: model.clone(),
+                    layer,
+                    snapshot: None,
+                    outer: previous_outer,
+                    pixels: Vec::new(),
+                },
+            );
+        }
+
+        let frame = frames
+            .get_mut(&surface)
+            .expect("window frame was created above");
+        frame.model = model;
+        frame.layer.render(frame.outer, now, rebuild)?;
+        let mut snapshot =
+            WindowChromeSnapshot::derive(frame.layer.runtime.ui(), frame.layer.runtime.layout())
+                .map_err(app_error)?;
+        let content_width = snapshot.content.bounds.width.round().max(1.0) as i32;
+        let content_height = snapshot.content.bounds.height.round().max(1.0) as i32;
+        let corrected = SizeI {
+            width: frame
+                .outer
+                .width
+                .saturating_add(window.size.width.saturating_sub(content_width))
+                .max(1),
+            height: frame
+                .outer
+                .height
+                .saturating_add(window.size.height.saturating_sub(content_height))
+                .max(1),
+        };
+        if corrected != frame.outer {
+            frame.outer = corrected;
+            frame.layer.render(frame.outer, now, true)?;
+            snapshot = WindowChromeSnapshot::derive(
+                frame.layer.runtime.ui(),
+                frame.layer.runtime.layout(),
+            )
+            .map_err(app_error)?;
+        }
+        frame.snapshot = Some(snapshot.clone());
+        frame.pixels = frame.layer.render(frame.outer, now, false)?.to_vec();
+        updates.push((
+            surface,
+            frame.outer,
+            PointI {
+                x: snapshot.content.bounds.x.round() as i32,
+                y: snapshot.content.bounds.y.round() as i32,
+            },
+            snapshot,
+        ));
+    }
+
+    for (surface, outer, content_offset, snapshot) in updates {
+        if let Some(window) = windows.get_mut(&surface) {
+            window.chrome_outer = Some(outer);
+            window.chrome_content_offset = Some(content_offset);
+            window.chrome = Some(snapshot);
+        }
+    }
+    Ok(())
+}
+
+fn toplevel_icon_image_id(surface: WaylandSurfaceId, revision: u64) -> ImageId {
+    let folded = revision as u32 ^ (revision >> 32) as u32;
+    ImageId(0x6000_0000_u32 ^ surface.get().rotate_left(11) ^ folded.rotate_left(3))
+}
+
 struct WidgetLayer {
     anchor: ShellWidgetAnchor,
     width: ShellWidgetExtent,
@@ -1021,16 +1264,24 @@ struct WidgetLayer {
     layer: Layer,
 }
 
+struct WindowFrameLayer {
+    model: WindowChromeModel,
+    layer: Layer,
+    snapshot: Option<WindowChromeSnapshot>,
+    outer: SizeI,
+    pixels: Vec<u8>,
+}
+
 fn desktop_runtime_schedule(
     policy: &Layer,
-    frame: Option<&Layer>,
+    frames: &BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
     pointer: Option<&Layer>,
     icons: &[(String, Layer)],
     widgets: &[WidgetLayer],
     now: MonotonicInstant,
 ) -> (bool, Option<MonotonicInstant>, bool) {
     let layers = std::iter::once(policy)
-        .chain(frame)
+        .chain(frames.values().map(|frame| &frame.layer))
         .chain(pointer)
         .chain(icons.iter().map(|(_, layer)| layer))
         .chain(widgets.iter().map(|widget| &widget.layer));
@@ -1060,6 +1311,9 @@ struct ClientWindow {
     maximized: bool,
     fullscreen: bool,
     minimized: bool,
+    chrome_outer: Option<SizeI>,
+    chrome_content_offset: Option<PointI>,
+    chrome: Option<WindowChromeSnapshot>,
     rgba: Vec<u8>,
 }
 
@@ -1076,11 +1330,13 @@ enum WindowInteraction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecorationHit {
+    Frame,
     Titlebar,
     Resize(ResizeEdge),
     Close,
     Maximize,
     Minimize,
+    SystemMenu,
 }
 
 pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
@@ -1093,8 +1349,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         let _ = crate::profiler::register_view(view, "Desktop environment output");
         crate::profiler::enter_view(Some(view))
     };
-    let (_name, compositor, widgets, renderer, config) = application.into_parts()?;
-    let (mut policy, mut window_frame, mut pointer, mut icons) = compositor.into_runtime_parts();
+    let (_name, compositor, widgets, renderer, config, assets, pointer_config, app_icon_profile) =
+        application.into_parts()?;
+    let pointer_theme = pointer_config.load_theme(assets).map_err(app_error)?;
+    let mut pointer_media = AssetMediaCache::new(assets).map_err(app_error)?;
+    let (mut policy, window_frame, mut pointer, mut icons) = compositor.into_runtime_parts();
 
     let seat = LinuxSeat::open().map_err(app_error)?;
     seat.dispatch(0).map_err(app_error)?;
@@ -1241,12 +1500,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         let wake = runtime_wake.clone();
         move || wake.notify()
     });
-    if let Some(driver) = &mut window_frame {
-        driver.set_wake({
-            let wake = runtime_wake.clone();
-            move || wake.notify()
-        });
-    }
     if let Some(driver) = &mut pointer {
         driver.set_wake({
             let wake = runtime_wake.clone();
@@ -1327,12 +1580,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .keyboard_keymap(1, keymap.fd(), keymap.size())
         .map_err(app_error)?;
 
-    let mut policy = Layer::new(policy, extent)?;
-    let mut frame = window_frame
-        .map(|driver| Layer::new(driver, extent))
-        .transpose()?;
+    let mut policy = Layer::new(policy, extent, assets)?;
+    let mut frame_layers = BTreeMap::<WaylandSurfaceId, WindowFrameLayer>::new();
     let mut pointer = pointer
-        .map(|driver| Layer::new(driver, config.pointer_extent))
+        .map(|driver| Layer::new(driver, config.pointer_extent, assets))
         .transpose()?;
     let mut icon_layers = icons
         .into_iter()
@@ -1345,6 +1596,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         width: 24,
                         height: 24,
                     },
+                    assets,
                 )?,
             ))
         })
@@ -1375,7 +1627,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 width,
                 height,
                 reserved_space: reserved_space.round().max(0.0) as i32,
-                layer: Layer::new(driver, widget_extent)?,
+                layer: Layer::new(driver, widget_extent, assets)?,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -1434,7 +1686,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         );
         let (runtime_immediate, runtime_deadline, runtime_animation) = desktop_runtime_schedule(
             &policy,
-            frame.as_ref(),
+            &frame_layers,
             pointer.as_ref(),
             &icon_layers,
             &widgets,
@@ -1573,6 +1825,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             if pointer_position.x != previous_position.x
                                 || pointer_position.y != previous_position.y
                             {
+                                repaint |= route_frame_pointer_motion(
+                                    &mut frame_layers,
+                                    &windows,
+                                    pointer_position,
+                                    MonotonicInstant::from_nanos(
+                                        time_microseconds.saturating_mul(1_000),
+                                    ),
+                                );
                                 cursor_position_dirty = true;
                                 pointer_primary_dirty |= scene_follows_pointer;
                             }
@@ -1648,12 +1908,29 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             if pointer_position.x != previous_position.x
                                 || pointer_position.y != previous_position.y
                             {
+                                repaint |= route_frame_pointer_motion(
+                                    &mut frame_layers,
+                                    &windows,
+                                    pointer_position,
+                                    MonotonicInstant::from_nanos(
+                                        time_microseconds.saturating_mul(1_000),
+                                    ),
+                                );
                                 cursor_position_dirty = true;
                                 pointer_primary_dirty |= scene_follows_pointer;
                             }
                         }
                     }
                     LinuxInputEventKind::PointerButton { button, pressed } => {
+                        if button == 0x110 && !session_locked {
+                            repaint |= route_frame_pointer_button(
+                                &mut frame_layers,
+                                pressed,
+                                MonotonicInstant::from_nanos(
+                                    time_microseconds.saturating_mul(1_000),
+                                ),
+                            );
+                        }
                         if pressed
                             && button == 0x110
                             && !session_locked
@@ -1696,6 +1973,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                         stacking_order.retain(|candidate| *candidate != surface);
                                     }
                                 }
+                                DecorationHit::Frame | DecorationHit::SystemMenu => {}
                             }
                             repaint = true;
                             continue;
@@ -1936,7 +2214,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         );
         let (runtime_turn_ready, _, _) = desktop_runtime_schedule(
             &policy,
-            frame.as_ref(),
+            &frame_layers,
             pointer.as_ref(),
             &icon_layers,
             &widgets,
@@ -2116,16 +2394,28 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         (None, PointI::default(), position)
                     };
                     let is_new = !windows.contains_key(&surface);
-                    let (restore_geometry, maximized, fullscreen, minimized) = windows
-                        .get(&surface)
-                        .map_or((None, false, false, false), |window| {
+                    let (
+                        restore_geometry,
+                        maximized,
+                        fullscreen,
+                        minimized,
+                        chrome_outer,
+                        chrome_content_offset,
+                        chrome,
+                    ) = windows.get(&surface).map_or(
+                        (None, false, false, false, None, None, None),
+                        |window| {
                             (
                                 window.restore_geometry,
                                 window.maximized,
                                 window.fullscreen,
                                 window.minimized,
+                                window.chrome_outer,
+                                window.chrome_content_offset,
+                                window.chrome.clone(),
                             )
-                        });
+                        },
+                    );
                     windows.insert(
                         surface,
                         ClientWindow {
@@ -2143,6 +2433,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             maximized,
                             fullscreen,
                             minimized,
+                            chrome_outer,
+                            chrome_content_offset,
+                            chrome,
                             rgba: image.pixels_rgba8.to_vec(),
                         },
                     );
@@ -2161,6 +2454,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 }
                 CompositorAction::WithdrawSurface(surface) => {
                     windows.remove(&surface);
+                    frame_layers.remove(&surface);
                     stacking_order.retain(|candidate| *candidate != surface);
                     if matches!(
                         window_interaction,
@@ -2484,7 +2778,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             );
             let (_, _, animation_active) = desktop_runtime_schedule(
                 &policy,
-                frame.as_ref(),
+                &frame_layers,
                 pointer.as_ref(),
                 &icon_layers,
                 &widgets,
@@ -2554,6 +2848,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     &windows,
                     config.pointer_extent,
                     now,
+                    &pointer_config,
+                    pointer_theme.as_ref(),
+                    &mut pointer_media,
                 )?;
                 let next_cursor = rendered_cursor
                     .as_ref()
@@ -2586,6 +2883,19 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     continue;
                 }
             } else {
+                if !session_locked {
+                    refresh_window_frames(
+                        window_frame.as_ref(),
+                        &mut frame_layers,
+                        &mut windows,
+                        &wayland,
+                        &config,
+                        assets,
+                        &app_icon_profile,
+                        &runtime_wake,
+                        now,
+                    )?;
+                }
                 let mut output = if session_locked {
                     let mut pixels = vec![0_u8; extent.width as usize * extent.height as usize * 4];
                     for pixel in pixels.chunks_exact_mut(4) {
@@ -2622,19 +2932,25 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         continue;
                     }
                     let position = placements.get(surface).copied().unwrap_or(window.position);
-                    let outer = SizeI {
-                        width: window.size.width + config.window_border * 2,
-                        height: window.size.height
-                            + config.window_border * 2
-                            + config.titlebar_height,
-                    };
+                    let outer = window
+                        .chrome_outer
+                        .unwrap_or_else(|| legacy_window_outer(window, &config));
                     if window_is_decorated(window)
-                        && let Some(frame) = &mut frame
+                        && let Some(frame) = frame_layers.get(surface)
                     {
-                        let pixels = frame.render(outer, now, true)?;
-                        composite_rgba(&mut output, extent, pixels, outer, position, false);
+                        composite_rgba(
+                            &mut output,
+                            extent,
+                            &frame.pixels,
+                            frame.outer,
+                            position,
+                            false,
+                        );
                     }
-                    if window_is_decorated(window) && window.role == SurfaceRole::XdgToplevel {
+                    if window_is_decorated(window)
+                        && window.chrome.is_none()
+                        && window.role == SurfaceRole::XdgToplevel
+                    {
                         let icon_extent = SizeI {
                             width: config.titlebar_height.clamp(1, 24),
                             height: config.titlebar_height.clamp(1, 24),
@@ -2672,18 +2988,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         &window.rgba,
                         window.size,
                         PointI {
-                            x: position.x
-                                + if window_is_decorated(window) {
-                                    config.window_border
-                                } else {
-                                    0
-                                },
-                            y: position.y
-                                + if window_is_decorated(window) {
-                                    config.window_border + config.titlebar_height
-                                } else {
-                                    0
-                                },
+                            x: position.x + window_content_offset(window, &config).x,
+                            y: position.y + window_content_offset(window, &config).y,
                         },
                         true,
                     );
@@ -2727,6 +3033,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     &windows,
                     config.pointer_extent,
                     now,
+                    &pointer_config,
+                    pointer_theme.as_ref(),
+                    &mut pointer_media,
                 )?;
                 let mut cursor_on_hardware = false;
                 if let Some(cursor) = &mut hardware_cursor {
@@ -2974,63 +3283,202 @@ fn render_cursor_image(
     windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
     extent: SizeI,
     now: u64,
+    pointer_config: &PointerConfiguration,
+    pointer_theme: Option<&PointerTheme>,
+    pointer_media: &mut AssetMediaCache,
 ) -> AppResult<Option<RenderedCursor>> {
     let rendered = match image {
-        CursorImage::TelorgonDefault => pointer
-            .as_mut()
-            .map(|pointer| {
-                pointer
-                    .render(extent, now, false)
-                    .map(|pixels| RenderedCursor {
-                        rgba: pixels.to_vec(),
-                        size: extent,
-                        hotspot: PointI::default(),
-                        premultiplied: false,
-                    })
-            })
-            .transpose()?,
-        CursorImage::Shape(shape) => {
-            if let Some((_, icon)) = cursor_shape_icon_name(shape)
-                .and_then(|name| icons.iter_mut().find(|(candidate, _)| candidate == name))
-            {
-                Some(RenderedCursor {
-                    rgba: icon.render(extent, now, false)?.to_vec(),
-                    size: extent,
-                    hotspot: PointI::default(),
-                    premultiplied: true,
-                })
-            } else {
-                pointer
-                    .as_mut()
-                    .map(|pointer| {
-                        pointer
-                            .render(extent, now, false)
-                            .map(|pixels| RenderedCursor {
-                                rgba: pixels.to_vec(),
-                                size: extent,
-                                hotspot: PointI::default(),
-                                premultiplied: false,
-                            })
-                    })
-                    .transpose()?
-            }
-        }
+        CursorImage::TelorgonDefault => render_semantic_pointer(
+            PointerIcon::Default,
+            None,
+            pointer,
+            icons,
+            extent,
+            now,
+            pointer_config,
+            pointer_theme,
+            pointer_media,
+        )?,
+        CursorImage::Shape(shape) => render_semantic_pointer(
+            cursor_shape_pointer_icon(shape).unwrap_or(PointerIcon::Default),
+            cursor_shape_icon_name(shape),
+            pointer,
+            icons,
+            extent,
+            now,
+            pointer_config,
+            pointer_theme,
+            pointer_media,
+        )?,
         CursorImage::ClientSurface {
             surface,
             hotspot_x,
             hotspot_y,
-        } => windows.get(&surface).map(|cursor| RenderedCursor {
-            rgba: cursor.rgba.clone(),
-            size: cursor.size,
-            hotspot: PointI {
-                x: hotspot_x,
-                y: hotspot_y,
-            },
-            premultiplied: true,
-        }),
+        } => match resolve_pointer(
+            PointerRequest::ClientSurface,
+            pointer_config.client_cursor_mode(),
+            pointer_config.pointer_overrides(),
+            pointer_theme,
+        ) {
+            PointerResolution::ClientSurface => {
+                windows.get(&surface).map(|cursor| RenderedCursor {
+                    rgba: cursor.rgba.clone(),
+                    size: cursor.size,
+                    hotspot: PointI {
+                        x: hotspot_x,
+                        y: hotspot_y,
+                    },
+                    premultiplied: true,
+                })
+            }
+            PointerResolution::Graphic(graphic) => {
+                Some(render_asset_pointer(graphic, extent, now, pointer_media)?)
+            }
+            PointerResolution::System(icon) => {
+                render_composed_pointer(icon, None, pointer, icons, extent, now)?
+            }
+            PointerResolution::Hidden => None,
+        },
         CursorImage::Hidden => None,
     };
     Ok(rendered)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_semantic_pointer(
+    icon: PointerIcon,
+    composed_icon_name: Option<&str>,
+    pointer: &mut Option<Layer>,
+    icons: &mut [(String, Layer)],
+    extent: SizeI,
+    now: u64,
+    pointer_config: &PointerConfiguration,
+    pointer_theme: Option<&PointerTheme>,
+    pointer_media: &mut AssetMediaCache,
+) -> AppResult<Option<RenderedCursor>> {
+    match resolve_pointer(
+        PointerRequest::Semantic(icon),
+        pointer_config.client_cursor_mode(),
+        pointer_config.pointer_overrides(),
+        pointer_theme,
+    ) {
+        PointerResolution::Graphic(graphic) => Ok(Some(render_asset_pointer(
+            graphic,
+            extent,
+            now,
+            pointer_media,
+        )?)),
+        PointerResolution::System(icon) => {
+            render_composed_pointer(icon, composed_icon_name, pointer, icons, extent, now)
+        }
+        PointerResolution::Hidden => Ok(None),
+        PointerResolution::ClientSurface => {
+            unreachable!("semantic requests cannot resolve to a client surface")
+        }
+    }
+}
+
+fn render_asset_pointer(
+    graphic: &PointerGraphic,
+    fallback_extent: SizeI,
+    now_nanoseconds: u64,
+    media: &mut AssetMediaCache,
+) -> AppResult<RenderedCursor> {
+    let frame = if graphic.frames().len() == 1 {
+        graphic.frames()[0]
+    } else {
+        let cycle_ms = graphic
+            .frames()
+            .iter()
+            .filter_map(|frame| frame.duration_ms)
+            .map(|duration| u64::from(duration.get()))
+            .sum::<u64>();
+        let mut elapsed_ms = (now_nanoseconds / 1_000_000) % cycle_ms.max(1);
+        *graphic
+            .frames()
+            .iter()
+            .find(|frame| {
+                let duration = u64::from(
+                    frame
+                        .duration_ms
+                        .expect("animated frame was validated")
+                        .get(),
+                );
+                if elapsed_ms < duration {
+                    true
+                } else {
+                    elapsed_ms -= duration;
+                    false
+                }
+            })
+            .unwrap_or_else(|| {
+                graphic
+                    .frames()
+                    .last()
+                    .expect("pointer graphic has a frame")
+            })
+    };
+    let requested = if let Some(size) = graphic.physical_size() {
+        AssetRasterSize::new(u32::from(size), u32::from(size))
+    } else {
+        AssetRasterSize::new(
+            fallback_extent.width.max(1) as u32,
+            fallback_extent.height.max(1) as u32,
+        )
+    }
+    .map_err(app_error)?;
+    let decoded = media
+        .cursor(frame.asset, Some(requested))
+        .map_err(app_error)?;
+    let hotspot = graphic.pointer_hotspot();
+    if i32::from(hotspot.x) >= decoded.extent.width || i32::from(hotspot.y) >= decoded.extent.height
+    {
+        return Err(AppError::new(
+            "pointer hotspot is outside the decoded cursor image",
+        ));
+    }
+    Ok(RenderedCursor {
+        rgba: decoded.pixels_rgba8.to_vec(),
+        size: decoded.extent,
+        hotspot: PointI {
+            x: i32::from(hotspot.x),
+            y: i32::from(hotspot.y),
+        },
+        premultiplied: decoded.alpha_mode == ImageAlphaMode::Premultiplied,
+    })
+}
+
+fn render_composed_pointer(
+    _icon: PointerIcon,
+    composed_icon_name: Option<&str>,
+    pointer: &mut Option<Layer>,
+    icons: &mut [(String, Layer)],
+    extent: SizeI,
+    now: u64,
+) -> AppResult<Option<RenderedCursor>> {
+    if let Some((_, icon)) = composed_icon_name
+        .and_then(|name| icons.iter_mut().find(|(candidate, _)| candidate == name))
+    {
+        return Ok(Some(RenderedCursor {
+            rgba: icon.render(extent, now, false)?.to_vec(),
+            size: extent,
+            hotspot: PointI::default(),
+            premultiplied: true,
+        }));
+    }
+    pointer
+        .as_mut()
+        .map(|pointer| {
+            pointer
+                .render(extent, now, false)
+                .map(|pixels| RenderedCursor {
+                    rgba: pixels.to_vec(),
+                    size: extent,
+                    hotspot: PointI::default(),
+                    premultiplied: false,
+                })
+        })
+        .transpose()
 }
 
 fn composite_cursor_image(
@@ -3408,16 +3856,51 @@ fn hit_test_decoration(
         {
             continue;
         }
-        let outer = SizeI {
-            width: window.size.width + config.window_border * 2,
-            height: window.size.height + config.window_border * 2 + config.titlebar_height,
-        };
+        let outer = window
+            .chrome_outer
+            .unwrap_or_else(|| legacy_window_outer(window, config));
         let local = PointI {
             x: (position.x - window.position.x as f32).floor() as i32,
             y: (position.y - window.position.y as f32).floor() as i32,
         };
         if local.x < 0 || local.y < 0 || local.x >= outer.width || local.y >= outer.height {
             continue;
+        }
+        if let Some(chrome) = &window.chrome {
+            let point = PointF {
+                x: local.x as f32,
+                y: local.y as f32,
+            };
+            if chrome.content.bounds.contains(point) {
+                continue;
+            }
+            let hit = match chrome.hit_test(point.x, point.y) {
+                Some(crate::WindowChromeRole::DragRegion)
+                | Some(crate::WindowChromeRole::Action(WindowAction::BeginMove)) => {
+                    DecorationHit::Titlebar
+                }
+                Some(crate::WindowChromeRole::Action(WindowAction::BeginResize(edge))) => {
+                    DecorationHit::Resize(wayland_resize_edge(edge))
+                }
+                Some(crate::WindowChromeRole::Action(WindowAction::Close)) => DecorationHit::Close,
+                Some(crate::WindowChromeRole::Action(WindowAction::Minimize)) => {
+                    DecorationHit::Minimize
+                }
+                Some(crate::WindowChromeRole::Action(WindowAction::ToggleMaximize)) => {
+                    DecorationHit::Maximize
+                }
+                Some(crate::WindowChromeRole::Action(WindowAction::ShowSystemMenu)) => {
+                    DecorationHit::SystemMenu
+                }
+                Some(
+                    crate::WindowChromeRole::Frame
+                    | crate::WindowChromeRole::Content
+                    | crate::WindowChromeRole::Title
+                    | crate::WindowChromeRole::AppIcon,
+                )
+                | None => DecorationHit::Frame,
+            };
+            return Some((*surface, hit));
         }
         let border = config.window_border.max(1);
         let left = local.x < border;
@@ -3538,20 +4021,82 @@ fn cursor_shape_icon_name(shape: u32) -> Option<&'static str> {
     })
 }
 
+fn cursor_shape_pointer_icon(shape: u32) -> Option<PointerIcon> {
+    Some(match shape {
+        1 => PointerIcon::Default,
+        2 => PointerIcon::ContextMenu,
+        3 => PointerIcon::Help,
+        4 => PointerIcon::Pointer,
+        5 => PointerIcon::Progress,
+        6 => PointerIcon::Wait,
+        7 => PointerIcon::Cell,
+        8 => PointerIcon::Crosshair,
+        9 => PointerIcon::Text,
+        10 => PointerIcon::VerticalText,
+        11 => PointerIcon::Alias,
+        12 => PointerIcon::Copy,
+        13 => PointerIcon::Move,
+        14 => PointerIcon::NoDrop,
+        15 => PointerIcon::NotAllowed,
+        16 => PointerIcon::Grab,
+        17 => PointerIcon::Grabbing,
+        18 => PointerIcon::EResize,
+        19 => PointerIcon::NResize,
+        20 => PointerIcon::NeResize,
+        21 => PointerIcon::NwResize,
+        22 => PointerIcon::SResize,
+        23 => PointerIcon::SeResize,
+        24 => PointerIcon::SwResize,
+        25 => PointerIcon::WResize,
+        26 => PointerIcon::EwResize,
+        27 => PointerIcon::NsResize,
+        28 => PointerIcon::NeswResize,
+        29 => PointerIcon::NwseResize,
+        30 => PointerIcon::ColResize,
+        31 => PointerIcon::RowResize,
+        32 => PointerIcon::AllScroll,
+        33 => PointerIcon::ZoomIn,
+        34 => PointerIcon::ZoomOut,
+        _ => return None,
+    })
+}
+
 fn window_content_origin(window: &ClientWindow, config: &LinuxDesktopConfig) -> PointI {
+    let offset = window_content_offset(window, config);
     PointI {
-        x: window.position.x
-            + if window_is_decorated(window) {
-                config.window_border
-            } else {
-                0
-            },
-        y: window.position.y
-            + if window_is_decorated(window) {
-                config.window_border + config.titlebar_height
-            } else {
-                0
-            },
+        x: window.position.x + offset.x,
+        y: window.position.y + offset.y,
+    }
+}
+
+fn window_content_offset(window: &ClientWindow, config: &LinuxDesktopConfig) -> PointI {
+    if !window_is_decorated(window) {
+        PointI::default()
+    } else {
+        window.chrome_content_offset.unwrap_or(PointI {
+            x: config.window_border,
+            y: config.window_border + config.titlebar_height,
+        })
+    }
+}
+
+fn legacy_window_outer(window: &ClientWindow, config: &LinuxDesktopConfig) -> SizeI {
+    SizeI {
+        width: window.size.width + config.window_border * 2,
+        height: window.size.height + config.window_border * 2 + config.titlebar_height,
+    }
+}
+
+fn wayland_resize_edge(edge: WindowResizeEdge) -> ResizeEdge {
+    match edge {
+        WindowResizeEdge::Top => ResizeEdge::Top,
+        WindowResizeEdge::TopRight => ResizeEdge::TopRight,
+        WindowResizeEdge::Right => ResizeEdge::Right,
+        WindowResizeEdge::BottomRight => ResizeEdge::BottomRight,
+        WindowResizeEdge::Bottom => ResizeEdge::Bottom,
+        WindowResizeEdge::BottomLeft => ResizeEdge::BottomLeft,
+        WindowResizeEdge::Left => ResizeEdge::Left,
+        WindowResizeEdge::TopLeft => ResizeEdge::TopLeft,
     }
 }
 
@@ -3664,6 +4209,7 @@ fn union_rect(left: RectI, right: RectI) -> RectI {
     }
 }
 
+#[cfg(feature = "profiler")]
 fn rect_area(rect: RectI) -> u64 {
     u64::try_from(rect.width)
         .ok()

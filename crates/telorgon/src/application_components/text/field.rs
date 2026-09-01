@@ -87,9 +87,12 @@ impl Default for TextFieldStyle {
             TextFieldVisualStyle {
                 container: BoxStyle {
                     padding: EdgeInsets::all(padding),
-                    background: Background::Color(ColorRgba8::rgba(35, 39, 49, 255)),
-                    border: Border::all(1.0, ColorRgba8::rgba(92, 101, 123, 255)),
-                    corner_radii: CornerRadii::all(6.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(35, 39, 49, 255)),
+                        border: Border::all(1.0, ColorRgba8::rgba(92, 101, 123, 255)),
+                        corner_radii: CornerRadii::all(6.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 label_color: ColorRgba8::rgba(189, 195, 208, 255),

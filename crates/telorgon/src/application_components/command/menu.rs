@@ -115,23 +115,35 @@ impl Default for MenuStyle {
     fn default() -> Self {
         let item = BoxStyle {
             padding: EdgeInsets::all(6.0),
-            corner_radii: CornerRadii::all(4.0),
+            decoration: crate::ui::BoxDecoration {
+                corner_radii: CornerRadii::all(4.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         };
         Self {
             container: BoxStyle {
                 padding: EdgeInsets::all(4.0),
-                corner_radii: CornerRadii::all(6.0),
-                background: Background::Color(ColorRgba8::rgba(34, 37, 44, 255)),
+                decoration: crate::ui::BoxDecoration {
+                    corner_radii: CornerRadii::all(6.0),
+                    background: Background::Color(ColorRgba8::rgba(34, 37, 44, 255)),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             item,
             highlighted_item: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(66, 91, 139, 180)),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(66, 91, 139, 180)),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..item
             },
             checked_item: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(66, 91, 139, 90)),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(66, 91, 139, 90)),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..item
             },
             label_color: ColorRgba8::rgba(235, 238, 244, 255),

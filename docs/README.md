@@ -66,6 +66,9 @@ features.
     KMS path, including the exact advertised protocol profile and remaining qualification gaps.
 22. [Cargo publishing](PUBLISHING.md) records the registry prerequisites, validation commands, and
     dependency-ordered first-release sequence.
+23. [Custom windows, assets, icons, and pointers](CUSTOM_WINDOWS_ASSETS_AND_POINTERS.md) documents
+    the implemented composable frame contract, reusable box decoration, typed project media,
+    application icons, pointer themes, Wayland invariants, and complete API examples.
 
 ## Document roles
 

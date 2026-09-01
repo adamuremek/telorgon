@@ -56,7 +56,7 @@ pub use cursor::{
     CustomCursorAnimation, CustomCursorImage, MAX_CUSTOM_CURSOR_ANIMATION_BYTES,
     MAX_CUSTOM_CURSOR_ANIMATION_DURATION_MS, MAX_CUSTOM_CURSOR_DIMENSION,
     MAX_CUSTOM_CURSOR_FRAME_DURATION_MS, MAX_CUSTOM_CURSOR_FRAMES, MAX_CUSTOM_CURSOR_IMAGE_BYTES,
-    StandardCursor,
+    PointerIcon, StandardCursor,
 };
 pub use data_transfer::{
     DataFormat, DataFormatError, DataFormatKind, DataFormatReadRequest, DataOfferDescriptor,

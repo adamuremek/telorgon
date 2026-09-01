@@ -1304,7 +1304,10 @@ mod tests {
                 BoxStyle {
                     width: SizeRule::Fill(1.0),
                     height: SizeRule::Fill(1.0),
-                    background: Background::Color(ColorRgba8::rgba(255, 0, 0, 255)),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(255, 0, 0, 255)),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 LayoutStyle::default(),

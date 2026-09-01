@@ -49,7 +49,7 @@ impl Default for ToggleButtonStyle {
     fn default() -> Self {
         let off = ButtonStyle::default();
         let recolor = |mut visual: ButtonVisualStyle, color| {
-            visual.container.background = Background::Color(color);
+            visual.container.decoration.background = Background::Color(color);
             visual
         };
         let map =
@@ -243,8 +243,8 @@ mod tests {
         assert!(!off.value);
         assert!(on.value);
         assert_ne!(
-            off.visual.container.background,
-            on.visual.container.background
+            off.visual.container.decoration.background,
+            on.visual.container.decoration.background
         );
 
         let pressed = style.resolve(

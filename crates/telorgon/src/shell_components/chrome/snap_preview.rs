@@ -24,7 +24,10 @@ impl Default for SnapPreviewStyle {
     fn default() -> Self {
         Self {
             container: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(75, 132, 255, 96)),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(75, 132, 255, 96)),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             layout: LayoutStyle::default(),

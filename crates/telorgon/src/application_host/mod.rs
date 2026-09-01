@@ -49,7 +49,7 @@ pub use declaration::{
     Application, Compositor, CompositorVisual, DesktopEnvironment,
     DesktopEnvironmentWithCompositor, GuiApplication, LinuxDesktopConfig, ReadyCompositor,
     ReadyDesktopEnvironment, ReadyGuiApplication, ReadyShellWidget, ReadyWindow, Renderer,
-    ShellWidget, ShellWidgetAnchor, ShellWidgetExtent, Window,
+    ShellWidget, ShellWidgetAnchor, ShellWidgetExtent, Window, WindowFrameFactory,
 };
 pub use delta_queue::SceneDeltaQueue;
 pub use error::{AppError, AppResult};
@@ -65,4 +65,4 @@ pub use task_host::{
     ManagedComponentRuntime, ManagedComponentTaskTurn, ManagedTaskCapabilities,
     ManagedTaskDiagnostics, ManagedTaskExecutor, ManagedTaskHost, ManagedTaskPoll,
 };
-pub use window::WindowOptions;
+pub use window::{WindowDecorationMode, WindowOptions};

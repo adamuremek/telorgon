@@ -317,7 +317,10 @@ mod tests {
                     text,
                     container: BoxStyle {
                         width: SizeRule::Px(240.0),
-                        background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                        decoration: crate::ui::BoxDecoration {
+                            background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                            ..crate::ui::BoxDecoration::default()
+                        },
                         opacity: 0.8,
                         ..BoxStyle::default()
                     },

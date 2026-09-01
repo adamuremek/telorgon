@@ -73,6 +73,11 @@ pub const CURSOR_SHAPE_INTERFACES: &[InterfaceSpec] = &[
     InterfaceSpec::new("wp_cursor_shape_device_v1", 2, 2),
 ];
 
+pub const XDG_TOPLEVEL_ICON_INTERFACES: &[InterfaceSpec] = &[
+    InterfaceSpec::new("xdg_toplevel_icon_manager_v1", 1, 1),
+    InterfaceSpec::new("xdg_toplevel_icon_v1", 1, 1),
+];
+
 pub const FRACTIONAL_SCALE_INTERFACES: &[InterfaceSpec] = &[
     InterfaceSpec::new("wp_fractional_scale_manager_v1", 1, 1),
     InterfaceSpec::new("wp_fractional_scale_v1", 1, 1),
@@ -179,6 +184,12 @@ pub const DESKTOP_PROTOCOLS: &[ProtocolSpec] = &[
         interfaces: CURSOR_SHAPE_INTERFACES,
     },
     ProtocolSpec {
+        name: "xdg-toplevel-icon-v1",
+        stage: ProtocolStage::Staging,
+        source: "staging/xdg-toplevel-icon/xdg-toplevel-icon-v1.xml",
+        interfaces: XDG_TOPLEVEL_ICON_INTERFACES,
+    },
+    ProtocolSpec {
         name: "fractional-scale-v1",
         stage: ProtocolStage::Staging,
         source: "staging/fractional-scale/fractional-scale-v1.xml",
@@ -253,5 +264,26 @@ mod tests {
         assert_eq!(interface("xdg_wm_base").unwrap().advertised_version, 7);
         assert_eq!(interface("wl_surface").unwrap().advertised_version, 6);
         assert!(interface("wl_shell").is_none());
+    }
+
+    #[test]
+    fn profile_advertises_the_complete_toplevel_icon_pair() {
+        assert_eq!(
+            interface("xdg_toplevel_icon_manager_v1"),
+            Some(InterfaceSpec::new("xdg_toplevel_icon_manager_v1", 1, 1))
+        );
+        assert_eq!(
+            interface("xdg_toplevel_icon_v1"),
+            Some(InterfaceSpec::new("xdg_toplevel_icon_v1", 1, 1))
+        );
+        let protocol = DESKTOP_PROTOCOLS
+            .iter()
+            .find(|protocol| protocol.name == "xdg-toplevel-icon-v1")
+            .unwrap();
+        assert_eq!(protocol.stage, ProtocolStage::Staging);
+        assert_eq!(
+            protocol.source,
+            "staging/xdg-toplevel-icon/xdg-toplevel-icon-v1.xml"
+        );
     }
 }

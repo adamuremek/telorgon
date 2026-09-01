@@ -63,6 +63,8 @@ All framework implementation source is under `crates/telorgon/src`:
 | `profiler` | `src/profiler` | Compile-optional bounded event production and capture ownership |
 | `profiler_server` | `src/profiler_server` | Managed-only loopback profiler service and embedded viewer assets |
 | `application_host` | `src/application_host` | Managed application preparation, orchestration, and backend assembly |
+| `assets` | `src/assets.rs`, `src/assets` | Typed embedded catalogs, bounded raster/SVG media, icon profiles, and pointer themes |
+| `window_chrome` | `src/window_chrome.rs` | Per-window metadata, semantic frame roles/actions, and layout-derived hit regions |
 | `embed` | `src/embed` | Window-system-free host-driven Vulkan embedding |
 
 `src/lib.rs` declares these modules, re-exports the curated public facade, and contains no

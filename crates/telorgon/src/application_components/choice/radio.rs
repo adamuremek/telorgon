@@ -243,26 +243,35 @@ impl Default for RadioStyle {
                         height: SizeRule::Px(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
-                    background,
-                    corner_radii: CornerRadii::all(4.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background,
+                        corner_radii: CornerRadii::all(4.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 indicator: BoxStyle {
                     width: SizeRule::Px(18.0),
                     height: SizeRule::Px(18.0),
-                    border: Border::all(1.0, ColorRgba8::rgba(109, 119, 139, opacity)),
-                    corner_radii: CornerRadii::all(9.0),
+                    decoration: crate::ui::BoxDecoration {
+                        border: Border::all(1.0, ColorRgba8::rgba(109, 119, 139, opacity)),
+                        corner_radii: CornerRadii::all(9.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 dot: BoxStyle {
                     width: SizeRule::Px(if selected { 10.0 } else { 0.0 }),
                     height: SizeRule::Px(if selected { 10.0 } else { 0.0 }),
-                    background: if selected {
-                        Background::Color(ColorRgba8::rgba(76, 132, 235, opacity))
-                    } else {
-                        Background::None
+                    decoration: crate::ui::BoxDecoration {
+                        background: if selected {
+                            Background::Color(ColorRgba8::rgba(76, 132, 235, opacity))
+                        } else {
+                            Background::None
+                        },
+                        corner_radii: CornerRadii::all(5.0),
+                        ..crate::ui::BoxDecoration::default()
                     },
-                    corner_radii: CornerRadii::all(5.0),
                     ..BoxStyle::default()
                 },
                 label_color: ColorRgba8::rgba(235, 238, 244, opacity),

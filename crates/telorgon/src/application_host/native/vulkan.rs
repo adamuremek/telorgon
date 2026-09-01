@@ -28,7 +28,7 @@ use crate::application_host::{AppError, AppResult};
 
 #[cfg(not(feature = "application-software"))]
 pub fn run_gui_vulkan(application: ReadyGuiApplication) -> AppResult<()> {
-    let (driver, options, renderer) = application.into_parts()?;
+    let (driver, options, renderer, assets, pointer) = application.into_parts()?;
     if renderer == crate::application_host::Renderer::Software {
         return Err(AppError::new(
             "this build does not include the managed software renderer",
@@ -37,7 +37,7 @@ pub fn run_gui_vulkan(application: ReadyGuiApplication) -> AppResult<()> {
     let event_loop =
         create_managed_event_loop(crate::application_host::profiler::ProfileTarget::Gui)?;
     let presentation = create_vulkan_presentation(event_loop.event_loop())?;
-    run_composed_managed(event_loop, driver, options, presentation)
+    run_composed_managed(event_loop, driver, options, assets, pointer, presentation)
 }
 
 pub(crate) fn create_vulkan_presentation(

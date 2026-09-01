@@ -379,3 +379,13 @@ impl From<RuntimeError> for WindowTitlebarMountError {
         Self::Runtime(value)
     }
 }
+
+// `TitleBar` is the canonical spelling in the composable-window API. Keep the earlier
+// `Titlebar` spellings as source-compatible names for imperative shell components.
+pub type WindowTitleBar = WindowTitlebar;
+pub type WindowTitleBarStyle = WindowTitlebarStyle;
+pub type WindowTitleBarRef = WindowTitlebarRef;
+pub type WindowTitleBarError = WindowTitlebarError;
+pub type WindowTitleBarMountError = WindowTitlebarMountError;
+pub type TitleBarMoveIntent = TitlebarMoveIntent;
+pub type TitleBarMoveError = TitlebarMoveError;

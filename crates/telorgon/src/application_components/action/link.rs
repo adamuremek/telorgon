@@ -155,12 +155,18 @@ impl Default for LinkStyle {
                 bottom: 5.0,
                 left: 4.0,
             },
-            corner_radii: CornerRadii::all(4.0),
+            decoration: crate::ui::BoxDecoration {
+                corner_radii: CornerRadii::all(4.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         };
         let visual = |label_color, background| LinkVisualStyle {
             container: BoxStyle {
-                background,
+                decoration: crate::ui::BoxDecoration {
+                    background,
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..container
             },
             label_color,

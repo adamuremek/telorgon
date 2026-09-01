@@ -1,7 +1,8 @@
+use crate::assets::ImageSource;
 use crate::core::{ColorRgba8, EdgeInsets};
 use crate::ui::{
-    Background, BoxStyle, ComponentStyleId, CornerRadii, SizeRule, SizeRule2D, StylePropertyPatch,
-    TextAlign, TextStyle as RetainedTextStyle, ThemeDomainId,
+    Background, Border, BoxDecoration, BoxStyle, ComponentStyleId, CornerRadii, ImageId, SizeRule,
+    SizeRule2D, StylePropertyPatch, TextAlign, TextStyle as RetainedTextStyle, ThemeDomainId,
 };
 
 use crate::compose::{Component, ComponentCallback, Element, ElementKind, Insets, Key, View};
@@ -16,6 +17,8 @@ pub struct ButtonElement {
     pub label_style: RetainedTextStyle,
     pub style_id: ComponentStyleId,
     pub style_override: StylePropertyPatch,
+    pub icon: Option<ImageId>,
+    pub icon_size: f32,
     pub on_press: Option<ComponentCallback>,
 }
 
@@ -56,8 +59,55 @@ impl Button {
         self
     }
 
-    pub fn style(mut self, style: BoxStyle) -> Self {
+    pub fn box_style(mut self, style: BoxStyle) -> Self {
         self.element.style = style;
+        self
+    }
+
+    /// Replaces the visible text with registered icon artwork while retaining `label` as the
+    /// button's accessible name.
+    pub fn icon(mut self, icon: impl Into<ImageSource>) -> Self {
+        self.element.icon = Some(icon.into().image_id());
+        self
+    }
+
+    pub fn icon_size(mut self, size: f32) -> Self {
+        self.element.icon_size = size.max(1.0);
+        self
+    }
+
+    #[deprecated(since = "0.1.12", note = "use `box_style` for normalized vocabulary")]
+    pub fn style(self, style: BoxStyle) -> Self {
+        self.box_style(style)
+    }
+
+    pub fn decoration(mut self, decoration: BoxDecoration) -> Self {
+        self.element.style.decoration = decoration;
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.element.style.decoration.background = background.into();
+        self
+    }
+
+    pub fn uniform_border(mut self, width: f32, color: ColorRgba8) -> Self {
+        self.element.style.decoration.border = Border::all(width, color);
+        self
+    }
+
+    pub fn corner_radius(mut self, radius: f32) -> Self {
+        self.element.style.decoration.corner_radii = CornerRadii::all(radius);
+        self
+    }
+
+    pub fn width(mut self, width: impl Into<crate::compose::Dimension>) -> Self {
+        self.element.style.width = width.into().into();
+        self
+    }
+
+    pub fn height(mut self, height: impl Into<crate::compose::Dimension>) -> Self {
+        self.element.style.height = height.into().into();
         self
     }
 
@@ -66,9 +116,9 @@ impl Button {
         self
     }
 
-    pub fn radius(mut self, radius: f32) -> Self {
-        self.element.style.corner_radii = CornerRadii::all(radius);
-        self
+    #[deprecated(since = "0.1.12", note = "use `corner_radius`")]
+    pub fn radius(self, radius: f32) -> Self {
+        self.corner_radius(radius)
     }
 
     pub fn style_id(mut self, style: ComponentStyleId) -> Self {
@@ -100,8 +150,11 @@ pub fn button(label: impl Into<String>) -> Button {
             bottom: 0.0,
             left: 0.0,
         },
-        background: Background::Color(ColorRgba8::rgba(54, 60, 74, 255)),
-        corner_radii: CornerRadii::all(0.0),
+        decoration: crate::ui::BoxDecoration {
+            background: Background::Color(ColorRgba8::rgba(54, 60, 74, 255)),
+            corner_radii: CornerRadii::all(0.0),
+            ..crate::ui::BoxDecoration::default()
+        },
         ..BoxStyle::default()
     };
     Button {
@@ -121,6 +174,8 @@ pub fn button(label: impl Into<String>) -> Button {
             },
             style_id: ComponentStyleId::named(ThemeDomainId::APPLICATION, "button", "default"),
             style_override: StylePropertyPatch::default(),
+            icon: None,
+            icon_size: 18.0,
             on_press: None,
         },
     }

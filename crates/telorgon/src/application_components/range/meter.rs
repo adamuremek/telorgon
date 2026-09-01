@@ -175,7 +175,7 @@ impl MeterStyle {
             DensityClass::Standard => self.standard,
             DensityClass::Touch => self.touch,
         };
-        visual.fill.background = Background::Color(visual.colors.for_level(level));
+        visual.fill.decoration.background = Background::Color(visual.colors.for_level(level));
         ResolvedMeterStyle {
             density,
             level,
@@ -193,12 +193,18 @@ impl Default for MeterStyle {
                     ..BoxStyle::default()
                 },
                 track: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(76, 84, 101, 255)),
-                    corner_radii: CornerRadii::all(track_thickness * 0.5),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(76, 84, 101, 255)),
+                        corner_radii: CornerRadii::all(track_thickness * 0.5),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 fill: BoxStyle {
-                    corner_radii: CornerRadii::all(track_thickness * 0.5),
+                    decoration: crate::ui::BoxDecoration {
+                        corner_radii: CornerRadii::all(track_thickness * 0.5),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 colors: MeterLevelColors {
@@ -536,7 +542,7 @@ mod tests {
         assert_eq!(compact.visual.label_size, 12.0);
         assert_eq!(touch.visual.label_size, 16.0);
         assert_eq!(
-            touch.visual.fill.background,
+            touch.visual.fill.decoration.background,
             Background::Color(touch.visual.colors.critical)
         );
     }
@@ -651,7 +657,7 @@ mod tests {
         assert_eq!(fill.width, SizeRule::Px(120.0));
         assert_eq!(fill.height, SizeRule::Px(6.0));
         assert_eq!(
-            fill.background,
+            fill.decoration.background,
             Background::Color(MeterStyle::default().touch.colors.caution)
         );
     }

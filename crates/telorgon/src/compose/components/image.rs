@@ -1,6 +1,7 @@
+use crate::assets::ImageSource;
 use crate::ui::{BoxStyle, ImageId, LayoutStyle};
 
-use crate::compose::{Element, ElementKind, Key, View};
+use crate::compose::{Dimension, Element, ElementKind, Key, View};
 
 #[doc(hidden)]
 #[derive(Clone, Debug, PartialEq)]
@@ -34,8 +35,23 @@ impl Image {
         self
     }
 
-    pub fn style(mut self, style: BoxStyle) -> Self {
+    pub fn box_style(mut self, style: BoxStyle) -> Self {
         self.element.style = style;
+        self
+    }
+
+    #[deprecated(since = "0.1.12", note = "use `box_style` for normalized vocabulary")]
+    pub fn style(self, style: BoxStyle) -> Self {
+        self.box_style(style)
+    }
+
+    pub fn width(mut self, width: impl Into<Dimension>) -> Self {
+        self.element.style.width = width.into().into();
+        self
+    }
+
+    pub fn height(mut self, height: impl Into<Dimension>) -> Self {
+        self.element.style.height = height.into().into();
         self
     }
 
@@ -51,7 +67,8 @@ impl View for Image {
     }
 }
 
-pub fn image(image: ImageId) -> Image {
+pub fn image(image: impl Into<ImageSource>) -> Image {
+    let image = image.into().image_id();
     Image {
         key: None,
         element: ImageElement {

@@ -1,0 +1,5 @@
+fallback = "system"
+
+[pointer]
+asset = "cursors/pointer.svg"
+hotspot = [3, 2]

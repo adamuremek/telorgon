@@ -139,8 +139,11 @@ impl Default for ButtonStyle {
                 bottom: 7.0,
                 left: 12.0,
             },
-            background: Background::Color(color),
-            corner_radii: CornerRadii::all(6.0),
+            decoration: crate::ui::BoxDecoration {
+                background: Background::Color(color),
+                corner_radii: CornerRadii::all(6.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         };
         let visual = |color, label_color| ButtonVisualStyle {

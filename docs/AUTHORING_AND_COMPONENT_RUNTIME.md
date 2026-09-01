@@ -134,7 +134,7 @@ Composition containers (`row`, `column`, `stack`, and container-based convenienc
 replaces the complete style, including these size rules.
 
 Containers accept a complete `BoxStyle` through `.style(...)` and expose concise field setters such
-as `.background(...)`, `.padding(...)`, and `.radius(...)`. Text follows the same model with a
+as `.background(...)`, `.padding(...)`, and `.corner_radius(...)`. Text follows the same model with a
 sparse, reusable `TextStyle`:
 
 ```rust,ignore

@@ -18,24 +18,30 @@ pixels are normal Telorgon `Component` values:
 Application::desktop_environment("Telorgon")
     .linux(LinuxDesktopConfig::default())
     .renderer(Renderer::Auto)
+    .assets(assets::bundle())
+    .app_icon(app_icons())
+    .cursor_theme(assets::cursors::DEFAULT)
     .compositor(
         Compositor::new()
-            .window_frame(MyWindowFrame)
-            .pointer(MyDefaultPointer)
-            .icon("window.close", MyCloseIcon)
-            .icon("window.maximize", MyMaximizeIcon)
+            .window_frame(|model| MyWindowFrame { model })
             .policy(MyCompositorPolicy),
     )
     .shell_widget(ShellWidget::new("panel").content(MyPanel))
     .run()?;
 ```
 
-The frame component is rendered at each server-decorated window's outer extent. The pointer
-component is rendered at `LinuxDesktopConfig::pointer_extent`. Icons use stable semantic names and
-are mounted as compositor-target compositions. The close, maximize, and minimize semantic icons
-render in their corresponding frame controls and define those controls' hit regions. A
-client-provided `wl_pointer` cursor surface overrides the default pointer, and a client-side
-xdg-decoration request suppresses Telorgon's frame.
+The frame factory receives a fresh `WindowChromeModel` for each server-decorated toplevel and is
+rendered at that window's outer extent. The model carries title, activation, state, capabilities,
+and application-icon metadata. Visuals are normal Telorgon composition using `BoxDecoration` plus
+explicit title, icon, drag, resize, content-slot, and action roles. Final retained layout defines
+the client-content offset and hit regions; no fixed control placement is imposed by the host.
+
+The typed project asset bundle is shared by frames, normal shell composition, pointer themes, and
+the desktop fallback `AppIconProfile`. Client-provided `xdg_toplevel_icon_v1` name/buffer snapshots
+override that fallback. A permitted client-provided `wl_pointer` cursor surface overrides the
+configured pointer theme, and a client-side xdg-decoration request suppresses Telorgon's frame.
+See [Custom windows, assets, icons, and pointers](CUSTOM_WINDOWS_ASSETS_AND_POINTERS.md) for the
+complete authoring API.
 
 `LinuxDesktopConfig` selects the DRM device, seat, optional Wayland socket name, output scale,
 frame dimensions, and pointer extent. The umbrella exposes this mode through the
@@ -100,6 +106,7 @@ resource's negotiated version. The machine-readable profile is
 | `xdg_wm_base` | 7 | Always |
 | `zxdg_decoration_manager_v1` | 1 | Always |
 | `wp_cursor_shape_manager_v1` | 1 | Always |
+| `xdg_toplevel_icon_manager_v1` | 1 | Always; commit-synchronized named or square SHM icon snapshots |
 | `wp_fractional_scale_manager_v1` | 1 | Always |
 | `wp_viewporter` | 1 | Always; commit-synchronized source crop and destination scale |
 | `wp_presentation` | 2 | Always; commit-scoped monotonic feedback after KMS commit |
@@ -125,7 +132,9 @@ double-buffered. Damage, opaque/input regions, scale, transform, offset, frame c
 attachments, and subsurface relationships flow through the commit model.
 
 Implemented shell roles are xdg-toplevel, xdg-popup, wl-subsurface, session-lock, drag icon, and
-pointer cursor. Popups retain positioner anchor, gravity, offset, and constraint flags and receive
+pointer cursor. Toplevel icons accept bounded square SHM buffers and optional desktop icon names,
+become immutable when assigned, and latch to the target surface's next commit. Popups retain
+positioner anchor, gravity, offset, and constraint flags and receive
 configure/repositioned events. Synchronized subsurfaces cache their state until the parent commit.
 Server-side decoration is the default; explicit client-side negotiation is respected. The managed
 policy loop maintains explicit stacking, keyboard activation state, titlebar and client-requested
@@ -251,7 +260,7 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
 The implementation is based on the following primary specifications and source audits:
 
 - [Wayland server API](https://wayland.freedesktop.org/docs/html/apc.html), [wire/XML rules](https://wayland.freedesktop.org/docs/book/Message_XML.html), and [core protocol](https://wayland.freedesktop.org/docs/html/apa.html) define transport/resource and core object behavior.
-- [xdg-shell](https://wayland.app/protocols/xdg-shell), [xdg-decoration](https://wayland.app/protocols/xdg-decoration-unstable-v1), [xdg-activation](https://wayland.app/protocols/xdg-activation-v1), [session-lock](https://wayland.app/protocols/ext-session-lock-v1), [cursor-shape](https://wayland.app/protocols/cursor-shape-v1), [linux-dmabuf](https://wayland.app/protocols/linux-dmabuf-v1), and [explicit synchronization](https://wayland.app/protocols/linux-explicit-synchronization-unstable-v1) define the implemented extension contracts.
+- [xdg-shell](https://wayland.app/protocols/xdg-shell), [xdg-decoration](https://wayland.app/protocols/xdg-decoration-unstable-v1), [xdg-toplevel-icon](https://wayland.app/protocols/xdg-toplevel-icon-v1), [xdg-activation](https://wayland.app/protocols/xdg-activation-v1), [session-lock](https://wayland.app/protocols/ext-session-lock-v1), [cursor-shape](https://wayland.app/protocols/cursor-shape-v1), [linux-dmabuf](https://wayland.app/protocols/linux-dmabuf-v1), and [explicit synchronization](https://wayland.app/protocols/linux-explicit-synchronization-unstable-v1) define the implemented extension contracts.
 - [DRM KMS documentation](https://docs.kernel.org/gpu/drm-kms.html) and the official libdrm [`xf86drmMode.h`](https://cgit.freedesktop.org/drm/libdrm/tree/xf86drmMode.h) define atomic presentation and exact ABI layouts. The source audit caught the legacy coordinate fields that precede `possible_crtcs` in `drmModePlane`.
 - The [Vulkan explicit DRM modifier structure](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageDrmFormatModifierExplicitCreateInfoEXT.html) requires each explicit plane layout's `size` to be zero.
 - wgpu commit `d99c241a3b9dcc0f6674d990d007d79e94d39862` was inspected for DMA-BUF import capability and ownership invariants; Flutter commit `51fd9afadf309ba5337320bd3653f5345c156cb9` was inspected for sync-FD ownership and frame-slot reuse. Those projects are references only; no framework code or abstraction was copied.

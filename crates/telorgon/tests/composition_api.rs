@@ -151,11 +151,146 @@ fn sealed_application_declaration_owns_initial_content() {
     assert!(debug.contains("renderer: Auto"));
 }
 
+#[component]
+struct FrameFixture {}
+
+impl Component for FrameFixture {
+    fn view(&self) -> impl View {
+        window_frame()
+            .decoration(
+                BoxDecoration::new()
+                    .background(Background::Color(ColorRgba8::rgba(24, 27, 35, 255)))
+                    .corner_radius(12.0)
+                    .shadow(Shadow {
+                        offset: PointF { x: 0.0, y: 8.0 },
+                        blur: 24.0,
+                        spread: 0.0,
+                        color: ColorRgba8::rgba(0, 0, 0, 96),
+                    }),
+            )
+            .child(
+                row()
+                    .height(36.0)
+                    .child(text("Example").window_title())
+                    .window_drag_region(),
+            )
+            .child(
+                button("Close")
+                    .width(32.0)
+                    .height(32.0)
+                    .corner_radius(8.0)
+                    .window_action(WindowAction::Close),
+            )
+            .content_slot(window_content_slot().margin((40.0, 6.0, 6.0, 6.0)))
+    }
+}
+
+#[test]
+fn composed_window_frame_exposes_layout_derived_shell_regions() {
+    let mut runtime = telorgon::application_host::AppRuntimeCore::from_composed_with_extent(
+        FrameFixture::default(),
+        telorgon::SizeI {
+            width: 332,
+            height: 252,
+        },
+    )
+    .unwrap();
+    runtime
+        .prepare_frame(telorgon::MonotonicInstant::ZERO, true)
+        .unwrap();
+
+    let snapshot = telorgon::WindowChromeSnapshot::derive(runtime.ui(), runtime.layout()).unwrap();
+    assert_eq!(snapshot.frame.bounds.width, 332.0);
+    assert_eq!(snapshot.content.bounds.x, 6.0);
+    assert_eq!(snapshot.content.bounds.y, 40.0);
+    assert_eq!(snapshot.content.bounds.width, 320.0);
+    assert!(
+        snapshot.regions.iter().any(|region| {
+            region.role == telorgon::WindowChromeRole::Action(WindowAction::Close)
+        })
+    );
+    assert!(
+        snapshot
+            .regions
+            .iter()
+            .any(|region| region.role == telorgon::WindowChromeRole::DragRegion)
+    );
+    assert_eq!(
+        snapshot.hit_test(4.0, 4.0),
+        Some(telorgon::WindowChromeRole::Action(WindowAction::Close))
+    );
+}
+
+#[component]
+struct PointerFixture {}
+
+impl Component for PointerFixture {
+    fn view(&self) -> impl View {
+        row()
+            .child(text("Editable").pointer_icon(telorgon::PointerIcon::Text))
+            .child(button("Open").pointer_icon(telorgon::PointerIcon::Pointer))
+            .child(spacer().hide_pointer())
+    }
+}
+
+#[test]
+fn composed_views_retain_semantic_pointer_requests() {
+    let runtime = ViewRuntime::from_composed(PointerFixture::default()).unwrap();
+    let requests = runtime
+        .ui()
+        .pointer_requests
+        .values()
+        .iter()
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(requests.contains(&telorgon::PointerRequest::Semantic(
+        telorgon::PointerIcon::Text
+    )));
+    assert!(requests.contains(&telorgon::PointerRequest::Semantic(
+        telorgon::PointerIcon::Pointer
+    )));
+    assert!(requests.contains(&telorgon::PointerRequest::Hidden));
+}
+
+#[component]
+struct IconControlFixture {}
+
+impl Component for IconControlFixture {
+    fn view(&self) -> impl View {
+        button("Close").icon(telorgon::IconAsset::new(telorgon::AssetKey::new(
+            "icons/close.svg",
+        )))
+    }
+}
+
+#[test]
+fn composed_icon_buttons_keep_accessible_text_and_typed_artwork() {
+    let runtime = ViewRuntime::from_composed(IconControlFixture::default()).unwrap();
+    let expected = telorgon::asset_image_id(telorgon::AssetKey::new("icons/close.svg"));
+    assert!(
+        runtime
+            .ui()
+            .images
+            .values()
+            .iter()
+            .any(|image| image.image == expected)
+    );
+    assert!(runtime.ui().semantics.values().iter().any(|semantic| {
+        let telorgon::SemanticName::Text(name) = semantic.name else {
+            return false;
+        };
+        runtime.ui().string(name) == Some("Close")
+    }));
+}
+
 #[test]
 fn app_facade_includes_common_composition_styling() {
     let style = BoxStyle {
         width: SizeRule::Fill(1.0),
-        background: Background::Color(ColorRgba8::rgba(20, 22, 28, 255)),
+        decoration: BoxDecoration {
+            background: Background::Color(ColorRgba8::rgba(20, 22, 28, 255)),
+            ..BoxDecoration::default()
+        },
         ..BoxStyle::default()
     };
 

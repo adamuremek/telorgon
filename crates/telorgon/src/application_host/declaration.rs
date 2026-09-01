@@ -3,11 +3,16 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::compose::{Component, RuntimeTarget};
+use crate::assets::{
+    AppIconProfile, AssetBundle, ClientCursorMode, CursorThemeAsset, PointerConfiguration,
+    PointerThemeOverrides,
+};
+use crate::compose::{Component, ErasedComponent, RuntimeTarget};
 use crate::core::SizeI;
 use crate::runtime::CompositionDriver;
+use crate::window_chrome::WindowChromeModel;
 
-use crate::application_host::{AppError, AppResult, WindowOptions};
+use crate::application_host::{AppError, AppResult, WindowDecorationMode, WindowOptions};
 
 /// Renderer policy selected by an application declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -81,6 +86,8 @@ impl Application {
         GuiApplication {
             name: name.into(),
             renderer: Renderer::Auto,
+            assets: AssetBundle::EMPTY,
+            pointer: PointerConfiguration::default(),
         }
     }
 
@@ -90,6 +97,9 @@ impl Application {
             name: name.into(),
             renderer: Renderer::Auto,
             linux: LinuxDesktopConfig::default(),
+            assets: AssetBundle::EMPTY,
+            pointer: PointerConfiguration::default(),
+            app_icon: AppIconProfile::new(),
         }
     }
 }
@@ -104,6 +114,8 @@ impl fmt::Debug for Application {
 pub struct GuiApplication {
     name: String,
     renderer: Renderer,
+    assets: AssetBundle,
+    pointer: PointerConfiguration,
 }
 
 impl GuiApplication {
@@ -113,11 +125,29 @@ impl GuiApplication {
         self
     }
 
+    /// Registers the project's generated media catalog for every managed GUI subsystem.
+    pub fn assets(mut self, assets: AssetBundle) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    pub fn cursor_theme(mut self, theme: CursorThemeAsset) -> Self {
+        self.pointer = self.pointer.cursor_theme(theme);
+        self
+    }
+
+    pub fn pointer_overrides(mut self, overrides: PointerThemeOverrides) -> Self {
+        self.pointer = self.pointer.overrides(overrides);
+        self
+    }
+
     /// Installs the single initial window supported by the current managed runtime.
     pub fn window(self, window: ReadyWindow) -> ReadyGuiApplication {
         ReadyGuiApplication {
             name: self.name,
             renderer: self.renderer,
+            assets: self.assets,
+            pointer: self.pointer,
             window,
         }
     }
@@ -129,6 +159,7 @@ impl fmt::Debug for GuiApplication {
             .debug_struct("GuiApplication")
             .field("name", &self.name)
             .field("renderer", &self.renderer)
+            .field("assets", &self.assets.len())
             .field("has_window", &false)
             .finish()
     }
@@ -138,6 +169,8 @@ impl fmt::Debug for GuiApplication {
 pub struct ReadyGuiApplication {
     name: String,
     renderer: Renderer,
+    assets: AssetBundle,
+    pointer: PointerConfiguration,
     window: ReadyWindow,
 }
 
@@ -145,6 +178,21 @@ impl ReadyGuiApplication {
     /// Replaces the renderer policy without changing the declared window.
     pub fn renderer(mut self, renderer: Renderer) -> Self {
         self.renderer = renderer;
+        self
+    }
+
+    pub fn assets(mut self, assets: AssetBundle) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    pub fn cursor_theme(mut self, theme: CursorThemeAsset) -> Self {
+        self.pointer = self.pointer.cursor_theme(theme);
+        self
+    }
+
+    pub fn pointer_overrides(mut self, overrides: PointerThemeOverrides) -> Self {
+        self.pointer = self.pointer.overrides(overrides);
         self
     }
 
@@ -170,10 +218,24 @@ impl ReadyGuiApplication {
         }
     }
 
-    pub(crate) fn into_parts(self) -> AppResult<(CompositionDriver, WindowOptions, Renderer)> {
+    pub(crate) fn into_parts(
+        self,
+    ) -> AppResult<(
+        CompositionDriver,
+        WindowOptions,
+        Renderer,
+        AssetBundle,
+        PointerConfiguration,
+    )> {
         validate_application_name(&self.name)?;
+        self.assets
+            .validate()
+            .map_err(|error| AppError::new(error.to_string()))?;
+        self.pointer
+            .load_theme(self.assets)
+            .map_err(|error| AppError::new(error.to_string()))?;
         let (driver, options) = self.window.into_parts()?;
-        Ok((driver, options, self.renderer))
+        Ok((driver, options, self.renderer, self.assets, self.pointer))
     }
 }
 
@@ -183,6 +245,7 @@ impl fmt::Debug for ReadyGuiApplication {
             .debug_struct("GuiApplication")
             .field("name", &self.name)
             .field("renderer", &self.renderer)
+            .field("assets", &self.assets.len())
             .field("window", &self.window)
             .finish()
     }
@@ -215,6 +278,27 @@ impl Window {
 
     pub fn without_minimum_size(mut self) -> Self {
         self.options.min_size = None;
+        self
+    }
+
+    /// Selects whether the native platform draws its standard non-client frame.
+    pub fn decorations(mut self, decorations: WindowDecorationMode) -> Self {
+        self.options.decorations = decorations;
+        self
+    }
+
+    pub fn without_system_frame(self) -> Self {
+        self.decorations(WindowDecorationMode::Hidden)
+    }
+
+    /// Uses a composition root built with [`crate::window_frame`] as client-side chrome.
+    pub fn custom_frame(self) -> Self {
+        self.without_system_frame()
+    }
+
+    /// Assigns the icon profile shared by native window metadata and composed client chrome.
+    pub fn icon(mut self, profile: AppIconProfile) -> Self {
+        self.options.icon = profile;
         self
     }
 
@@ -251,6 +335,10 @@ impl ReadyWindow {
         if self.options.size.width <= 0 || self.options.size.height <= 0 {
             return Err(AppError::new("Window size must be positive"));
         }
+        self.options
+            .icon
+            .validate()
+            .map_err(|error| AppError::new(error.to_string()))?;
         Ok((self.content, self.options))
     }
 }
@@ -430,6 +518,41 @@ pub struct CompositorVisual {
     content: CompositionDriver,
 }
 
+/// Creates a fresh compositor-owned frame composition for one Wayland toplevel.
+///
+/// The model is the only shell-owned input. Everything visual and interactive is authored with
+/// normal composition primitives plus the explicit frame/content/action roles.
+pub struct WindowFrameFactory {
+    #[cfg_attr(
+        not(all(feature = "desktop-wayland-linux", target_os = "linux")),
+        allow(dead_code)
+    )]
+    compose: Box<dyn Fn(WindowChromeModel) -> Box<dyn ErasedComponent>>,
+}
+
+impl WindowFrameFactory {
+    fn new<F, C>(factory: F) -> Self
+    where
+        F: Fn(WindowChromeModel) -> C + 'static,
+        C: Component,
+    {
+        Self {
+            compose: Box::new(move |model| Box::new(factory(model))),
+        }
+    }
+
+    #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
+    pub(crate) fn compose(&self, model: WindowChromeModel) -> CompositionDriver {
+        CompositionDriver::from_erased_for_target((self.compose)(model), RuntimeTarget::Compositor)
+    }
+}
+
+impl fmt::Debug for WindowFrameFactory {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("WindowFrameFactory")
+    }
+}
+
 impl CompositorVisual {
     fn new(name: impl Into<String>, component: impl Component) -> Self {
         Self {
@@ -455,7 +578,7 @@ impl fmt::Debug for CompositorVisual {
 
 /// Incomplete compositor declaration.
 pub struct Compositor {
-    window_frame: Option<CompositorVisual>,
+    window_frame: Option<WindowFrameFactory>,
     pointer: Option<CompositorVisual>,
     icons: Vec<CompositorVisual>,
 }
@@ -475,9 +598,13 @@ impl Compositor {
         }
     }
 
-    /// Uses an ordinary Telorgon component as the server-side window frame template.
-    pub fn window_frame<C: Component>(mut self, component: C) -> Self {
-        self.window_frame = Some(CompositorVisual::new("window-frame", component));
+    /// Supplies the composed server-side frame for each window and each relevant model change.
+    pub fn window_frame<F, C>(mut self, factory: F) -> Self
+    where
+        F: Fn(WindowChromeModel) -> C + 'static,
+        C: Component,
+    {
+        self.window_frame = Some(WindowFrameFactory::new(factory));
         self
     }
 
@@ -519,7 +646,7 @@ impl fmt::Debug for Compositor {
 /// Complete compositor declaration.
 pub struct ReadyCompositor {
     policy: CompositionDriver,
-    window_frame: Option<CompositorVisual>,
+    window_frame: Option<WindowFrameFactory>,
     pointer: Option<CompositorVisual>,
     icons: Vec<CompositorVisual>,
 }
@@ -527,7 +654,7 @@ pub struct ReadyCompositor {
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
 type CompositorRuntimeParts = (
     CompositionDriver,
-    Option<CompositionDriver>,
+    Option<WindowFrameFactory>,
     Option<CompositionDriver>,
     Vec<(String, CompositionDriver)>,
 );
@@ -535,12 +662,7 @@ type CompositorRuntimeParts = (
 impl ReadyCompositor {
     fn validate(&self) -> AppResult<()> {
         debug_assert_eq!(self.policy.target(), RuntimeTarget::Compositor);
-        for visual in self
-            .window_frame
-            .iter()
-            .chain(self.pointer.iter())
-            .chain(self.icons.iter())
-        {
+        for visual in self.pointer.iter().chain(self.icons.iter()) {
             debug_assert_eq!(visual.content.target(), RuntimeTarget::Compositor);
         }
         if self.icons.iter().any(|icon| icon.name.trim().is_empty()) {
@@ -557,7 +679,7 @@ impl ReadyCompositor {
         Ok(())
     }
 
-    pub fn window_frame(&self) -> Option<&CompositorVisual> {
+    pub fn window_frame(&self) -> Option<&WindowFrameFactory> {
         self.window_frame.as_ref()
     }
 
@@ -573,7 +695,7 @@ impl ReadyCompositor {
     pub(crate) fn into_runtime_parts(self) -> CompositorRuntimeParts {
         (
             self.policy,
-            self.window_frame.map(|visual| visual.content),
+            self.window_frame,
             self.pointer.map(|visual| visual.content),
             self.icons
                 .into_iter()
@@ -600,6 +722,9 @@ pub struct DesktopEnvironment {
     name: String,
     renderer: Renderer,
     linux: LinuxDesktopConfig,
+    assets: AssetBundle,
+    pointer: PointerConfiguration,
+    app_icon: AppIconProfile,
 }
 
 impl DesktopEnvironment {
@@ -613,11 +738,41 @@ impl DesktopEnvironment {
         self
     }
 
+    /// Registers one catalog shared by shell composition and hosted Wayland clients.
+    pub fn assets(mut self, assets: AssetBundle) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    pub fn cursor_theme(mut self, theme: CursorThemeAsset) -> Self {
+        self.pointer = self.pointer.cursor_theme(theme);
+        self
+    }
+
+    pub fn pointer_overrides(mut self, overrides: PointerThemeOverrides) -> Self {
+        self.pointer = self.pointer.overrides(overrides);
+        self
+    }
+
+    pub fn client_cursor_mode(mut self, mode: ClientCursorMode) -> Self {
+        self.pointer = self.pointer.client_mode(mode);
+        self
+    }
+
+    /// Sets the desktop environment's fallback icon profile for client toplevels.
+    pub fn app_icon(mut self, profile: AppIconProfile) -> Self {
+        self.app_icon = profile;
+        self
+    }
+
     pub fn compositor(self, compositor: ReadyCompositor) -> DesktopEnvironmentWithCompositor {
         DesktopEnvironmentWithCompositor {
             name: self.name,
             renderer: self.renderer,
             linux: self.linux,
+            assets: self.assets,
+            pointer: self.pointer,
+            app_icon: self.app_icon,
             compositor,
         }
     }
@@ -629,6 +784,7 @@ impl fmt::Debug for DesktopEnvironment {
             .debug_struct("DesktopEnvironment")
             .field("name", &self.name)
             .field("renderer", &self.renderer)
+            .field("assets", &self.assets.len())
             .field("has_compositor", &false)
             .finish()
     }
@@ -639,6 +795,9 @@ pub struct DesktopEnvironmentWithCompositor {
     name: String,
     renderer: Renderer,
     linux: LinuxDesktopConfig,
+    assets: AssetBundle,
+    pointer: PointerConfiguration,
+    app_icon: AppIconProfile,
     compositor: ReadyCompositor,
 }
 
@@ -653,11 +812,39 @@ impl DesktopEnvironmentWithCompositor {
         self
     }
 
+    pub fn assets(mut self, assets: AssetBundle) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    pub fn cursor_theme(mut self, theme: CursorThemeAsset) -> Self {
+        self.pointer = self.pointer.cursor_theme(theme);
+        self
+    }
+
+    pub fn pointer_overrides(mut self, overrides: PointerThemeOverrides) -> Self {
+        self.pointer = self.pointer.overrides(overrides);
+        self
+    }
+
+    pub fn client_cursor_mode(mut self, mode: ClientCursorMode) -> Self {
+        self.pointer = self.pointer.client_mode(mode);
+        self
+    }
+
+    pub fn app_icon(mut self, profile: AppIconProfile) -> Self {
+        self.app_icon = profile;
+        self
+    }
+
     pub fn shell_widget(self, widget: ReadyShellWidget) -> ReadyDesktopEnvironment {
         ReadyDesktopEnvironment {
             name: self.name,
             renderer: self.renderer,
             linux: self.linux,
+            assets: self.assets,
+            pointer: self.pointer,
+            app_icon: self.app_icon,
             compositor: self.compositor,
             shell_widgets: vec![widget],
         }
@@ -670,6 +857,7 @@ impl fmt::Debug for DesktopEnvironmentWithCompositor {
             .debug_struct("DesktopEnvironment")
             .field("name", &self.name)
             .field("renderer", &self.renderer)
+            .field("assets", &self.assets.len())
             .field("has_compositor", &true)
             .field("shell_widgets", &0)
             .finish()
@@ -681,6 +869,9 @@ pub struct ReadyDesktopEnvironment {
     name: String,
     renderer: Renderer,
     linux: LinuxDesktopConfig,
+    assets: AssetBundle,
+    pointer: PointerConfiguration,
+    app_icon: AppIconProfile,
     compositor: ReadyCompositor,
     shell_widgets: Vec<ReadyShellWidget>,
 }
@@ -693,6 +884,31 @@ impl ReadyDesktopEnvironment {
 
     pub fn linux(mut self, config: LinuxDesktopConfig) -> Self {
         self.linux = config;
+        self
+    }
+
+    pub fn assets(mut self, assets: AssetBundle) -> Self {
+        self.assets = assets;
+        self
+    }
+
+    pub fn cursor_theme(mut self, theme: CursorThemeAsset) -> Self {
+        self.pointer = self.pointer.cursor_theme(theme);
+        self
+    }
+
+    pub fn pointer_overrides(mut self, overrides: PointerThemeOverrides) -> Self {
+        self.pointer = self.pointer.overrides(overrides);
+        self
+    }
+
+    pub fn client_cursor_mode(mut self, mode: ClientCursorMode) -> Self {
+        self.pointer = self.pointer.client_mode(mode);
+        self
+    }
+
+    pub fn app_icon(mut self, profile: AppIconProfile) -> Self {
+        self.app_icon = profile;
         self
     }
 
@@ -724,8 +940,20 @@ impl ReadyDesktopEnvironment {
         Vec<ReadyShellWidget>,
         Renderer,
         LinuxDesktopConfig,
+        AssetBundle,
+        PointerConfiguration,
+        AppIconProfile,
     )> {
         validate_application_name(&self.name)?;
+        self.assets
+            .validate()
+            .map_err(|error| AppError::new(error.to_string()))?;
+        self.pointer
+            .load_theme(self.assets)
+            .map_err(|error| AppError::new(error.to_string()))?;
+        self.app_icon
+            .validate()
+            .map_err(|error| AppError::new(error.to_string()))?;
         self.compositor.validate()?;
         for widget in &self.shell_widgets {
             widget.validate()?;
@@ -737,6 +965,9 @@ impl ReadyDesktopEnvironment {
             self.shell_widgets,
             self.renderer,
             self.linux,
+            self.assets,
+            self.pointer,
+            self.app_icon,
         ))
     }
 }
@@ -747,6 +978,7 @@ impl fmt::Debug for ReadyDesktopEnvironment {
             .debug_struct("DesktopEnvironment")
             .field("name", &self.name)
             .field("renderer", &self.renderer)
+            .field("assets", &self.assets.len())
             .field("has_compositor", &true)
             .field("shell_widgets", &self.shell_widgets)
             .finish()
@@ -830,5 +1062,20 @@ mod tests {
         let debug = format!("{application:?}");
         assert!(debug.contains("has_content: true"));
         assert!(debug.contains("renderer: Auto"));
+    }
+
+    #[test]
+    fn managed_windows_retain_custom_frame_and_icon_options() {
+        let icon = crate::IconAsset::new(crate::AssetKey::new("icons/app.svg"));
+        let (_, options) = Window::new("Studio")
+            .custom_frame()
+            .icon(AppIconProfile::new().named("com.example.studio").icon(icon))
+            .content(Root)
+            .into_parts()
+            .unwrap();
+
+        assert_eq!(options.decorations, WindowDecorationMode::Hidden);
+        assert_eq!(options.icon.name(), Some("com.example.studio"));
+        assert_eq!(options.icon.preferred(64), Some(crate::Icon::new(icon)));
     }
 }

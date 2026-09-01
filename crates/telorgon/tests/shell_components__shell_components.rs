@@ -406,6 +406,7 @@ fn mounted_catalog_preserves_structure_geometry_semantics_and_typed_requests() {
             .box_styles
             .get(refs.shadow.node())
             .unwrap()
+            .decoration
             .shadows
             .as_slice()[0]
             .blur,

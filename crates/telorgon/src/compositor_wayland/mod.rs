@@ -31,7 +31,8 @@ pub use id::{ClientId, ProtocolObjectId, WaylandBufferId, WaylandSurfaceId};
 #[cfg(target_os = "linux")]
 pub use native::{
     DmaBufFormat, DmaBufImage, NativeCompositor, NativeCompositorError, PointerConstraintKind,
-    PointerConstraintState, ShmImage, ViewportSource, ViewportState,
+    PointerConstraintState, ShmImage, ToplevelIconImage, ToplevelIconSnapshot, ViewportSource,
+    ViewportState,
 };
 pub use object::{ObjectMetadata, ObjectRegistry, ObjectRegistryError, ProtocolObjectKind};
 pub use output::{OutputDescription, OutputError, OutputMode, OutputState, OutputTransform};

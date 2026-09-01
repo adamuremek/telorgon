@@ -3,7 +3,7 @@
 //! Declarations execute once during mount. Runtime changes flow through typed properties and
 //! coalesced transactions; no recursive widget tree exists in the active UI.
 
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData};
 
 use crate::core::{ColorRgba8, EdgeInsets, PointF, Transform2D};
 pub use crate::input::EventPhase;
@@ -216,6 +216,11 @@ pub enum Background {
     None,
     Color(ColorRgba8),
 }
+impl From<ColorRgba8> for Background {
+    fn from(value: ColorRgba8) -> Self {
+        Self::Color(value)
+    }
+}
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub struct BorderSide {
     pub width: f32,
@@ -301,6 +306,175 @@ impl ShadowList {
         &self.items[..self.len as usize]
     }
 }
+
+/// Reusable paint-only appearance for one rectangular UI box.
+///
+/// Decoration deliberately excludes layout, clipping, opacity, and transforms so one value can be
+/// shared by ordinary containers, controls, popups, and shell-owned window frames without carrying
+/// placement policy with it.
+#[derive(Copy, Clone, Debug, Default, PartialEq)]
+pub struct BoxDecoration {
+    pub background: Background,
+    pub border: Border,
+    pub outline: Outline,
+    pub corner_radii: CornerRadii,
+    pub shadows: ShadowList,
+}
+
+impl BoxDecoration {
+    pub const fn new() -> Self {
+        Self {
+            background: Background::None,
+            border: Border {
+                top: BorderSide {
+                    width: 0.0,
+                    color: ColorRgba8::rgba(0, 0, 0, 0),
+                },
+                right: BorderSide {
+                    width: 0.0,
+                    color: ColorRgba8::rgba(0, 0, 0, 0),
+                },
+                bottom: BorderSide {
+                    width: 0.0,
+                    color: ColorRgba8::rgba(0, 0, 0, 0),
+                },
+                left: BorderSide {
+                    width: 0.0,
+                    color: ColorRgba8::rgba(0, 0, 0, 0),
+                },
+            },
+            outline: Outline {
+                width: 0.0,
+                offset: 0.0,
+                color: ColorRgba8::rgba(0, 0, 0, 0),
+            },
+            corner_radii: CornerRadii {
+                top_left: 0.0,
+                top_right: 0.0,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
+            },
+            shadows: ShadowList {
+                items: [
+                    Shadow {
+                        offset: PointF { x: 0.0, y: 0.0 },
+                        blur: 0.0,
+                        spread: 0.0,
+                        color: ColorRgba8::rgba(0, 0, 0, 0),
+                    },
+                    Shadow {
+                        offset: PointF { x: 0.0, y: 0.0 },
+                        blur: 0.0,
+                        spread: 0.0,
+                        color: ColorRgba8::rgba(0, 0, 0, 0),
+                    },
+                ],
+                len: 0,
+            },
+        }
+    }
+
+    pub const fn background(mut self, background: Background) -> Self {
+        self.background = background;
+        self
+    }
+
+    pub const fn border(mut self, border: Border) -> Self {
+        self.border = border;
+        self
+    }
+
+    pub const fn outline(mut self, outline: Outline) -> Self {
+        self.outline = outline;
+        self
+    }
+
+    pub const fn corner_radii(mut self, corner_radii: CornerRadii) -> Self {
+        self.corner_radii = corner_radii;
+        self
+    }
+
+    pub const fn shadows(mut self, shadows: ShadowList) -> Self {
+        self.shadows = shadows;
+        self
+    }
+
+    pub const fn uniform_border(mut self, width: f32, color: ColorRgba8) -> Self {
+        self.border = Border::all(width, color);
+        self
+    }
+
+    pub const fn corner_radius(mut self, radius: f32) -> Self {
+        self.corner_radii = CornerRadii::all(radius);
+        self
+    }
+
+    pub const fn shadow(mut self, shadow: Shadow) -> Self {
+        self.shadows = ShadowList::one(shadow);
+        self
+    }
+
+    /// Checks that every metric is finite and every paint extent is nonnegative.
+    pub fn validate(self) -> Result<Self, BoxDecorationError> {
+        for width in [
+            self.border.top.width,
+            self.border.right.width,
+            self.border.bottom.width,
+            self.border.left.width,
+        ] {
+            if !width.is_finite() || width < 0.0 {
+                return Err(BoxDecorationError::InvalidBorderWidth);
+            }
+        }
+        if !self.outline.width.is_finite() || self.outline.width < 0.0 {
+            return Err(BoxDecorationError::InvalidOutlineWidth);
+        }
+        if !self.outline.offset.is_finite() {
+            return Err(BoxDecorationError::InvalidOutlineOffset);
+        }
+        for radius in [
+            self.corner_radii.top_left,
+            self.corner_radii.top_right,
+            self.corner_radii.bottom_right,
+            self.corner_radii.bottom_left,
+        ] {
+            if !radius.is_finite() || radius < 0.0 {
+                return Err(BoxDecorationError::InvalidCornerRadius);
+            }
+        }
+        for shadow in self.shadows.as_slice() {
+            if !shadow.offset.x.is_finite() || !shadow.offset.y.is_finite() {
+                return Err(BoxDecorationError::InvalidShadowOffset);
+            }
+            if !shadow.blur.is_finite() || shadow.blur < 0.0 {
+                return Err(BoxDecorationError::InvalidShadowBlur);
+            }
+            if !shadow.spread.is_finite() || shadow.spread < 0.0 {
+                return Err(BoxDecorationError::InvalidShadowSpread);
+            }
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BoxDecorationError {
+    InvalidBorderWidth,
+    InvalidOutlineWidth,
+    InvalidOutlineOffset,
+    InvalidCornerRadius,
+    InvalidShadowOffset,
+    InvalidShadowBlur,
+    InvalidShadowSpread,
+}
+
+impl fmt::Display for BoxDecorationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid box decoration: {self:?}")
+    }
+}
+
+impl std::error::Error for BoxDecorationError {}
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum Overflow {
     #[default]
@@ -318,11 +492,7 @@ pub struct BoxStyle {
     pub max_size: SizeRule2D,
     pub margin: EdgeInsets,
     pub padding: EdgeInsets,
-    pub background: Background,
-    pub border: Border,
-    pub outline: Outline,
-    pub corner_radii: CornerRadii,
-    pub shadows: ShadowList,
+    pub decoration: BoxDecoration,
     pub overflow: Overflow,
     pub opacity: f32,
     pub transform: Transform2D,
@@ -340,11 +510,7 @@ impl Default for BoxStyle {
             },
             margin: EdgeInsets::ZERO,
             padding: EdgeInsets::ZERO,
-            background: Background::None,
-            border: Border::default(),
-            outline: Outline::default(),
-            corner_radii: CornerRadii::default(),
-            shadows: ShadowList::default(),
+            decoration: BoxDecoration::default(),
             overflow: Overflow::Visible,
             opacity: 1.0,
             transform: Transform2D::default(),
@@ -660,6 +826,8 @@ pub struct MountedUi {
     pub texts: SparseSet<TextVisual>,
     pub images: SparseSet<ImageVisual>,
     pub semantics: SparseSet<SemanticNode>,
+    pub window_chrome_roles: SparseSet<crate::window_chrome::WindowChromeRole>,
+    pub pointer_requests: SparseSet<crate::assets::PointerRequest>,
     style_bindings: Vec<StyleBinding>,
     style_binding_head_by_state: SparseSet<usize>,
     style_binding_next: Vec<Option<usize>>,
@@ -700,6 +868,8 @@ impl Default for MountedUi {
             texts: SparseSet::default(),
             images: SparseSet::default(),
             semantics: SparseSet::default(),
+            window_chrome_roles: SparseSet::default(),
+            pointer_requests: SparseSet::default(),
             style_bindings: Vec::new(),
             style_binding_head_by_state: SparseSet::default(),
             style_binding_next: Vec::new(),
@@ -732,6 +902,8 @@ impl MountedUi {
                 + self.texts.allocated_bytes()
                 + self.images.allocated_bytes()
                 + self.semantics.allocated_bytes()
+                + self.window_chrome_roles.allocated_bytes()
+                + self.pointer_requests.allocated_bytes()
                 + self
                     .semantics
                     .values()
@@ -796,6 +968,8 @@ impl MountedUi {
             self.texts.remove(*id);
             self.images.remove(*id);
             self.semantics.remove(*id);
+            self.window_chrome_roles.remove(*id);
+            self.pointer_requests.remove(*id);
             self.keys.remove(*id);
         }
         self.style_bindings.retain(|binding| {
@@ -1145,45 +1319,47 @@ impl MountedUi {
             )+ };
         }
         assign!(
-            sizing,
-            width,
-            height,
-            min_size,
-            max_size,
-            margin,
-            padding,
-            background,
-            border,
-            outline,
-            corner_radii,
-            shadows,
-            overflow,
-            opacity,
+            sizing, width, height, min_size, max_size, margin, padding, overflow, opacity,
             transform,
         );
+        if let Some(value) = patch.background {
+            next.decoration.background = value;
+        }
+        if let Some(value) = patch.border {
+            next.decoration.border = value;
+        }
+        if let Some(value) = patch.outline {
+            next.decoration.outline = value;
+        }
+        if let Some(value) = patch.corner_radii {
+            next.decoration.corner_radii = value;
+        }
+        if let Some(value) = patch.shadows {
+            next.decoration.shadows = value;
+        }
         if let Some(width) = patch.border_width {
-            next.border.top.width = width;
-            next.border.right.width = width;
-            next.border.bottom.width = width;
-            next.border.left.width = width;
+            next.decoration.border.top.width = width;
+            next.decoration.border.right.width = width;
+            next.decoration.border.bottom.width = width;
+            next.decoration.border.left.width = width;
         }
         if let Some(color) = patch.border_color {
-            next.border.top.color = color;
-            next.border.right.color = color;
-            next.border.bottom.color = color;
-            next.border.left.color = color;
+            next.decoration.border.top.color = color;
+            next.decoration.border.right.color = color;
+            next.decoration.border.bottom.color = color;
+            next.decoration.border.left.color = color;
         }
         if let Some(width) = patch.outline_width {
-            next.outline.width = width;
+            next.decoration.outline.width = width;
         }
         if let Some(offset) = patch.outline_offset {
-            next.outline.offset = offset;
+            next.decoration.outline.offset = offset;
         }
         if let Some(color) = patch.outline_color {
-            next.outline.color = color;
+            next.decoration.outline.color = color;
         }
         if let Some(radius) = patch.radius {
-            next.corner_radii = CornerRadii::all(radius);
+            next.decoration.corner_radii = CornerRadii::all(radius);
         }
         if let Some(value) = patch.translation_x {
             next.transform.translation.x = value;
@@ -1215,7 +1391,7 @@ impl MountedUi {
                 || next.max_size != style.max_size
                 || next.margin != style.margin
                 || next.padding != style.padding
-                || next.border != style.border
+                || next.decoration.border != style.decoration.border
             {
                 dirty |= DirtyFlags::LAYOUT;
             }
@@ -1513,6 +1689,56 @@ impl MountedUi {
         self.diagnostics.semantic_updates += 1;
         true
     }
+
+    /// Associates protocol-neutral window-chrome meaning with a normal mounted node.
+    ///
+    /// Chrome roles do not alter layout or paint. Window hosts consume the role together with
+    /// the node's computed bounds after layout, which keeps decoration geometry authored by the
+    /// same composition primitives as the rest of the UI.
+    #[doc(hidden)]
+    pub fn set_window_chrome_role(
+        &mut self,
+        node: NodeId,
+        role: Option<crate::window_chrome::WindowChromeRole>,
+    ) -> bool {
+        if !self.nodes.contains(node) {
+            return false;
+        }
+        match role {
+            Some(role) => {
+                if self.window_chrome_roles.get(node).copied() == Some(role) {
+                    false
+                } else {
+                    self.window_chrome_roles.insert(node, role);
+                    true
+                }
+            }
+            None => self.window_chrome_roles.remove(node).is_some(),
+        }
+    }
+
+    /// Associates a semantic pointer request with a normal mounted node.
+    #[doc(hidden)]
+    pub fn set_pointer_request(
+        &mut self,
+        node: NodeId,
+        request: Option<crate::assets::PointerRequest>,
+    ) -> bool {
+        if !self.nodes.contains(node) {
+            return false;
+        }
+        match request {
+            Some(request) => {
+                if self.pointer_requests.get(node).copied() == Some(request) {
+                    false
+                } else {
+                    self.pointer_requests.insert(node, request);
+                    true
+                }
+            }
+            None => self.pointer_requests.remove(node).is_some(),
+        }
+    }
     #[cfg(test)]
     fn insert_fixture(
         &mut self,
@@ -1797,7 +2023,7 @@ impl MountedUi {
             (PropertyKind::Background, PropertyValue::Color(value)) => change_style(
                 &mut self.box_styles,
                 patch.node,
-                |style| &mut style.background,
+                |style| &mut style.decoration.background,
                 Background::Color(*value),
             ),
             (PropertyKind::Translation, PropertyValue::Point(value)) => {
@@ -2675,6 +2901,24 @@ impl<'a, A> MountWriter<'a, A> {
         semantic: SemanticNode,
     ) -> Result<bool, SemanticError> {
         self.ui.set_semantics(node, semantic)
+    }
+    /// Attaches a shell-understood role without coupling the node to shell-specific paint.
+    #[doc(hidden)]
+    pub fn window_chrome_role(
+        &mut self,
+        node: NodeId,
+        role: Option<crate::window_chrome::WindowChromeRole>,
+    ) -> bool {
+        self.ui.set_window_chrome_role(node, role)
+    }
+    /// Attaches a semantic pointer request during mount.
+    #[doc(hidden)]
+    pub fn pointer_request(
+        &mut self,
+        node: NodeId,
+        request: Option<crate::assets::PointerRequest>,
+    ) -> bool {
+        self.ui.set_pointer_request(node, request)
     }
     pub fn disabled(&mut self, node: NodeId, disabled: bool) -> bool {
         self.ui.set_disabled(node, disabled)

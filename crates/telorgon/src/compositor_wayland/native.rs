@@ -36,6 +36,11 @@ const IMPLEMENTED_GLOBALS: &[(&str, ResourceKind, u32)] = &[
         1,
     ),
     (
+        "xdg_toplevel_icon_manager_v1",
+        ResourceKind::ToplevelIconManager,
+        1,
+    ),
+    (
         "wp_fractional_scale_manager_v1",
         ResourceKind::FractionalScaleManager,
         1,
@@ -96,6 +101,8 @@ enum ResourceKind {
     ToplevelDecoration(WaylandSurfaceId),
     CursorShapeManager,
     CursorShapeDevice(u32),
+    ToplevelIconManager,
+    ToplevelIcon(ProtocolObjectId),
     FractionalScaleManager,
     FractionalScale,
     Viewporter,
@@ -151,6 +158,8 @@ impl ResourceKind {
             Self::ToplevelDecoration(_) => ProtocolObjectKind::ToplevelDecoration,
             Self::CursorShapeManager => ProtocolObjectKind::CursorShapeManager,
             Self::CursorShapeDevice(_) => ProtocolObjectKind::CursorShapeDevice,
+            Self::ToplevelIconManager => ProtocolObjectKind::ToplevelIconManager,
+            Self::ToplevelIcon(_) => ProtocolObjectKind::ToplevelIcon,
             Self::FractionalScaleManager => ProtocolObjectKind::FractionalScaleManager,
             Self::FractionalScale => ProtocolObjectKind::FractionalScale,
             Self::Viewporter => ProtocolObjectKind::Viewporter,
@@ -328,6 +337,33 @@ struct NativeSessionLockSurface {
     last_acked: Option<(u32, crate::core::SizeI)>,
 }
 
+#[derive(Debug, Default)]
+struct NativeToplevelIcon {
+    name: Option<String>,
+    buffers: BTreeMap<(i32, i32), WaylandBufferId>,
+    immutable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToplevelIconImage {
+    pub buffer: WaylandBufferId,
+    pub scale: i32,
+    pub image: ShmImage,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ToplevelIconSnapshot {
+    pub revision: u64,
+    pub name: Option<String>,
+    pub images: Vec<ToplevelIconImage>,
+}
+
+#[derive(Clone, Debug)]
+enum PendingToplevelIcon {
+    Reset,
+    Icon(ToplevelIconSnapshot),
+}
+
 impl NativeViewport {
     fn commit(&mut self) {
         if let Some(source) = self.pending_source.take() {
@@ -390,6 +426,9 @@ struct NativeState {
     committed_presentation_feedbacks: BTreeMap<(WaylandSurfaceId, u64), Vec<ProtocolObjectId>>,
     xdg_resources: BTreeMap<WaylandSurfaceId, ProtocolObjectId>,
     toplevels: BTreeMap<WaylandSurfaceId, XdgToplevelState>,
+    toplevel_icons: BTreeMap<ProtocolObjectId, NativeToplevelIcon>,
+    pending_toplevel_icons: BTreeMap<WaylandSurfaceId, PendingToplevelIcon>,
+    committed_toplevel_icons: BTreeMap<WaylandSurfaceId, ToplevelIconSnapshot>,
     positioners: BTreeMap<ProtocolObjectId, NativeXdgPositioner>,
     popups: BTreeMap<WaylandSurfaceId, crate::compositor_wayland::XdgPopupState>,
     viewports: BTreeMap<WaylandSurfaceId, NativeViewport>,
@@ -419,6 +458,7 @@ struct NativeState {
     next_surface: u32,
     next_buffer: u32,
     presentation_sequence: u64,
+    toplevel_icon_revision: u64,
 }
 
 pub struct NativeCompositor<'display> {
@@ -463,6 +503,9 @@ impl<'display> NativeCompositor<'display> {
             committed_presentation_feedbacks: BTreeMap::new(),
             xdg_resources: BTreeMap::new(),
             toplevels: BTreeMap::new(),
+            toplevel_icons: BTreeMap::new(),
+            pending_toplevel_icons: BTreeMap::new(),
+            committed_toplevel_icons: BTreeMap::new(),
             positioners: BTreeMap::new(),
             popups: BTreeMap::new(),
             viewports: BTreeMap::new(),
@@ -492,6 +535,7 @@ impl<'display> NativeCompositor<'display> {
             next_surface: 0,
             next_buffer: 0,
             presentation_sequence: 0,
+            toplevel_icon_revision: 0,
         });
         let state_pointer = (&mut *state) as *mut NativeState;
         let mut bind_contexts = Vec::new();
@@ -1005,6 +1049,19 @@ impl<'display> NativeCompositor<'display> {
             .toplevels
             .get(&surface)
             .map(|toplevel| toplevel.decoration)
+    }
+
+    /// Returns client-authored metadata used to compose server-side window chrome.
+    pub fn toplevel_metadata(
+        &self,
+        surface: WaylandSurfaceId,
+    ) -> Option<&crate::compositor_wayland::XdgToplevelState> {
+        self.state.toplevels.get(&surface)
+    }
+
+    /// Returns the icon snapshot applied by the latest `wl_surface.commit` for a toplevel.
+    pub fn toplevel_icon(&self, surface: WaylandSurfaceId) -> Option<&ToplevelIconSnapshot> {
+        self.state.committed_toplevel_icons.get(&surface)
     }
 
     pub fn viewport(&self, surface: WaylandSurfaceId) -> Option<ViewportState> {
@@ -2329,6 +2386,17 @@ impl NativeState {
                 &mut [ffi::wl_argument { u: 1 }],
             )?;
         }
+        if interface == "xdg_toplevel_icon_manager_v1" {
+            for size in [16_i32, 24, 32, 48, 64] {
+                self.post_event(
+                    resource,
+                    "xdg_toplevel_icon_manager_v1",
+                    "icon_size",
+                    &mut [ffi::wl_argument { i: size }],
+                )?;
+            }
+            self.post_event(resource, "xdg_toplevel_icon_manager_v1", "done", &mut [])?;
+        }
         if let ResourceKind::Output(output) = kind {
             self.send_output_description(resource, output)?;
         }
@@ -2604,6 +2672,12 @@ impl NativeState {
             }
             ResourceKind::CursorShapeDevice(seat) => {
                 self.dispatch_cursor_shape_device(context, seat, request)
+            }
+            ResourceKind::ToplevelIconManager => {
+                self.dispatch_toplevel_icon_manager(resource, context, request)
+            }
+            ResourceKind::ToplevelIcon(object) => {
+                self.dispatch_toplevel_icon(resource, object, request)
             }
             ResourceKind::FractionalScaleManager => {
                 self.dispatch_fractional_scale_manager(resource, context, request)
@@ -3394,6 +3468,188 @@ impl NativeState {
         self.core.seats.get_mut(&seat).expect("seat checked").cursor =
             crate::compositor_wayland::CursorImage::Shape(shape);
         Ok(DispatchOutcome::default())
+    }
+
+    fn dispatch_toplevel_icon_manager(
+        &mut self,
+        resource: ResourceRef<'_>,
+        context: &ResourceContext,
+        request: &IncomingRequest<'_>,
+    ) -> Result<DispatchOutcome, NativeCompositorError> {
+        match request.message().name.as_str() {
+            "create_icon" => {
+                let object = self.peek_next_object()?;
+                self.create_resource(
+                    resource.client(),
+                    context.client,
+                    "xdg_toplevel_icon_v1",
+                    1,
+                    request.new_id(0).map_err(error)?,
+                    ResourceKind::ToplevelIcon(object),
+                    true,
+                )?;
+                self.toplevel_icons
+                    .insert(object, NativeToplevelIcon::default());
+            }
+            "set_icon" => {
+                let toplevel_resource = request
+                    .object(0)
+                    .map_err(error)?
+                    .ok_or_else(|| NativeCompositorError::new("missing xdg_toplevel"))?;
+                let ResourceKind::XdgToplevel(surface) = self.resource_kind(toplevel_resource)?
+                else {
+                    return Err(NativeCompositorError::new(
+                        "icon target is not an xdg_toplevel",
+                    ));
+                };
+                if !self.toplevels.contains_key(&surface) {
+                    return Err(NativeCompositorError::new("unknown xdg_toplevel"));
+                }
+                let icon = request
+                    .object(1)
+                    .map_err(error)?
+                    .map(|resource| match self.resource_kind(resource)? {
+                        ResourceKind::ToplevelIcon(object) => Ok(object),
+                        _ => Err(NativeCompositorError::new(
+                            "set_icon object is not an xdg_toplevel_icon_v1",
+                        )),
+                    })
+                    .transpose()?;
+                let Some(icon) = icon else {
+                    self.pending_toplevel_icons
+                        .insert(surface, PendingToplevelIcon::Reset);
+                    return Ok(DispatchOutcome::default());
+                };
+                let (name, buffers) = {
+                    let icon = self
+                        .toplevel_icons
+                        .get_mut(&icon)
+                        .ok_or_else(|| NativeCompositorError::new("unknown toplevel icon"))?;
+                    icon.immutable = true;
+                    (icon.name.clone(), icon.buffers.clone())
+                };
+                if name.is_none() && buffers.is_empty() {
+                    self.pending_toplevel_icons
+                        .insert(surface, PendingToplevelIcon::Reset);
+                    return Ok(DispatchOutcome::default());
+                }
+                let mut images = Vec::with_capacity(buffers.len());
+                for ((_, scale), buffer) in buffers {
+                    images.push(ToplevelIconImage {
+                        buffer,
+                        scale,
+                        image: self.snapshot_shm_buffer(buffer)?,
+                    });
+                }
+                self.toplevel_icon_revision = self.toplevel_icon_revision.wrapping_add(1).max(1);
+                self.pending_toplevel_icons.insert(
+                    surface,
+                    PendingToplevelIcon::Icon(ToplevelIconSnapshot {
+                        revision: self.toplevel_icon_revision,
+                        name,
+                        images,
+                    }),
+                );
+            }
+            _ => return Err(unsupported_request(request)),
+        }
+        Ok(DispatchOutcome::default())
+    }
+
+    fn dispatch_toplevel_icon(
+        &mut self,
+        resource: ResourceRef<'_>,
+        object: ProtocolObjectId,
+        request: &IncomingRequest<'_>,
+    ) -> Result<DispatchOutcome, NativeCompositorError> {
+        let immutable = self
+            .toplevel_icons
+            .get(&object)
+            .ok_or_else(|| NativeCompositorError::new("unknown toplevel icon"))?
+            .immutable;
+        if immutable {
+            resource.post_error(2, "the toplevel icon is immutable after assignment");
+            return Ok(DispatchOutcome::default());
+        }
+        match request.message().name.as_str() {
+            "set_name" => {
+                let name = c_string(request, 0)?;
+                if name.len() > 4_096 || name.contains('\0') {
+                    return Err(NativeCompositorError::new("invalid toplevel icon name"));
+                }
+                self.toplevel_icons
+                    .get_mut(&object)
+                    .expect("icon was checked above")
+                    .name = Some(name);
+            }
+            "add_buffer" => {
+                let buffer_resource = request
+                    .object(0)
+                    .map_err(error)?
+                    .ok_or_else(|| NativeCompositorError::new("missing icon wl_buffer"))?;
+                let ResourceKind::Buffer(buffer) = self.resource_kind(buffer_resource)? else {
+                    resource.post_error(1, "icon object is not a wl_buffer");
+                    return Ok(DispatchOutcome::default());
+                };
+                let scale = request.int(1).map_err(error)?;
+                let descriptor = self.core.buffer(buffer);
+                let Some(BufferDescriptor::Shm(descriptor)) = descriptor else {
+                    resource.post_error(1, "icon buffer must use wl_shm");
+                    return Ok(DispatchOutcome::default());
+                };
+                if scale <= 0 || descriptor.size.width != descriptor.size.height {
+                    resource.post_error(1, "icon buffer must be square with a positive scale");
+                    return Ok(DispatchOutcome::default());
+                }
+                self.toplevel_icons
+                    .get_mut(&object)
+                    .expect("icon was checked above")
+                    .buffers
+                    .insert((descriptor.size.width, scale), buffer);
+            }
+            _ => return Err(unsupported_request(request)),
+        }
+        Ok(DispatchOutcome::default())
+    }
+
+    fn snapshot_shm_buffer(
+        &self,
+        buffer: WaylandBufferId,
+    ) -> Result<ShmImage, NativeCompositorError> {
+        let BufferDescriptor::Shm(descriptor) = self
+            .core
+            .buffer(buffer)
+            .ok_or_else(|| NativeCompositorError::new("unknown Wayland buffer"))?
+        else {
+            return Err(NativeCompositorError::new(
+                "toplevel icon buffer is not shared memory",
+            ));
+        };
+        let fd = self
+            .buffer_files
+            .get(&buffer)
+            .ok_or_else(|| NativeCompositorError::new("icon SHM buffer has no backing file"))?
+            .try_clone()
+            .map_err(error)?;
+        let file = std::fs::File::from(fd);
+        let length = descriptor.stride as usize * descriptor.size.height as usize;
+        let mut pixels = vec![0_u8; length];
+        let mut read = 0;
+        while read < pixels.len() {
+            let count = file
+                .read_at(&mut pixels[read..], descriptor.offset as u64 + read as u64)
+                .map_err(error)?;
+            if count == 0 {
+                return Err(NativeCompositorError::new(
+                    "icon shared-memory buffer ended before its declared extent",
+                ));
+            }
+            read += count;
+        }
+        Ok(ShmImage {
+            descriptor: *descriptor,
+            pixels,
+        })
     }
 
     fn dispatch_fractional_scale_manager(
@@ -5378,6 +5634,16 @@ impl NativeState {
             }
         }
         let outcome = self.surface_mut(surface)?.commit().map_err(error)?;
+        if let Some(icon) = self.pending_toplevel_icons.remove(&surface) {
+            match icon {
+                PendingToplevelIcon::Reset => {
+                    self.committed_toplevel_icons.remove(&surface);
+                }
+                PendingToplevelIcon::Icon(icon) => {
+                    self.committed_toplevel_icons.insert(surface, icon);
+                }
+            }
+        }
         self.commit_viewport_state(surface)?;
         if let Some(expected) = self
             .session_lock_surfaces
@@ -6257,6 +6523,8 @@ impl NativeState {
                 self.initial_configures.remove(&surface);
                 self.xdg_resources.remove(&surface);
                 self.toplevels.remove(&surface);
+                self.pending_toplevel_icons.remove(&surface);
+                self.committed_toplevel_icons.remove(&surface);
                 self.viewports.remove(&surface);
                 self.synchronized_surfaces.remove(&surface);
                 self.pending_acquire_fences.remove(&surface);
@@ -6282,6 +6550,20 @@ impl NativeState {
                 self.shm_pools.remove(&object);
             }
             ResourceKind::Buffer(buffer) => {
+                let affected = self
+                    .toplevel_icons
+                    .iter()
+                    .filter(|(_, icon)| icon.buffers.values().any(|candidate| *candidate == buffer))
+                    .map(|(object, _)| *object)
+                    .collect::<Vec<_>>();
+                for object in affected {
+                    if let Some(identity) = self.resources.get(&object).copied()
+                        && let Some(icon) =
+                            unsafe { ResourceRef::from_raw(identity as *mut ffi::wl_resource) }
+                    {
+                        icon.post_error(3, "an icon wl_buffer was destroyed before its icon");
+                    }
+                }
                 self.buffer_files.remove(&buffer);
                 self.dmabuf_files.remove(&buffer);
                 let _ = self.core.destroy_buffer(context.client, buffer);
@@ -6316,6 +6598,11 @@ impl NativeState {
             }
             ResourceKind::XdgToplevel(surface) => {
                 self.toplevels.remove(&surface);
+                self.pending_toplevel_icons.remove(&surface);
+                self.committed_toplevel_icons.remove(&surface);
+            }
+            ResourceKind::ToplevelIcon(object) => {
+                self.toplevel_icons.remove(&object);
             }
             ResourceKind::XdgPositioner(object) => {
                 self.positioners.remove(&object);

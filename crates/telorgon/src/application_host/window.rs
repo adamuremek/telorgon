@@ -1,10 +1,20 @@
+use crate::AppIconProfile;
 use crate::core::SizeI;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowDecorationMode {
+    #[default]
+    System,
+    Hidden,
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowOptions {
     pub title: String,
     pub size: SizeI,
     pub min_size: Option<SizeI>,
+    pub decorations: WindowDecorationMode,
+    pub icon: AppIconProfile,
 }
 
 impl Default for WindowOptions {
@@ -19,6 +29,8 @@ impl Default for WindowOptions {
                 width: 320,
                 height: 240,
             }),
+            decorations: WindowDecorationMode::System,
+            icon: AppIconProfile::new(),
         }
     }
 }

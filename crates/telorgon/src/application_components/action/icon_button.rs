@@ -1,5 +1,6 @@
 //! Accessible Tier A icon-only button built on the shared button contract.
 
+use crate::assets::{Icon, IconAsset};
 use crate::core::{ColorRgba8, EdgeInsets};
 use crate::input::Activation;
 use crate::runtime::{RuntimeError, RuntimeResult, Ui};
@@ -32,6 +33,18 @@ impl IconArtwork {
 impl From<ImageId> for IconArtwork {
     fn from(image: ImageId) -> Self {
         Self::from_image(image)
+    }
+}
+
+impl From<IconAsset> for IconArtwork {
+    fn from(icon: IconAsset) -> Self {
+        Self::from_image(icon.image_id())
+    }
+}
+
+impl From<Icon> for IconArtwork {
+    fn from(icon: Icon) -> Self {
+        Self::from_image(icon.image_id())
     }
 }
 
@@ -141,8 +154,11 @@ impl Default for IconButtonStyle {
                 height: SizeRule::Px(32.0),
             },
             padding: EdgeInsets::all(7.0),
-            background: Background::Color(color),
-            corner_radii: CornerRadii::all(6.0),
+            decoration: crate::ui::BoxDecoration {
+                background: Background::Color(color),
+                corner_radii: CornerRadii::all(6.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         };
         let visual = |color, opacity| IconButtonVisualStyle {

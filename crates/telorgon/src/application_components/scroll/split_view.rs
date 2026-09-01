@@ -438,8 +438,11 @@ impl Default for SplitViewStyle {
             pane: BoxStyle::default(),
             divider: BoxStyle::default(),
             divider_grip: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(104, 116, 139, 255)),
-                corner_radii: CornerRadii::all(2.0),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(104, 116, 139, 255)),
+                    corner_radii: CornerRadii::all(2.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             pane_layout: LayoutStyle::default(),

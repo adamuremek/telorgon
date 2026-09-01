@@ -465,7 +465,10 @@ mod tests {
                     ..LayoutStyle::default()
                 },
                 content: BoxStyle {
-                    background: Background::Color(ColorRgba8::rgba(12, 24, 36, 255)),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(12, 24, 36, 255)),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 content_layout: LayoutStyle {
@@ -535,7 +538,13 @@ mod tests {
             SizeRule::Px(320.0)
         );
         assert_eq!(
-            runtime.ui().box_styles.get(content).unwrap().background,
+            runtime
+                .ui()
+                .box_styles
+                .get(content)
+                .unwrap()
+                .decoration
+                .background,
             Background::Color(ColorRgba8::rgba(12, 24, 36, 255))
         );
 

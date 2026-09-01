@@ -31,6 +31,8 @@ pub trait View: 'static {
 pub struct Element {
     key: Option<Key>,
     kind: ElementKind,
+    window_chrome_role: Option<crate::window_chrome::WindowChromeRole>,
+    pointer_request: Option<crate::assets::PointerRequest>,
 }
 
 impl fmt::Debug for Element {
@@ -39,13 +41,20 @@ impl fmt::Debug for Element {
             .debug_struct("Element")
             .field("key", &self.key)
             .field("kind", &self.kind)
+            .field("window_chrome_role", &self.window_chrome_role)
+            .field("pointer_request", &self.pointer_request)
             .finish()
     }
 }
 
 impl Element {
     pub(crate) const fn from_kind(key: Option<Key>, kind: ElementKind) -> Self {
-        Self { key, kind }
+        Self {
+            key,
+            kind,
+            window_chrome_role: None,
+            pointer_request: None,
+        }
     }
 
     pub fn key(mut self, key: impl Into<Key>) -> Self {
@@ -58,8 +67,32 @@ impl Element {
     }
 
     #[doc(hidden)]
-    pub fn into_parts(self) -> (Option<Key>, ElementKind) {
-        (self.key, self.kind)
+    pub fn into_parts(
+        self,
+    ) -> (
+        Option<Key>,
+        ElementKind,
+        Option<crate::window_chrome::WindowChromeRole>,
+        Option<crate::assets::PointerRequest>,
+    ) {
+        (
+            self.key,
+            self.kind,
+            self.window_chrome_role,
+            self.pointer_request,
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn with_window_chrome_role(mut self, role: crate::window_chrome::WindowChromeRole) -> Self {
+        self.window_chrome_role = Some(role);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_pointer_request(mut self, request: crate::assets::PointerRequest) -> Self {
+        self.pointer_request = Some(request);
+        self
     }
 
     #[doc(hidden)]

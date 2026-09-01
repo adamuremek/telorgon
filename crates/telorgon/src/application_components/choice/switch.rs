@@ -98,24 +98,33 @@ impl Default for SwitchStyle {
                         height: SizeRule::Px(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
-                    background: container_background,
-                    corner_radii: CornerRadii::all(4.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: container_background,
+                        corner_radii: CornerRadii::all(4.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 track: BoxStyle {
                     width: SizeRule::Px(38.0),
                     height: SizeRule::Px(22.0),
                     padding: EdgeInsets::all(2.0),
-                    background: Background::Color(track_color),
-                    border: Border::all(1.0, ColorRgba8::rgba(118, 127, 145, opacity)),
-                    corner_radii: CornerRadii::all(11.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(track_color),
+                        border: Border::all(1.0, ColorRgba8::rgba(118, 127, 145, opacity)),
+                        corner_radii: CornerRadii::all(11.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 thumb: BoxStyle {
                     width: SizeRule::Px(16.0),
                     height: SizeRule::Px(16.0),
-                    background: Background::Color(ColorRgba8::rgba(248, 249, 252, opacity)),
-                    corner_radii: CornerRadii::all(8.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(248, 249, 252, opacity)),
+                        corner_radii: CornerRadii::all(8.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     transform: Transform2D {
                         translation: PointF {
                             x: thumb_offset,
@@ -411,7 +420,10 @@ mod tests {
         let on = SwitchStyle::default().resolve(true, interaction);
         assert_eq!(off.state, ButtonStyleState::Pressed);
         assert_eq!(on.state, ButtonStyleState::Pressed);
-        assert_ne!(off.visual.track.background, on.visual.track.background);
+        assert_ne!(
+            off.visual.track.decoration.background,
+            on.visual.track.decoration.background
+        );
         assert_ne!(off.visual.thumb.transform, on.visual.thumb.transform);
 
         for (value, expected) in [

@@ -60,8 +60,10 @@ axum = { workspace = true, optional = true }
 bytemuck = { workspace = true, optional = true }
 cosmic-text.workspace = true
 gpu-allocator = { workspace = true, optional = true }
+image.workspace = true
 rand = { workspace = true, optional = true }
 raw-window-handle = { workspace = true, optional = true }
+resvg.workspace = true
 rtrb = { workspace = true, optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }

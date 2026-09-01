@@ -97,13 +97,19 @@ impl Default for BreadcrumbStyle {
             container: BoxStyle::default(),
             ancestor: BoxStyle {
                 padding: EdgeInsets::all(6.0),
-                corner_radii: CornerRadii::all(4.0),
+                decoration: crate::ui::BoxDecoration {
+                    corner_radii: CornerRadii::all(4.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             current: BoxStyle {
                 padding: EdgeInsets::all(6.0),
-                background: Background::Color(ColorRgba8::rgba(65, 75, 94, 96)),
-                corner_radii: CornerRadii::all(4.0),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(65, 75, 94, 96)),
+                    corner_radii: CornerRadii::all(4.0),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..BoxStyle::default()
             },
             ancestor_color: ColorRgba8::rgba(177, 202, 247, 255),

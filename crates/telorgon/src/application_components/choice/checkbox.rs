@@ -102,8 +102,11 @@ fn mark_segment(
     BoxStyle {
         width: SizeRule::Px(length),
         height: SizeRule::Px(stroke_width),
-        background,
-        corner_radii: CornerRadii::all(stroke_width * 0.5),
+        decoration: crate::ui::BoxDecoration {
+            background,
+            corner_radii: CornerRadii::all(stroke_width * 0.5),
+            ..crate::ui::BoxDecoration::default()
+        },
         transform: Transform2D {
             translation: PointF {
                 x: offset.x + start.x * scale,
@@ -137,9 +140,9 @@ fn indicator_content_extent(style: BoxStyle, horizontal: bool, fallback: f32) ->
     }
 
     let border = if horizontal {
-        style.border.left.width.max(0.0) + style.border.right.width.max(0.0)
+        style.decoration.border.left.width.max(0.0) + style.decoration.border.right.width.max(0.0)
     } else {
-        style.border.top.width.max(0.0) + style.border.bottom.width.max(0.0)
+        style.decoration.border.top.width.max(0.0) + style.decoration.border.bottom.width.max(0.0)
     };
     let padding = if horizontal {
         style.padding.horizontal()
@@ -239,16 +242,22 @@ impl Default for CheckboxStyle {
                         height: SizeRule::Px(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
-                    background: container_background,
-                    corner_radii: CornerRadii::all(4.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: container_background,
+                        corner_radii: CornerRadii::all(4.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 indicator: BoxStyle {
                     width: SizeRule::Px(18.0),
                     height: SizeRule::Px(18.0),
-                    border: Border::all(1.0, ColorRgba8::rgba(109, 119, 139, opacity)),
-                    background: indicator_background,
-                    corner_radii: CornerRadii::all(4.0),
+                    decoration: crate::ui::BoxDecoration {
+                        border: Border::all(1.0, ColorRgba8::rgba(109, 119, 139, opacity)),
+                        background: indicator_background,
+                        corner_radii: CornerRadii::all(4.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     ..BoxStyle::default()
                 },
                 mark_color: indicator_color,
@@ -683,12 +692,12 @@ mod tests {
         assert_eq!(checked.state, ButtonStyleState::Pressed);
         assert_eq!(mixed.state, ButtonStyleState::Pressed);
         assert_ne!(
-            unchecked.visual.indicator.background,
-            checked.visual.indicator.background
+            unchecked.visual.indicator.decoration.background,
+            checked.visual.indicator.decoration.background
         );
         assert_ne!(
-            checked.visual.indicator.background,
-            mixed.visual.indicator.background
+            checked.visual.indicator.decoration.background,
+            mixed.visual.indicator.decoration.background
         );
 
         for (value, expected) in [
@@ -720,29 +729,32 @@ mod tests {
         assert_eq!(checked.root.width, SizeRule::Px(16.0));
         assert_eq!(checked.root.height, SizeRule::Px(16.0));
         assert!(matches!(
-            checked.check_first.background,
+            checked.check_first.decoration.background,
             Background::Color(_)
         ));
         assert!(matches!(
-            checked.check_second.background,
+            checked.check_second.decoration.background,
             Background::Color(_)
         ));
-        assert_eq!(checked.mixed.background, Background::None);
+        assert_eq!(checked.mixed.decoration.background, Background::None);
         assert_eq!(
             checked.check_first.transform.origin,
             PointF { x: 0.0, y: 0.5 }
         );
         assert_eq!(
-            checked.check_first.corner_radii,
+            checked.check_first.decoration.corner_radii,
             CornerRadii::all(
                 MARK_STROKE_WIDTH * style.checked.resting.mark_size / MARK_VIEW_BOX / 2.0
             )
         );
 
         let mixed = checkbox_mark_styles(style.mixed.resting, CheckState::Mixed);
-        assert_eq!(mixed.check_first.background, Background::None);
-        assert_eq!(mixed.check_second.background, Background::None);
-        assert!(matches!(mixed.mixed.background, Background::Color(_)));
+        assert_eq!(mixed.check_first.decoration.background, Background::None);
+        assert_eq!(mixed.check_second.decoration.background, Background::None);
+        assert!(matches!(
+            mixed.mixed.decoration.background,
+            Background::Color(_)
+        ));
         assert_eq!(mixed.mixed.transform.rotation, 0.0);
         assert_eq!(
             mixed.mixed.transform.translation.y

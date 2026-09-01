@@ -245,9 +245,12 @@ mod tests {
                 image: BoxStyle {
                     width: SizeRule::Px(320.0),
                     height: SizeRule::Px(180.0),
-                    background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
-                    border: Border::all(2.0, ColorRgba8::rgba(40, 50, 60, 255)),
-                    corner_radii: CornerRadii::all(8.0),
+                    decoration: crate::ui::BoxDecoration {
+                        background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
+                        border: Border::all(2.0, ColorRgba8::rgba(40, 50, 60, 255)),
+                        corner_radii: CornerRadii::all(8.0),
+                        ..crate::ui::BoxDecoration::default()
+                    },
                     opacity: 0.75,
                     ..BoxStyle::default()
                 },
@@ -308,7 +311,7 @@ mod tests {
         assert_eq!(style.width, SizeRule::Px(320.0));
         assert_eq!(style.height, SizeRule::Px(180.0));
         assert_eq!(style.opacity, 0.75);
-        assert_eq!(style.corner_radii, CornerRadii::all(8.0));
+        assert_eq!(style.decoration.corner_radii, CornerRadii::all(8.0));
         assert_eq!(
             runtime.ui().layouts.get(decorative.node()).unwrap(),
             &LayoutStyle {

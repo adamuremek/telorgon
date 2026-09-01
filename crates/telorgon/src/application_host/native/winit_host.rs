@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::num::NonZeroU16;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,12 +16,15 @@ use crate::platform_winit::{
 };
 use crate::presentation::{SurfaceMetrics, SurfaceRevision};
 use crate::render::{AlphaMode, ColorSpace, RenderSceneDelta};
+use crate::{AssetBundle, AssetMediaCache};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, Size};
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::PhysicalKey as WinitPhysicalKey;
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{
+    CursorIcon, CustomCursor, ResizeDirection, Window, WindowAttributes, WindowId,
+};
 
 use super::HostEvent;
 use super::resize::{
@@ -71,7 +75,7 @@ pub(crate) fn create_managed_event_loop(
 #[cfg(feature = "application-software")]
 #[cfg(not(all(feature = "application-vulkan-windows", target_os = "windows")))]
 pub fn run_gui_software(application: ReadyGuiApplication) -> AppResult<()> {
-    let (driver, options, renderer) = application.into_parts()?;
+    let (driver, options, renderer, assets, pointer) = application.into_parts()?;
     if renderer == crate::application_host::Renderer::Vulkan {
         return Err(AppError::new(
             "this build does not include the Vulkan managed renderer",
@@ -81,7 +85,7 @@ pub fn run_gui_software(application: ReadyGuiApplication) -> AppResult<()> {
         create_managed_event_loop(crate::application_host::profiler::ProfileTarget::Gui)?;
     let software = SoftwarePresentation::new(event_loop.event_loop().owned_display_handle())
         .map_err(AppError::new)?;
-    run_composed_managed(event_loop, driver, options, software)
+    run_composed_managed(event_loop, driver, options, assets, pointer, software)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +136,8 @@ pub(crate) fn run_composed_managed<P>(
     event_loop: ManagedEventLoop,
     mut driver: CompositionDriver,
     options: WindowOptions,
+    assets: AssetBundle,
+    pointer: crate::PointerConfiguration,
     presentation: P,
 ) -> AppResult<()>
 where
@@ -141,7 +147,16 @@ where
     driver.set_wake(move || {
         let _ = proxy.send_event(HostEvent::RuntimeWake);
     });
-    run_managed_source(event_loop, CompositionSource(driver), options, presentation)
+    run_managed_source(
+        event_loop,
+        CompositionSource {
+            driver,
+            assets,
+            pointer,
+        },
+        options,
+        presentation,
+    )
 }
 
 fn run_managed_source<S, P>(
@@ -206,22 +221,272 @@ where
 trait NativeRuntimeSource {
     type Driver: ComponentDriver;
 
+    fn managed_pointer(&self) -> AppResult<ManagedPointer>;
+    fn window_icon(
+        &self,
+        profile: &crate::AppIconProfile,
+    ) -> AppResult<Option<winit::window::Icon>>;
     fn mount(self, extent: SizeI) -> AppResult<AppRuntimeCore<Self::Driver>>;
     fn close(runtime: &mut AppRuntimeCore<Self::Driver>) -> AppResult<()>;
 }
 
-struct CompositionSource(CompositionDriver);
+struct CompositionSource {
+    driver: CompositionDriver,
+    assets: AssetBundle,
+    pointer: crate::PointerConfiguration,
+}
 
 impl NativeRuntimeSource for CompositionSource {
     type Driver = CompositionDriver;
 
+    fn managed_pointer(&self) -> AppResult<ManagedPointer> {
+        ManagedPointer::new(self.assets, self.pointer.clone())
+    }
+
+    fn window_icon(
+        &self,
+        profile: &crate::AppIconProfile,
+    ) -> AppResult<Option<winit::window::Icon>> {
+        let Some(icon) = profile.preferred(64) else {
+            return Ok(None);
+        };
+        let mut media =
+            AssetMediaCache::new(self.assets).map_err(|error| AppError::new(error.to_string()))?;
+        let decoded = media
+            .icon(
+                icon.source(),
+                Some(
+                    crate::AssetRasterSize::new(64, 64)
+                        .map_err(|error| AppError::new(error.to_string()))?,
+                ),
+            )
+            .map_err(|error| AppError::new(error.to_string()))?;
+        let rgba = straight_alpha_rgba(&decoded);
+        winit::window::Icon::from_rgba(
+            rgba,
+            decoded.extent.width as u32,
+            decoded.extent.height as u32,
+        )
+        .map(Some)
+        .map_err(|error| AppError::new(format!("invalid native window icon: {error}")))
+    }
+
     fn mount(self, extent: SizeI) -> AppResult<AppRuntimeCore<Self::Driver>> {
-        AppRuntimeCore::from_composition_driver(self.0, extent)
+        let mut runtime = AppRuntimeCore::from_composition_driver(self.driver, extent)?;
+        let mut media =
+            AssetMediaCache::new(self.assets).map_err(|error| AppError::new(error.to_string()))?;
+        for resource in media
+            .preload_render_resources()
+            .map_err(|error| AppError::new(error.to_string()))?
+        {
+            runtime.set_image_resource(resource)?;
+        }
+        Ok(runtime)
     }
 
     fn close(runtime: &mut AppRuntimeCore<Self::Driver>) -> AppResult<()> {
         runtime.close_composition()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct ManagedCursorKey {
+    asset: crate::CursorAsset,
+    size: u16,
+    hotspot_x: u16,
+    hotspot_y: u16,
+}
+
+#[derive(Clone)]
+struct ManagedCursorFrame {
+    cursor: CustomCursor,
+    duration: Duration,
+}
+
+struct ManagedPointerAnimation {
+    frames: Vec<ManagedCursorFrame>,
+    index: usize,
+    next_frame_at: Instant,
+}
+
+struct ManagedPointer {
+    configuration: crate::PointerConfiguration,
+    theme: Option<crate::PointerTheme>,
+    media: AssetMediaCache,
+    cursors: BTreeMap<ManagedCursorKey, CustomCursor>,
+    current_request: Option<crate::PointerRequest>,
+    animation: Option<ManagedPointerAnimation>,
+}
+
+impl ManagedPointer {
+    fn new(bundle: AssetBundle, configuration: crate::PointerConfiguration) -> AppResult<Self> {
+        let theme = configuration
+            .load_theme(bundle)
+            .map_err(|error| AppError::new(error.to_string()))?;
+        let media =
+            AssetMediaCache::new(bundle).map_err(|error| AppError::new(error.to_string()))?;
+        Ok(Self {
+            configuration,
+            theme,
+            media,
+            cursors: BTreeMap::new(),
+            current_request: None,
+            animation: None,
+        })
+    }
+
+    fn apply(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Window,
+        request: crate::PointerRequest,
+        now: Instant,
+    ) -> AppResult<()> {
+        if self.current_request == Some(request) {
+            self.advance_animation(window, now);
+            return Ok(());
+        }
+
+        self.animation = None;
+        self.current_request = Some(request);
+        match crate::resolve_pointer(
+            request,
+            self.configuration.client_cursor_mode(),
+            self.configuration.pointer_overrides(),
+            self.theme.as_ref(),
+        ) {
+            crate::PointerResolution::Hidden => window.set_cursor_visible(false),
+            crate::PointerResolution::ClientSurface => {
+                window.set_cursor_visible(true);
+                window.set_cursor(CursorIcon::Default);
+            }
+            crate::PointerResolution::System(icon) => {
+                window.set_cursor_visible(true);
+                window.set_cursor(winit_cursor_icon(icon));
+            }
+            crate::PointerResolution::Graphic(graphic) => {
+                let graphic = graphic.clone();
+                let frames = self.custom_frames(event_loop, &graphic)?;
+                let first = frames
+                    .first()
+                    .expect("pointer graphics always contain at least one frame");
+                window.set_cursor_visible(true);
+                window.set_cursor(first.cursor.clone());
+                if frames.len() > 1 {
+                    self.animation = Some(ManagedPointerAnimation {
+                        next_frame_at: now + first.duration,
+                        frames,
+                        index: 0,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn custom_frames(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        graphic: &crate::PointerGraphic,
+    ) -> AppResult<Vec<ManagedCursorFrame>> {
+        let size = graphic
+            .physical_size()
+            .or_else(|| {
+                self.theme
+                    .as_ref()
+                    .and_then(crate::PointerTheme::physical_size)
+            })
+            .unwrap_or(32);
+        let hotspot = graphic.pointer_hotspot();
+        if hotspot.x >= size || hotspot.y >= size {
+            return Err(AppError::new(format!(
+                "custom pointer hotspot ({}, {}) is outside its {}px image",
+                hotspot.x, hotspot.y, size
+            )));
+        }
+        let raster_size = crate::AssetRasterSize::new(u32::from(size), u32::from(size))
+            .map_err(|error| AppError::new(error.to_string()))?;
+        let mut frames = Vec::with_capacity(graphic.frames().len());
+        for frame in graphic.frames() {
+            let key = ManagedCursorKey {
+                asset: frame.asset,
+                size,
+                hotspot_x: hotspot.x,
+                hotspot_y: hotspot.y,
+            };
+            let cursor = if let Some(cursor) = self.cursors.get(&key) {
+                cursor.clone()
+            } else {
+                let decoded = self
+                    .media
+                    .cursor(frame.asset, Some(raster_size))
+                    .map_err(|error| AppError::new(error.to_string()))?;
+                let source = CustomCursor::from_rgba(
+                    straight_alpha_rgba(&decoded),
+                    u16::try_from(decoded.extent.width)
+                        .map_err(|_| AppError::new("custom pointer width exceeds u16"))?,
+                    u16::try_from(decoded.extent.height)
+                        .map_err(|_| AppError::new("custom pointer height exceeds u16"))?,
+                    hotspot.x,
+                    hotspot.y,
+                )
+                .map_err(|error| AppError::new(format!("invalid custom pointer image: {error}")))?;
+                let cursor = event_loop.create_custom_cursor(source);
+                self.cursors.insert(key, cursor.clone());
+                cursor
+            };
+            frames.push(ManagedCursorFrame {
+                cursor,
+                duration: Duration::from_millis(
+                    frame
+                        .duration_ms
+                        .map_or(0, std::num::NonZeroU32::get)
+                        .into(),
+                ),
+            });
+        }
+        Ok(frames)
+    }
+
+    fn advance_animation(&mut self, window: &Window, now: Instant) {
+        let Some(animation) = self.animation.as_mut() else {
+            return;
+        };
+        let mut advanced = 0;
+        while now >= animation.next_frame_at && advanced < animation.frames.len() {
+            animation.index = (animation.index + 1) % animation.frames.len();
+            let frame = &animation.frames[animation.index];
+            window.set_cursor(frame.cursor.clone());
+            animation.next_frame_at += frame.duration;
+            advanced += 1;
+        }
+        if now >= animation.next_frame_at {
+            animation.next_frame_at = now + animation.frames[animation.index].duration;
+        }
+    }
+
+    fn next_deadline(&self) -> Option<Instant> {
+        self.animation
+            .as_ref()
+            .map(|animation| animation.next_frame_at)
+    }
+}
+
+fn straight_alpha_rgba(image: &crate::DecodedAssetImage) -> Vec<u8> {
+    let mut rgba = image.pixels_rgba8.to_vec();
+    if image.alpha_mode == crate::render::ImageAlphaMode::Premultiplied {
+        for pixel in rgba.chunks_exact_mut(4) {
+            let alpha = u16::from(pixel[3]);
+            if alpha == 0 {
+                pixel[..3].fill(0);
+            } else {
+                for channel in &mut pixel[..3] {
+                    *channel = ((u16::from(*channel) * 255 + alpha / 2) / alpha).min(255) as u8;
+                }
+            }
+        }
+    }
+    rgba
 }
 
 struct NativeHost<S: NativeRuntimeSource, P: NativePresentation> {
@@ -243,6 +508,8 @@ struct NativeHost<S: NativeRuntimeSource, P: NativePresentation> {
     occluded: bool,
     suspended: bool,
     host_wake_pending: bool,
+    cursor_position: PointF,
+    pointer: Option<ManagedPointer>,
     diagnostics: NativeHostDiagnostics,
     failure: Option<String>,
 }
@@ -558,6 +825,8 @@ impl<S: NativeRuntimeSource, P: NativePresentation> NativeHost<S, P> {
             occluded: false,
             suspended: false,
             host_wake_pending: false,
+            cursor_position: PointF::default(),
+            pointer: None,
             diagnostics: NativeHostDiagnostics::default(),
             failure: None,
         }
@@ -586,7 +855,7 @@ impl<S: NativeRuntimeSource, P: NativePresentation> NativeHost<S, P> {
         match self.presentation.poll() {
             Ok(()) => true,
             Err(error) => {
-                self.fail(event_loop, error);
+                self.fail(event_loop, error.to_string());
                 false
             }
         }
@@ -596,6 +865,121 @@ impl<S: NativeRuntimeSource, P: NativePresentation> NativeHost<S, P> {
         if self.redraw.mark(reason) {
             self.diagnostics.redraw_reasons[reason as usize] =
                 self.diagnostics.redraw_reasons[reason as usize].saturating_add(1);
+        }
+    }
+
+    fn custom_chrome_action(&self) -> Option<crate::WindowAction> {
+        if self.options.decorations != crate::application_host::WindowDecorationMode::Hidden {
+            return None;
+        }
+        let runtime = self.runtime.as_ref()?;
+        let snapshot = crate::WindowChromeSnapshot::derive(runtime.ui(), runtime.layout()).ok()?;
+        match snapshot.hit_test(self.cursor_position.x, self.cursor_position.y) {
+            Some(crate::WindowChromeRole::DragRegion) => Some(crate::WindowAction::BeginMove),
+            Some(crate::WindowChromeRole::Action(action)) => Some(action),
+            _ => None,
+        }
+    }
+
+    fn pointer_request(&self) -> crate::PointerRequest {
+        let Some(runtime) = self.runtime.as_ref() else {
+            return crate::PointerRequest::Semantic(crate::PointerIcon::Default);
+        };
+        if self.options.decorations == crate::application_host::WindowDecorationMode::Hidden
+            && let Ok(snapshot) =
+                crate::WindowChromeSnapshot::derive(runtime.ui(), runtime.layout())
+            && let Some(role) = snapshot.hit_test(self.cursor_position.x, self.cursor_position.y)
+        {
+            match role {
+                crate::WindowChromeRole::DragRegion => {
+                    return crate::PointerRequest::Semantic(crate::PointerIcon::Move);
+                }
+                crate::WindowChromeRole::Action(crate::WindowAction::BeginResize(edge)) => {
+                    return crate::PointerRequest::Semantic(resize_pointer_icon(edge));
+                }
+                crate::WindowChromeRole::Action(crate::WindowAction::BeginMove) => {
+                    return crate::PointerRequest::Semantic(crate::PointerIcon::Move);
+                }
+                crate::WindowChromeRole::Action(_) => {
+                    return crate::PointerRequest::Semantic(crate::PointerIcon::Pointer);
+                }
+                _ => {}
+            }
+        }
+
+        runtime
+            .ui()
+            .pointer_requests
+            .iter()
+            .filter_map(|(node, request)| {
+                runtime.layout().computed(node).and_then(|computed| {
+                    (computed.visible_rect.contains(self.cursor_position)
+                        && computed.border_rect.contains(self.cursor_position))
+                    .then_some((*request, computed.border_rect.area()))
+                })
+            })
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(request, _)| request)
+            .unwrap_or(crate::PointerRequest::Semantic(crate::PointerIcon::Default))
+    }
+
+    fn refresh_pointer(&mut self, event_loop: &ActiveEventLoop, now: Instant) -> bool {
+        let request = self.pointer_request();
+        let Some(window) = self.window.clone() else {
+            return true;
+        };
+        let Some(pointer) = self.pointer.as_mut() else {
+            return true;
+        };
+        if let Err(error) = pointer.apply(event_loop, &window, request, now) {
+            self.fail(
+                event_loop,
+                format!("failed to apply managed pointer theme: {error}"),
+            );
+            return false;
+        }
+        true
+    }
+
+    fn apply_custom_chrome_action(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        action: crate::WindowAction,
+    ) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let result = match action {
+            crate::WindowAction::Close => {
+                if let Some(runtime) = self.runtime.as_mut()
+                    && let Err(error) = S::close(runtime)
+                {
+                    self.fail(event_loop, format!("component close failed: {error}"));
+                    return;
+                }
+                self.flush_commands();
+                event_loop.exit();
+                return;
+            }
+            crate::WindowAction::Minimize => {
+                window.set_minimized(true);
+                Ok(())
+            }
+            crate::WindowAction::ToggleMaximize => {
+                window.set_maximized(!window.is_maximized());
+                Ok(())
+            }
+            crate::WindowAction::BeginMove => window.drag_window(),
+            crate::WindowAction::BeginResize(edge) => {
+                window.drag_resize_window(winit_resize_direction(edge))
+            }
+            crate::WindowAction::ShowSystemMenu => Ok(()),
+        };
+        if let Err(error) = result {
+            self.fail(
+                event_loop,
+                format!("custom window-frame action failed: {error}"),
+            );
         }
     }
 
@@ -869,6 +1253,9 @@ impl<S: NativeRuntimeSource, P: NativePresentation> NativeHost<S, P> {
         self.process_runtime_turn(timestamp);
         self.flush_commands();
         self.mark_runtime_frame_demand();
+        if !self.refresh_pointer(event_loop, native_now) {
+            return false;
+        }
 
         let runtime_pending = self
             .runtime
@@ -960,6 +1347,13 @@ impl<S: NativeRuntimeSource, P: NativePresentation> NativeHost<S, P> {
         }
         if let Some(redraw_deadline) = redraw_pacing_deadline {
             control_flow = earlier_wait_deadline(control_flow, redraw_deadline);
+        }
+        if let Some(pointer_deadline) = self
+            .pointer
+            .as_ref()
+            .and_then(ManagedPointer::next_deadline)
+        {
+            control_flow = earlier_wait_deadline(control_flow, pointer_deadline);
         }
         event_loop.set_control_flow(control_flow);
 
@@ -1165,6 +1559,8 @@ impl<S: NativeRuntimeSource, P: NativePresentation> NativeHost<S, P> {
             let synchronized = self
                 .presentation
                 .synchronize_resize(metrics_revision, WINDOW_RESIZE_PRESENT_TIMEOUT)?;
+            #[cfg(not(any(target_os = "windows", feature = "profiler")))]
+            let _ = synchronized;
             #[cfg(target_os = "windows")]
             if synchronized {
                 flush_windows_compositor();
@@ -1227,8 +1623,26 @@ where
             return;
         };
         let options = &self.options;
+        let window_icon = match source.window_icon(&options.icon) {
+            Ok(icon) => icon,
+            Err(error) => {
+                self.fail(event_loop, error.to_string());
+                return;
+            }
+        };
+        let pointer = match source.managed_pointer() {
+            Ok(pointer) => pointer,
+            Err(error) => {
+                self.fail(event_loop, error.to_string());
+                return;
+            }
+        };
         let mut attributes = WindowAttributes::default()
             .with_title(options.title.clone())
+            .with_decorations(
+                options.decorations == crate::application_host::WindowDecorationMode::System,
+            )
+            .with_window_icon(window_icon)
             .with_inner_size(Size::Logical(LogicalSize::new(
                 f64::from(options.size.width.max(1)),
                 f64::from(options.size.height.max(1)),
@@ -1262,6 +1676,7 @@ where
         };
         self.view = Some(registration.view);
         self.window = Some(Arc::clone(&window));
+        self.pointer = Some(pointer);
         if let Err(error) = self.presentation.attach(Arc::clone(&window)) {
             self.fail(event_loop, error);
             return;
@@ -1386,11 +1801,12 @@ where
                 );
                 self.diagnostics.native_pointer_moves =
                     self.diagnostics.native_pointer_moves.saturating_add(1);
+                self.cursor_position = PointF {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                };
                 if let Some(runtime) = self.runtime.as_mut() {
-                    runtime.queue_input(InputEvent::mouse_moved(PointF {
-                        x: position.x as f32,
-                        y: position.y as f32,
-                    }));
+                    runtime.queue_input(InputEvent::mouse_moved(self.cursor_position));
                 }
             }
             WindowEvent::CursorLeft { .. } => {
@@ -1402,6 +1818,7 @@ where
                 if let Some(runtime) = self.runtime.as_mut() {
                     runtime.queue_input(InputEvent::mouse_moved(PointF { x: -1.0, y: -1.0 }));
                 }
+                self.cursor_position = PointF { x: -1.0, y: -1.0 };
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 #[cfg(feature = "profiler")]
@@ -1409,6 +1826,10 @@ where
                     crate::profiler::InputRecordingSource::PointerButton,
                     "input.gui.pointer_button",
                 );
+                let custom_action = (state == ElementState::Pressed
+                    && button == winit::event::MouseButton::Left)
+                    .then(|| self.custom_chrome_action())
+                    .flatten();
                 if let Some(runtime) = self.runtime.as_mut() {
                     let button = mouse_button(button);
                     let state = match state {
@@ -1416,6 +1837,9 @@ where
                         ElementState::Released => ButtonState::Released,
                     };
                     runtime.queue_input(InputEvent::mouse_button(button, state));
+                }
+                if let Some(action) = custom_action {
+                    self.apply_custom_chrome_action(event_loop, action);
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -1583,6 +2007,73 @@ fn mouse_button(button: MouseButton) -> PointerButton {
         MouseButton::Back => PointerButton::BACK,
         MouseButton::Forward => PointerButton::FORWARD,
         MouseButton::Other(value) => PointerButton::new(value),
+    }
+}
+
+fn winit_resize_direction(edge: crate::WindowResizeEdge) -> ResizeDirection {
+    match edge {
+        crate::WindowResizeEdge::Top => ResizeDirection::North,
+        crate::WindowResizeEdge::TopRight => ResizeDirection::NorthEast,
+        crate::WindowResizeEdge::Right => ResizeDirection::East,
+        crate::WindowResizeEdge::BottomRight => ResizeDirection::SouthEast,
+        crate::WindowResizeEdge::Bottom => ResizeDirection::South,
+        crate::WindowResizeEdge::BottomLeft => ResizeDirection::SouthWest,
+        crate::WindowResizeEdge::Left => ResizeDirection::West,
+        crate::WindowResizeEdge::TopLeft => ResizeDirection::NorthWest,
+    }
+}
+
+fn resize_pointer_icon(edge: crate::WindowResizeEdge) -> crate::PointerIcon {
+    match edge {
+        crate::WindowResizeEdge::Top => crate::PointerIcon::NResize,
+        crate::WindowResizeEdge::TopRight => crate::PointerIcon::NeResize,
+        crate::WindowResizeEdge::Right => crate::PointerIcon::EResize,
+        crate::WindowResizeEdge::BottomRight => crate::PointerIcon::SeResize,
+        crate::WindowResizeEdge::Bottom => crate::PointerIcon::SResize,
+        crate::WindowResizeEdge::BottomLeft => crate::PointerIcon::SwResize,
+        crate::WindowResizeEdge::Left => crate::PointerIcon::WResize,
+        crate::WindowResizeEdge::TopLeft => crate::PointerIcon::NwResize,
+    }
+}
+
+fn winit_cursor_icon(icon: crate::PointerIcon) -> CursorIcon {
+    match icon {
+        crate::PointerIcon::Default => CursorIcon::Default,
+        crate::PointerIcon::ContextMenu => CursorIcon::ContextMenu,
+        crate::PointerIcon::Help => CursorIcon::Help,
+        crate::PointerIcon::Pointer => CursorIcon::Pointer,
+        crate::PointerIcon::Progress => CursorIcon::Progress,
+        crate::PointerIcon::Wait => CursorIcon::Wait,
+        crate::PointerIcon::Cell => CursorIcon::Cell,
+        crate::PointerIcon::Crosshair => CursorIcon::Crosshair,
+        crate::PointerIcon::Text => CursorIcon::Text,
+        crate::PointerIcon::VerticalText => CursorIcon::VerticalText,
+        crate::PointerIcon::Alias => CursorIcon::Alias,
+        crate::PointerIcon::Copy => CursorIcon::Copy,
+        crate::PointerIcon::Move => CursorIcon::Move,
+        crate::PointerIcon::NoDrop => CursorIcon::NoDrop,
+        crate::PointerIcon::NotAllowed => CursorIcon::NotAllowed,
+        crate::PointerIcon::Grab => CursorIcon::Grab,
+        crate::PointerIcon::Grabbing => CursorIcon::Grabbing,
+        crate::PointerIcon::EResize => CursorIcon::EResize,
+        crate::PointerIcon::NResize => CursorIcon::NResize,
+        crate::PointerIcon::NeResize => CursorIcon::NeResize,
+        crate::PointerIcon::NwResize => CursorIcon::NwResize,
+        crate::PointerIcon::SResize => CursorIcon::SResize,
+        crate::PointerIcon::SeResize => CursorIcon::SeResize,
+        crate::PointerIcon::SwResize => CursorIcon::SwResize,
+        crate::PointerIcon::WResize => CursorIcon::WResize,
+        crate::PointerIcon::EwResize => CursorIcon::EwResize,
+        crate::PointerIcon::NsResize => CursorIcon::NsResize,
+        crate::PointerIcon::NeswResize => CursorIcon::NeswResize,
+        crate::PointerIcon::NwseResize => CursorIcon::NwseResize,
+        crate::PointerIcon::ColResize => CursorIcon::ColResize,
+        crate::PointerIcon::RowResize => CursorIcon::RowResize,
+        crate::PointerIcon::AllScroll => CursorIcon::AllScroll,
+        crate::PointerIcon::ZoomIn => CursorIcon::ZoomIn,
+        crate::PointerIcon::ZoomOut => CursorIcon::ZoomOut,
+        crate::PointerIcon::DndAsk => CursorIcon::DndAsk,
+        crate::PointerIcon::AllResize => CursorIcon::AllResize,
     }
 }
 

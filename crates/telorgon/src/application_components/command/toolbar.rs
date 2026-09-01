@@ -160,7 +160,10 @@ impl Default for ToolbarStyle {
     fn default() -> Self {
         let item = BoxStyle {
             padding: EdgeInsets::all(6.0),
-            corner_radii: CornerRadii::all(4.0),
+            decoration: crate::ui::BoxDecoration {
+                corner_radii: CornerRadii::all(4.0),
+                ..crate::ui::BoxDecoration::default()
+            },
             ..BoxStyle::default()
         };
         Self {
@@ -170,7 +173,10 @@ impl Default for ToolbarStyle {
             },
             item,
             checked_item: BoxStyle {
-                background: Background::Color(ColorRgba8::rgba(66, 91, 139, 110)),
+                decoration: crate::ui::BoxDecoration {
+                    background: Background::Color(ColorRgba8::rgba(66, 91, 139, 110)),
+                    ..crate::ui::BoxDecoration::default()
+                },
                 ..item
             },
             label_color: ColorRgba8::rgba(235, 238, 244, 255),

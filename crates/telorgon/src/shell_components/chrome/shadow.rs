@@ -1,4 +1,8 @@
-//! Noninteractive frame shadow metadata mounted behind window chrome and content.
+//! Legacy noninteractive frame-shadow adapter.
+//!
+//! New composition code should put the reusable [`Shadow`] value in
+//! [`crate::ui::BoxDecoration::shadows`]. This adapter remains available for shell code built on
+//! the older imperative `WindowFrameRef` mounting API.
 
 use std::fmt;
 use std::sync::Arc;
@@ -68,7 +72,7 @@ impl ShadowFrame {
             return Err(ShadowFrameError::SurfaceSnapshotMismatch.into());
         }
         let mut style = self.style.container;
-        style.shadows = ShadowList::one(self.style.shadow);
+        style.decoration.shadows = ShadowList::one(self.style.shadow);
         let control = ui
             .foundation()
             .container_node_under(frame.decoration_node(), style, self.style.layout, |_| {})
