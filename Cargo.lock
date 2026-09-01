@@ -2130,7 +2130,7 @@ dependencies = [
 
 [[package]]
 name = "telorgon"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "ash",
  "ash-window",
@@ -2158,7 +2158,7 @@ dependencies = [
 
 [[package]]
 name = "telorgon-macros"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "proc-macro-crate",
  "proc-macro2",
@@ -2168,7 +2168,7 @@ dependencies = [
 
 [[package]]
 name = "telorgon-shader-build"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "rspirv",
  "serde",

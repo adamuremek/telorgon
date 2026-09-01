@@ -712,6 +712,8 @@ mod tests {
         assert!(INDEX_HTML.contains("input-recording-options"));
         assert!(INDEX_HTML.contains("input-event-plot"));
         assert!(INDEX_HTML.contains("input-event-log-body"));
+        assert!(INDEX_HTML.contains("pointer-pipeline-body"));
+        assert!(INDEX_HTML.contains("pointer-path-body"));
         assert!(INDEX_HTML.contains("lucide-play-icon"));
         assert!(INDEX_HTML.contains("lucide-pause-icon"));
         assert!(INDEX_HTML.contains("aria-label=\"Pause profiling\""));
@@ -719,6 +721,8 @@ mod tests {
         assert!(PROFILER_JS.contains("frame.trigger.pointer_move_only"));
         assert!(PROFILER_JS.contains("set_input_recording"));
         assert!(PROFILER_JS.contains("renderInputPerformance"));
+        assert!(PROFILER_JS.contains("pointerPipelineSampleForEvent"));
+        assert!(PROFILER_JS.contains("freshest_event_to_cursor_submit_ns"));
         assert!(PROFILER_JS.contains("input_recording_sources"));
         assert!(PROFILER_JS.contains("renderInputRecordingControls();"));
         assert!(!PROFILER_JS.contains("updatePointerMovesButton"));

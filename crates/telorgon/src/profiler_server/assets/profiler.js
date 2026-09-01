@@ -53,6 +53,7 @@ const AGGREGATION = Object.freeze({ EVENT: 0, GAUGE: 1, SUM: 2, CUMULATIVE: 3 })
 const LABEL_FLAG_RESOURCE = 1;
 const VULKAN_WSI_STALL_DIAGNOSTIC = "presentation.vulkan_wsi.zero_timeout_acquire_stall";
 const VULKAN_RAW_ACQUIRE_COUNTER = "presentation.acquire.raw_dispatch_duration_ns";
+const POINTER_PIPELINE_PREFIX = "input.libinput.pointer_motion.pipeline.";
 
 const state = {
   metadata: null,
@@ -266,18 +267,35 @@ function inputSourceForEvent(event) {
 
 function inputSampleForEvent(event) {
   if (event.kind !== KIND.INSTANT) return null;
+  const label = labelFor(event.labelId);
+  if (label.startsWith(POINTER_PIPELINE_PREFIX)) return null;
   const source = inputSourceForEvent(event);
   if (!source) return null;
-  const metadata = labelMetadataFor(event.labelId);
   return {
     event,
     source,
-    queueAge: metadata.unit === UNIT.NANOSECONDS ? event.value : null,
+    queueAge: label.endsWith(".queue_age_ns") ? event.value : null,
   };
 }
 
 function recordedInputSamples() {
   return state.events.map(inputSampleForEvent).filter((sample) => sample !== null);
+}
+
+function pointerPipelineSampleForEvent(event) {
+  if (event.kind !== KIND.INSTANT) return null;
+  const label = labelFor(event.labelId);
+  if (!label.startsWith(POINTER_PIPELINE_PREFIX)) return null;
+  return {
+    event,
+    name: label.slice(POINTER_PIPELINE_PREFIX.length),
+    value: event.value,
+    unit: labelMetadataFor(event.labelId).unit,
+  };
+}
+
+function recordedPointerPipelineSamples() {
+  return state.events.map(pointerPipelineSampleForEvent).filter((sample) => sample !== null);
 }
 
 function acceptBinary(buffer) {
@@ -398,7 +416,9 @@ function eventAffectsActiveWorkspace(event) {
     return event.kind === KIND.DIAGNOSTIC || event.kind === KIND.GAP;
   }
   if (state.workspace !== "performance") return false;
-  if (state.performanceView === "inputs") return inputSampleForEvent(event) !== null;
+  if (state.performanceView === "inputs") {
+    return inputSampleForEvent(event) !== null || pointerPipelineSampleForEvent(event) !== null;
+  }
   const frame = event.frame === 0n ? null : state.framesById.get(event.frame.toString());
   const visibleFrameEvent = frame !== null && isVisibleCompletedFrame(frame);
   if (state.performanceView !== "responsiveness") return visibleFrameEvent;
@@ -1501,6 +1521,7 @@ function renderPerformancePanels() {
 
 function renderInputPerformance() {
   const samples = recordedInputSamples();
+  const pipelineSamples = recordedPointerPipelineSamples();
   const enabled = state.inputRecordingSources.size;
   const queueAges = samples
     .map((sample) => sample.queueAge)
@@ -1513,6 +1534,8 @@ function renderInputPerformance() {
   setMetric(4, "Queue age ≥ 20 ms", overTwentyMilliseconds.toString());
   setText("metric-dropped", state.dropped.toString());
   renderInputSummary(samples);
+  renderPointerPipeline(pipelineSamples);
+  renderPointerPaths(pipelineSamples);
   renderInputEventPlot(samples);
   renderInputEventLog(samples);
 }
@@ -1537,6 +1560,120 @@ function renderInputSummary(samples) {
     body.append(row);
   });
   element("input-summary-empty").hidden = body.childElementCount !== 0;
+}
+
+const POINTER_PIPELINE_ORDER = Object.freeze([
+  "batch_interval_ns",
+  "fd_callback_to_dispatch_ns",
+  "dispatch_duration_ns",
+  "batch_handler_duration_ns",
+  "cursor_ioctl_duration_ns",
+  "freshest_event_to_cursor_submit_ns",
+  "oldest_event_to_cursor_submit_ns",
+  "event_to_primary_submit_ns",
+  "event_to_primary_scanout_ns",
+  "events_per_batch",
+]);
+
+const POINTER_PATH_ORDER = Object.freeze([
+  "hardware_cursor",
+  "software_damage",
+  "deferred",
+  "hidden",
+  "hardware_failed",
+  "position_unchanged",
+]);
+
+function renderPointerPipeline(samples) {
+  const body = element("pointer-pipeline-body");
+  body.replaceChildren();
+  const measurements = new Map();
+  samples.filter((sample) => !sample.name.startsWith("path.")).forEach((sample) => {
+    if (!measurements.has(sample.name)) measurements.set(sample.name, []);
+    measurements.get(sample.name).push(sample.value);
+  });
+  const names = [...measurements.keys()].sort((left, right) => {
+    const leftIndex = POINTER_PIPELINE_ORDER.indexOf(left);
+    const rightIndex = POINTER_PIPELINE_ORDER.indexOf(right);
+    if (leftIndex < 0 && rightIndex < 0) return left.localeCompare(right);
+    if (leftIndex < 0) return 1;
+    if (rightIndex < 0) return -1;
+    return leftIndex - rightIndex;
+  });
+  names.forEach((name) => {
+    const values = measurements.get(name).sort(compareBigInt);
+    const format = (value) => pointerPipelineValue(name, value);
+    const row = document.createElement("tr");
+    row.append(
+      tableCell(pointerPipelineMeasurementName(name)),
+      tableCell(format(bigintPercentile(values, 0.50))),
+      tableCell(format(bigintPercentile(values, 0.95))),
+      tableCell(format(values.at(-1))),
+      tableCell(values.length.toString()),
+    );
+    body.append(row);
+  });
+  element("pointer-pipeline-empty").hidden = body.childElementCount !== 0;
+}
+
+function renderPointerPaths(samples) {
+  const body = element("pointer-path-body");
+  body.replaceChildren();
+  const counts = new Map();
+  samples.filter((sample) => sample.name.startsWith("path.")).forEach((sample) => {
+    const path = sample.name.slice("path.".length);
+    counts.set(path, (counts.get(path) || 0) + 1);
+  });
+  const total = [...counts.values()].reduce((sum, count) => sum + count, 0);
+  const paths = [...counts.keys()].sort((left, right) => {
+    const leftIndex = POINTER_PATH_ORDER.indexOf(left);
+    const rightIndex = POINTER_PATH_ORDER.indexOf(right);
+    if (leftIndex < 0 && rightIndex < 0) return left.localeCompare(right);
+    if (leftIndex < 0) return 1;
+    if (rightIndex < 0) return -1;
+    return leftIndex - rightIndex;
+  });
+  paths.forEach((path) => {
+    const count = counts.get(path);
+    const row = document.createElement("tr");
+    row.append(
+      tableCell(pointerPathName(path)),
+      tableCell(count.toString()),
+      tableCell(formatPercentage(count, total)),
+    );
+    body.append(row);
+  });
+  element("pointer-path-empty").hidden = body.childElementCount !== 0;
+}
+
+function pointerPipelineValue(name, value) {
+  return name.endsWith("_ns") ? formatNs(value) : value.toString();
+}
+
+function pointerPipelineMeasurementName(name) {
+  return ({
+    batch_interval_ns: "Interval between pointer batches",
+    fd_callback_to_dispatch_ns: "Input-fd callback → libinput dispatch",
+    dispatch_duration_ns: "libinput dispatch",
+    batch_handler_duration_ns: "Batch handling to cursor decision",
+    cursor_ioctl_duration_ns: "Hardware cursor ioctl",
+    freshest_event_to_cursor_submit_ns: "Freshest event → cursor submit",
+    oldest_event_to_cursor_submit_ns: "Oldest event → cursor submit",
+    event_to_primary_submit_ns: "Pointer event → primary submit",
+    event_to_primary_scanout_ns: "Pointer event → primary scanout",
+    events_per_batch: "Motion events per batch",
+  })[name] || name.replaceAll("_", " ");
+}
+
+function pointerPathName(path) {
+  return ({
+    hardware_cursor: "Hardware cursor",
+    software_damage: "Software cursor damage",
+    deferred: "Deferred until modeset/image",
+    hidden: "Cursor hidden",
+    hardware_failed: "Hardware cursor failed",
+    position_unchanged: "Position unchanged/locked",
+  })[path] || path.replaceAll("_", " ");
 }
 
 function renderInputEventPlot(samples) {

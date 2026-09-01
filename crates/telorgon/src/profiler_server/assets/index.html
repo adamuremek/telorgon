@@ -301,6 +301,40 @@
             </section>
           </div>
 
+          <div class="analysis-grid">
+            <section class="analysis-panel" aria-labelledby="pointer-pipeline-heading">
+              <div class="analysis-heading">
+                <div>
+                  <h2 id="pointer-pipeline-heading">Pointer latency pipeline</h2>
+                  <span>Batch-level probes from libinput dispatch through cursor submission and primary scanout</span>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="analysis-table">
+                  <thead><tr><th scope="col">Measurement</th><th scope="col">Median</th><th scope="col">p95</th><th scope="col">Maximum</th><th scope="col">Samples</th></tr></thead>
+                  <tbody id="pointer-pipeline-body"></tbody>
+                </table>
+              </div>
+              <p id="pointer-pipeline-empty" class="empty-state">Enable libinput pointer motion to record pipeline probes.</p>
+            </section>
+
+            <section class="analysis-panel" aria-labelledby="pointer-path-heading">
+              <div class="analysis-heading">
+                <div>
+                  <h2 id="pointer-path-heading">Cursor routing</h2>
+                  <span>Which presentation path handled each coalesced pointer batch</span>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="analysis-table">
+                  <thead><tr><th scope="col">Path</th><th scope="col">Batches</th><th scope="col">Share</th></tr></thead>
+                  <tbody id="pointer-path-body"></tbody>
+                </table>
+              </div>
+              <p id="pointer-path-empty" class="empty-state">No pointer routing decisions have been recorded.</p>
+            </section>
+          </div>
+
           <section class="analysis-panel input-event-log-panel" aria-labelledby="input-log-heading">
             <div class="analysis-heading">
               <div>

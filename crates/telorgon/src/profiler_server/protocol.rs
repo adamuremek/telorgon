@@ -452,6 +452,15 @@ mod tests {
         assert_eq!(descriptor.category, MetricCategory::Input);
         assert_eq!(descriptor.unit, MetricUnit::Nanoseconds);
         assert_eq!(descriptor.aggregation, MetricAggregation::Event);
+
+        let pipeline = describe_label(
+            "input.libinput.pointer_motion.pipeline.freshest_event_to_cursor_submit_ns",
+            EventKind::Instant,
+            TimingDomain::Cpu,
+        );
+        assert_eq!(pipeline.category, MetricCategory::Input);
+        assert_eq!(pipeline.unit, MetricUnit::Nanoseconds);
+        assert_eq!(pipeline.aggregation, MetricAggregation::Event);
     }
 
     #[test]

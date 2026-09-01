@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
+#[cfg(feature = "profiler")]
+use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
@@ -65,6 +67,156 @@ struct RenderedCursor {
     size: SizeI,
     hotspot: PointI,
     premultiplied: bool,
+}
+
+#[cfg(feature = "profiler")]
+#[derive(Clone, Copy)]
+enum PointerCursorPath {
+    Hardware,
+    HardwareFailed,
+    SoftwareDamage,
+    Hidden,
+    Deferred,
+    Unchanged,
+}
+
+#[cfg(feature = "profiler")]
+struct PointerBatchProbe {
+    enabled: bool,
+    dispatch_started: Option<Instant>,
+    dispatch_duration_ns: u64,
+    handler_started: Option<Instant>,
+    events: u64,
+    oldest_event_us: Option<u64>,
+    newest_event_us: Option<u64>,
+}
+
+#[cfg(feature = "profiler")]
+impl PointerBatchProbe {
+    fn begin() -> Self {
+        let enabled = crate::profiler::input_recording_enabled(
+            crate::profiler::InputRecordingSource::PointerMotion,
+        );
+        Self {
+            enabled,
+            dispatch_started: enabled.then(Instant::now),
+            dispatch_duration_ns: 0,
+            handler_started: None,
+            events: 0,
+            oldest_event_us: None,
+            newest_event_us: None,
+        }
+    }
+
+    fn dispatch_completed(&mut self) {
+        if let Some(started) = self.dispatch_started {
+            self.dispatch_duration_ns = duration_ns(started.elapsed());
+            self.handler_started = Some(Instant::now());
+        }
+    }
+
+    fn observe_motion(&mut self, event_time_us: u64) {
+        if !self.enabled {
+            return;
+        }
+        self.events = self.events.saturating_add(1);
+        self.oldest_event_us = Some(
+            self.oldest_event_us
+                .map_or(event_time_us, |oldest| oldest.min(event_time_us)),
+        );
+        self.newest_event_us = Some(
+            self.newest_event_us
+                .map_or(event_time_us, |newest| newest.max(event_time_us)),
+        );
+    }
+
+    fn newest_event_us(&self) -> Option<u64> {
+        self.enabled.then_some(self.newest_event_us).flatten()
+    }
+
+    fn has_motion(&self) -> bool {
+        self.enabled && self.events != 0
+    }
+
+    fn finish(
+        &self,
+        path: PointerCursorPath,
+        cursor_ioctl_duration_ns: Option<u64>,
+        cursor_submitted_us: Option<u64>,
+    ) {
+        if !self.enabled || self.events == 0 {
+            return;
+        }
+        crate::profiler::record_instant_value(
+            "input.libinput.pointer_motion.pipeline.events_per_batch",
+            self.events,
+        );
+        crate::profiler::record_instant_value(
+            "input.libinput.pointer_motion.pipeline.dispatch_duration_ns",
+            self.dispatch_duration_ns,
+        );
+        crate::profiler::record_instant_value(
+            "input.libinput.pointer_motion.pipeline.batch_handler_duration_ns",
+            self.handler_started
+                .map_or(0, |started| duration_ns(started.elapsed())),
+        );
+        if let Some(duration) = cursor_ioctl_duration_ns {
+            crate::profiler::record_instant_value(
+                "input.libinput.pointer_motion.pipeline.cursor_ioctl_duration_ns",
+                duration,
+            );
+        }
+        if let Some(submitted_us) = cursor_submitted_us {
+            if let Some(newest) = self.newest_event_us {
+                crate::profiler::record_instant_value(
+                    "input.libinput.pointer_motion.pipeline.freshest_event_to_cursor_submit_ns",
+                    submitted_us.saturating_sub(newest).saturating_mul(1_000),
+                );
+            }
+            if let Some(oldest) = self.oldest_event_us {
+                crate::profiler::record_instant_value(
+                    "input.libinput.pointer_motion.pipeline.oldest_event_to_cursor_submit_ns",
+                    submitted_us.saturating_sub(oldest).saturating_mul(1_000),
+                );
+            }
+        }
+        crate::profiler::record_instant(match path {
+            PointerCursorPath::Hardware => {
+                "input.libinput.pointer_motion.pipeline.path.hardware_cursor"
+            }
+            PointerCursorPath::HardwareFailed => {
+                "input.libinput.pointer_motion.pipeline.path.hardware_failed"
+            }
+            PointerCursorPath::SoftwareDamage => {
+                "input.libinput.pointer_motion.pipeline.path.software_damage"
+            }
+            PointerCursorPath::Hidden => "input.libinput.pointer_motion.pipeline.path.hidden",
+            PointerCursorPath::Deferred => "input.libinput.pointer_motion.pipeline.path.deferred",
+            PointerCursorPath::Unchanged => {
+                "input.libinput.pointer_motion.pipeline.path.position_unchanged"
+            }
+        });
+    }
+}
+
+#[cfg(feature = "profiler")]
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+#[cfg(feature = "profiler")]
+fn record_pointer_event_latency(label: &'static str, event_time_us: u64) {
+    if !crate::profiler::input_recording_enabled(
+        crate::profiler::InputRecordingSource::PointerMotion,
+    ) {
+        return;
+    }
+    if let Some(now_us) = crate::platform_linux::monotonic_time_microseconds() {
+        crate::profiler::record_instant_value(
+            label,
+            now_us.saturating_sub(event_time_us).saturating_mul(1_000),
+        );
+    }
 }
 
 struct HardwareCursor<'gbm, 'fd> {
@@ -182,6 +334,22 @@ struct VulkanCompletionWorker {
     thread: Option<thread::JoinHandle<()>>,
 }
 
+struct InputReadyState {
+    ready: AtomicBool,
+    #[cfg(feature = "profiler")]
+    callback_time_us: AtomicU64,
+}
+
+impl InputReadyState {
+    const fn new(ready: bool) -> Self {
+        Self {
+            ready: AtomicBool::new(ready),
+            #[cfg(feature = "profiler")]
+            callback_time_us: AtomicU64::new(0),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct EventNotifier {
     fd: Arc<OwnedFd>,
@@ -245,6 +413,21 @@ unsafe extern "C" fn mark_external_fd_ready(
         return 0;
     };
     unsafe { ready.as_ref() }.store(true, Ordering::Release);
+    0
+}
+
+unsafe extern "C" fn mark_input_fd_ready(_fd: i32, _mask: u32, data: *mut std::ffi::c_void) -> i32 {
+    let Some(state) = std::ptr::NonNull::new(data.cast::<InputReadyState>()) else {
+        return 0;
+    };
+    let state = unsafe { state.as_ref() };
+    #[cfg(feature = "profiler")]
+    if crate::profiler::pointer_move_events_enabled()
+        && let Some(now_us) = crate::platform_linux::monotonic_time_microseconds()
+    {
+        state.callback_time_us.store(now_us, Ordering::Release);
+    }
+    state.ready.store(true, Ordering::Release);
     0
 }
 
@@ -891,7 +1074,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     }
 
     let seat_ready = Box::new(AtomicBool::new(true));
-    let input_ready = Box::new(AtomicBool::new(true));
+    let input_ready = Box::new(InputReadyState::new(true));
     let kms_ready = Box::new(AtomicBool::new(false));
     let runtime_ready = Box::new(AtomicBool::new(false));
     let vulkan_completion_ready = vulkan_scanout
@@ -913,7 +1096,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         display.event_loop().add_fd(
             input.event_fd(),
             external_mask,
-            Some(mark_external_fd_ready),
+            Some(mark_input_fd_ready),
             std::ptr::from_ref(input_ready.as_ref()).cast_mut().cast(),
         )
     }
@@ -1039,11 +1222,24 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut software_target_versions = vec![0_u64; frame_slots.len()];
     let mut software_damage_history = VecDeque::<(u64, Option<RectI>)>::new();
     let mut activate_hardware_cursor_after_modeset = false;
+    #[cfg(feature = "profiler")]
+    let mut pending_primary_pointer_event_us = None::<u64>;
+    #[cfg(feature = "profiler")]
+    let mut pending_deferred_cursor_event_us = None::<u64>;
+    #[cfg(feature = "profiler")]
+    let mut frame_pointer_event_us = vec![None::<u64>; frame_slots.len()];
+    #[cfg(feature = "profiler")]
+    let mut previous_pointer_batch_us = None::<u64>;
     let mut keyboard = keyboard;
 
     loop {
         let mut presentation_completed = false;
         let mut pointer_motion_seen = false;
+        let mut cursor_position_dirty = false;
+        let mut pointer_primary_dirty = false;
+        let mut hardware_cursor_moved_this_turn = false;
+        #[cfg(feature = "profiler")]
+        let mut latest_pointer_event_this_turn = None::<u64>;
         let mut other_work_seen = repaint;
         let schedule_now = MonotonicInstant::from_nanos(
             start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
@@ -1063,7 +1259,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             || (pending_page_flip.is_none() && !ready_scanout.is_empty())
             || runtime_ready.load(Ordering::Acquire)
             || seat_ready.load(Ordering::Acquire)
-            || input_ready.load(Ordering::Acquire)
+            || input_ready.ready.load(Ordering::Acquire)
             || kms_ready.load(Ordering::Acquire)
             || vulkan_completion_ready
                 .as_ref()
@@ -1081,66 +1277,29 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         };
         display.event_loop().dispatch(wait).map_err(app_error)?;
 
-        if runtime_ready.swap(false, Ordering::AcqRel) {
-            runtime_wake.drain();
-        }
-        let runtime_now = MonotonicInstant::from_nanos(
-            start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
-        );
-        let (runtime_turn_ready, _, _) = desktop_runtime_schedule(
-            &policy,
-            frame.as_ref(),
-            pointer.as_ref(),
-            &icon_layers,
-            &widgets,
-            runtime_now,
-        );
-        repaint |= runtime_turn_ready;
-        other_work_seen |= runtime_turn_ready;
-
-        if kms_ready.swap(false, Ordering::AcqRel) {
-            kms.dispatch_events().map_err(app_error)?;
-            for _ in 0..kms.take_completed_page_flips() {
-                let completed = pending_page_flip.take().ok_or_else(|| {
-                    AppError::new("DRM completed a page flip with no tracked scanout slot")
-                })?;
-                frame_slots[completed]
-                    .page_flip_completed()
-                    .map_err(app_error)?;
-                if let Some(previous) = current_scanout.replace(completed) {
-                    frame_slots[previous]
-                        .page_flip_replaced()
-                        .map_err(app_error)?;
-                }
-                presentation_completed = true;
-                #[cfg(feature = "profiler")]
-                crate::profiler::record_instant("presentation.kms.page_flip_completed");
-            }
-        }
-
-        if vulkan_completion_ready
-            .as_ref()
-            .is_some_and(|ready| ready.swap(false, Ordering::AcqRel))
-            && let Some(vulkan) = &vulkan_scanout
-        {
-            for completion in vulkan.drain_completions() {
-                completion.result.map_err(AppError::new)?;
-                frame_slots[completion.slot_index]
-                    .gpu_completed()
-                    .map_err(app_error)?;
-                ready_scanout.push_back(completion.slot_index);
-                #[cfg(feature = "profiler")]
-                crate::profiler::record_instant("vulkan.scanout.completion_ready");
-            }
-        }
-
         if seat_ready.swap(false, Ordering::AcqRel) {
             seat.dispatch(0).map_err(app_error)?;
         }
-        if seat.state() == SeatState::Enabled && input_ready.swap(false, Ordering::AcqRel) {
+        if seat.state() == SeatState::Enabled && input_ready.ready.swap(false, Ordering::AcqRel) {
+            #[cfg(feature = "profiler")]
+            let input_callback_time_us = input_ready.callback_time_us.swap(0, Ordering::AcqRel);
+            #[cfg(feature = "profiler")]
+            let mut pointer_probe = PointerBatchProbe::begin();
+            #[cfg(feature = "profiler")]
+            let input_dispatch_started_us = pointer_probe
+                .enabled
+                .then(crate::platform_linux::monotonic_time_microseconds)
+                .flatten();
             input.dispatch().map_err(app_error)?;
             #[cfg(feature = "profiler")]
+            pointer_probe.dispatch_completed();
+            #[cfg(feature = "profiler")]
             let input_observed_us = crate::platform_linux::monotonic_time_microseconds();
+            let cursor_hidden = wayland
+                .core()
+                .seats
+                .get(&1)
+                .is_some_and(|seat| matches!(seat.cursor, CursorImage::Hidden));
             while let Some(event) = input.next_event() {
                 let time_microseconds = event.time_microseconds;
                 if matches!(
@@ -1149,6 +1308,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         | LinuxInputEventKind::PointerAbsolute { .. }
                 ) {
                     pointer_motion_seen = true;
+                    #[cfg(feature = "profiler")]
+                    pointer_probe.observe_motion(time_microseconds);
                 } else {
                     other_work_seen = true;
                 }
@@ -1163,8 +1324,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         delta,
                         unaccelerated,
                     } => {
-                        other_work_seen |= window_interaction.is_some()
+                        let scene_follows_pointer = window_interaction.is_some()
                             || (wayland.drag_active(1) && wayland.drag_touch_slot(1).is_none());
+                        other_work_seen |= scene_follows_pointer;
                         let constraint =
                             if wayland.drag_active(1) && wayland.drag_touch_slot(1).is_none() {
                                 None
@@ -1175,6 +1337,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             constraint.kind == PointerConstraintKind::Locked
                         });
                         if !locked {
+                            let previous_position = pointer_position;
                             let proposed = PointF {
                                 x: (pointer_position.x + delta.x)
                                     .clamp(0.0, extent.width as f32 - 1.0),
@@ -1215,6 +1378,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             if wayland.drag_active(1) && wayland.drag_touch_slot(1).is_none() {
                                 drag_position = pointer_position;
                             }
+                            if pointer_position.x != previous_position.x
+                                || pointer_position.y != previous_position.y
+                            {
+                                cursor_position_dirty = true;
+                                pointer_primary_dirty |= scene_follows_pointer;
+                            }
                         }
                         if pointer_focus.is_some()
                             && window_interaction.is_none()
@@ -1227,11 +1396,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 unaccelerated,
                             );
                         }
-                        repaint = true;
                     }
                     LinuxInputEventKind::PointerAbsolute { normalized } => {
-                        other_work_seen |= window_interaction.is_some()
+                        let scene_follows_pointer = window_interaction.is_some()
                             || (wayland.drag_active(1) && wayland.drag_touch_slot(1).is_none());
+                        other_work_seen |= scene_follows_pointer;
                         let proposed = PointF {
                             x: normalized.x.clamp(0.0, 1.0) * (extent.width - 1) as f32,
                             y: normalized.y.clamp(0.0, 1.0) * (extent.height - 1) as f32,
@@ -1245,6 +1414,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         if !constraint.as_ref().is_some_and(|constraint| {
                             constraint.kind == PointerConstraintKind::Locked
                         }) {
+                            let previous_position = pointer_position;
                             let delta = PointF {
                                 x: proposed.x - pointer_position.x,
                                 y: proposed.y - pointer_position.y,
@@ -1283,8 +1453,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             if wayland.drag_active(1) && wayland.drag_touch_slot(1).is_none() {
                                 drag_position = pointer_position;
                             }
+                            if pointer_position.x != previous_position.x
+                                || pointer_position.y != previous_position.y
+                            {
+                                cursor_position_dirty = true;
+                                pointer_primary_dirty |= scene_follows_pointer;
+                            }
                         }
-                        repaint = true;
                     }
                     LinuxInputEventKind::PointerButton { button, pressed } => {
                         if pressed
@@ -1493,6 +1668,168 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     }
                     LinuxInputEventKind::DeviceAdded | LinuxInputEventKind::DeviceRemoved => {}
                 }
+            }
+            #[cfg(feature = "profiler")]
+            let mut cursor_path = PointerCursorPath::Unchanged;
+            #[cfg(feature = "profiler")]
+            let mut cursor_ioctl_duration_ns = None;
+            #[cfg(feature = "profiler")]
+            let mut cursor_submitted_us = None;
+            #[cfg(feature = "profiler")]
+            {
+                latest_pointer_event_this_turn = pointer_probe.newest_event_us();
+            }
+            if cursor_position_dirty {
+                if cursor_hidden {
+                    #[cfg(feature = "profiler")]
+                    {
+                        cursor_path = PointerCursorPath::Hidden;
+                    }
+                } else if hardware_cursor
+                    .as_ref()
+                    .is_some_and(|cursor| cursor.visible)
+                {
+                    #[cfg(feature = "profiler")]
+                    let ioctl_started = pointer_probe.enabled.then(Instant::now);
+                    let move_result = hardware_cursor
+                        .as_ref()
+                        .expect("visible hardware cursor checked")
+                        .move_to(&kms, crtc, pointer_position);
+                    #[cfg(feature = "profiler")]
+                    {
+                        cursor_ioctl_duration_ns =
+                            ioctl_started.map(|started| duration_ns(started.elapsed()));
+                    }
+                    match move_result {
+                        Ok(()) => {
+                            hardware_cursor_moved_this_turn = true;
+                            #[cfg(feature = "profiler")]
+                            {
+                                cursor_path = PointerCursorPath::Hardware;
+                                if pointer_probe.enabled {
+                                    cursor_submitted_us =
+                                        crate::platform_linux::monotonic_time_microseconds();
+                                    crate::profiler::record_instant(
+                                        "presentation.cursor.hardware_move",
+                                    );
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            hardware_cursor = None;
+                            pointer_primary_dirty = true;
+                            #[cfg(feature = "profiler")]
+                            {
+                                cursor_path = PointerCursorPath::HardwareFailed;
+                                crate::profiler::record_instant(
+                                    "presentation.cursor.hardware_failed",
+                                );
+                            }
+                        }
+                    }
+                } else if hardware_cursor.is_some() {
+                    #[cfg(feature = "profiler")]
+                    {
+                        cursor_path = PointerCursorPath::Deferred;
+                        pending_deferred_cursor_event_us = latest_pointer_event_this_turn;
+                    }
+                } else {
+                    pointer_primary_dirty = true;
+                    #[cfg(feature = "profiler")]
+                    {
+                        cursor_path = PointerCursorPath::SoftwareDamage;
+                    }
+                }
+            }
+            repaint |= pointer_primary_dirty;
+            #[cfg(feature = "profiler")]
+            {
+                if pointer_primary_dirty {
+                    pending_primary_pointer_event_us = latest_pointer_event_this_turn;
+                }
+                pointer_probe.finish(cursor_path, cursor_ioctl_duration_ns, cursor_submitted_us);
+                if pointer_probe.has_motion()
+                    && input_callback_time_us != 0
+                    && let Some(dispatch_started_us) = input_dispatch_started_us
+                {
+                    crate::profiler::record_instant_value(
+                        "input.libinput.pointer_motion.pipeline.fd_callback_to_dispatch_ns",
+                        dispatch_started_us
+                            .saturating_sub(input_callback_time_us)
+                            .saturating_mul(1_000),
+                    );
+                }
+                if pointer_probe.has_motion()
+                    && let Some(now_us) = crate::platform_linux::monotonic_time_microseconds()
+                {
+                    if let Some(previous_us) = previous_pointer_batch_us.replace(now_us) {
+                        crate::profiler::record_instant_value(
+                            "input.libinput.pointer_motion.pipeline.batch_interval_ns",
+                            now_us.saturating_sub(previous_us).saturating_mul(1_000),
+                        );
+                    }
+                }
+            }
+        }
+
+        if runtime_ready.swap(false, Ordering::AcqRel) {
+            runtime_wake.drain();
+        }
+        let runtime_now = MonotonicInstant::from_nanos(
+            start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
+        );
+        let (runtime_turn_ready, _, _) = desktop_runtime_schedule(
+            &policy,
+            frame.as_ref(),
+            pointer.as_ref(),
+            &icon_layers,
+            &widgets,
+            runtime_now,
+        );
+        repaint |= runtime_turn_ready;
+        other_work_seen |= runtime_turn_ready;
+
+        if kms_ready.swap(false, Ordering::AcqRel) {
+            kms.dispatch_events().map_err(app_error)?;
+            for _ in 0..kms.take_completed_page_flips() {
+                let completed = pending_page_flip.take().ok_or_else(|| {
+                    AppError::new("DRM completed a page flip with no tracked scanout slot")
+                })?;
+                frame_slots[completed]
+                    .page_flip_completed()
+                    .map_err(app_error)?;
+                if let Some(previous) = current_scanout.replace(completed) {
+                    frame_slots[previous]
+                        .page_flip_replaced()
+                        .map_err(app_error)?;
+                }
+                presentation_completed = true;
+                #[cfg(feature = "profiler")]
+                {
+                    crate::profiler::record_instant("presentation.kms.page_flip_completed");
+                    if let Some(event_time_us) = frame_pointer_event_us[completed].take() {
+                        record_pointer_event_latency(
+                            "input.libinput.pointer_motion.pipeline.event_to_primary_scanout_ns",
+                            event_time_us,
+                        );
+                    }
+                }
+            }
+        }
+
+        if vulkan_completion_ready
+            .as_ref()
+            .is_some_and(|ready| ready.swap(false, Ordering::AcqRel))
+            && let Some(vulkan) = &vulkan_scanout
+        {
+            for completion in vulkan.drain_completions() {
+                completion.result.map_err(AppError::new)?;
+                frame_slots[completion.slot_index]
+                    .gpu_completed()
+                    .map_err(app_error)?;
+                ready_scanout.push_back(completion.slot_index);
+                #[cfg(feature = "profiler")]
+                crate::profiler::record_instant("vulkan.scanout.completion_ready");
             }
         }
 
@@ -1769,35 +2106,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             }
         }
 
-        let mut pointer_motion_only = repaint && pointer_motion_seen && !other_work_seen;
-        let cursor_hidden = wayland
-            .core()
-            .seats
-            .get(&1)
-            .is_some_and(|seat| matches!(seat.cursor, CursorImage::Hidden));
-        if pointer_motion_only
-            && let Some(cursor) = &hardware_cursor
-            && (cursor.visible || cursor_hidden)
-        {
-            match cursor.move_to(&kms, crtc, pointer_position) {
-                Ok(()) => {
-                    repaint = false;
-                    #[cfg(feature = "profiler")]
-                    {
-                        crate::profiler::record_instant("presentation.cursor.hardware_move");
-                        crate::profiler::counter!("frame.trigger.pointer_move_only", 1_u8);
-                        crate::profiler::counter!("render.upload_bytes", 0_u64);
-                        crate::profiler::counter!("render.damage_area", 0_u64);
-                    }
-                }
-                Err(_) => {
-                    hardware_cursor = None;
-                    pointer_motion_only = false;
-                    #[cfg(feature = "profiler")]
-                    crate::profiler::record_instant("presentation.cursor.hardware_failed");
-                }
-            }
-        }
+        let pointer_motion_only = repaint && pointer_motion_seen && !other_work_seen;
 
         // Mailbox scheduling: when more than one completed frame accumulated while a flip was
         // pending, present only the newest state and immediately release older unpresented slots.
@@ -1806,7 +2115,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 let stale = ready_scanout.pop_front().expect("length checked");
                 frame_slots[stale].discard_ready().map_err(app_error)?;
                 #[cfg(feature = "profiler")]
-                crate::profiler::record_instant("presentation.frame.mailbox_replaced");
+                {
+                    crate::profiler::record_instant("presentation.frame.mailbox_replaced");
+                    frame_pointer_event_us[stale] = None;
+                }
             }
             let slot_index = ready_scanout.pop_back().expect("nonempty checked");
             let request = kms
@@ -1849,6 +2161,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 current_scanout = Some(slot_index);
                 first_modeset = false;
                 presentation_completed = true;
+                #[cfg(feature = "profiler")]
+                if let Some(event_time_us) = frame_pointer_event_us[slot_index].take() {
+                    record_pointer_event_latency(
+                        "input.libinput.pointer_motion.pipeline.event_to_primary_scanout_ns",
+                        event_time_us,
+                    );
+                }
                 if activate_hardware_cursor_after_modeset {
                     activate_hardware_cursor_after_modeset = false;
                     let cursor_image = wayland
@@ -1877,7 +2196,21 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         hardware_cursor = None;
                         repaint = true;
                         #[cfg(feature = "profiler")]
-                        crate::profiler::record_instant("presentation.cursor.hardware_failed");
+                        {
+                            pending_primary_pointer_event_us =
+                                pending_deferred_cursor_event_us.take();
+                            crate::profiler::record_instant("presentation.cursor.hardware_failed");
+                        }
+                    } else {
+                        #[cfg(feature = "profiler")]
+                        if let Some(event_time_us) = pending_deferred_cursor_event_us.take() {
+                            if rendered_cursor.is_some() {
+                                record_pointer_event_latency(
+                                    "input.libinput.pointer_motion.pipeline.freshest_event_to_cursor_submit_ns",
+                                    event_time_us,
+                                );
+                            }
+                        }
                     }
                 }
             } else {
@@ -2161,9 +2494,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     activate_hardware_cursor_after_modeset = true;
                 } else if let Some(cursor) = &mut hardware_cursor {
                     let update = match &rendered_cursor {
-                        Some(image) => cursor
-                            .set_image(&kms, crtc, image)
-                            .and_then(|_| cursor.move_to(&kms, crtc, pointer_position)),
+                        Some(image) => cursor.set_image(&kms, crtc, image).and_then(|_| {
+                            if hardware_cursor_moved_this_turn {
+                                Ok(())
+                            } else {
+                                cursor.move_to(&kms, crtc, pointer_position)
+                            }
+                        }),
                         None => cursor.hide(&kms, crtc),
                     };
                     if update.is_ok() {
@@ -2174,7 +2511,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         let _ = cursor.hide(&kms, crtc);
                         hardware_cursor = None;
                         #[cfg(feature = "profiler")]
-                        crate::profiler::record_instant("presentation.cursor.hardware_failed");
+                        {
+                            pending_primary_pointer_event_us = latest_pointer_event_this_turn
+                                .or_else(|| pending_deferred_cursor_event_us.take());
+                            crate::profiler::record_instant("presentation.cursor.hardware_failed");
+                        }
                     }
                 }
                 if !cursor_on_hardware && let Some(cursor) = &rendered_cursor {
@@ -2233,6 +2574,16 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     .and_then(|_| frame_slots[scanout_index].gpu_completed())
                     .map_err(app_error)?;
                 ready_scanout.push_back(scanout_index);
+            }
+            #[cfg(feature = "profiler")]
+            {
+                frame_pointer_event_us[scanout_index] = pending_primary_pointer_event_us.take();
+                if let Some(event_time_us) = frame_pointer_event_us[scanout_index] {
+                    record_pointer_event_latency(
+                        "input.libinput.pointer_motion.pipeline.event_to_primary_submit_ns",
+                        event_time_us,
+                    );
+                }
             }
             repaint = false;
         }
