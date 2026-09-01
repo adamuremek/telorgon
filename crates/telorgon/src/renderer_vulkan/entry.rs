@@ -1,4 +1,4 @@
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::sync::Arc;
 
 use crate::render::{RenderError, RenderErrorKind, RenderResult};
@@ -121,7 +121,7 @@ impl VulkanInstance {
         }
         let enabled_extensions: Vec<CString> =
             enabled_extensions.into_iter().map(CStr::to_owned).collect();
-        let extension_names: Vec<*const i8> = enabled_extensions
+        let extension_names: Vec<*const c_char> = enabled_extensions
             .iter()
             .map(|name| name.as_ptr())
             .collect();
