@@ -6,6 +6,12 @@ Do not run GUI applications, examples, servers, services, or background processe
 formatting, linting, unit tests, compile-only GPU tests, and documentation validation are allowed.
 Leave interactive and hardware-presenting application runs to the user.
 
+## Commit-message handoff
+
+After any task that changes repository files, include a short, one-line suggested commit message in
+the final response. Summarize the completed change in imperative mood. Generate the message only; do
+not create a Git commit unless the user explicitly asks.
+
 ## Required architecture reading
 
 Before changing architecture or graphics code, read the relevant documents under `docs/`, starting
