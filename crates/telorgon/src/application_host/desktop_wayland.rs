@@ -51,24 +51,43 @@ struct VulkanScanout {
     content_version: u64,
 }
 
+const VULKAN_STAGING_MIN_BYTES_PER_SLOT: u64 = 4 * 1024 * 1024;
+// The scanout scene uploads one full software-composited RGBA frame on every repaint. Reserve
+// additional room in each slot for the view uniform, one-image scene buffers, and copy alignment.
+const VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT: u64 = 1024 * 1024;
+
+fn vulkan_staging_budget_bytes(extent: SizeI, frame_slots: usize) -> AppResult<u64> {
+    let frame_bytes = u64::try_from(extent.width)
+        .ok()
+        .and_then(|width| {
+            u64::try_from(extent.height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| AppError::new("Vulkan scanout extent overflows its upload budget"))?;
+    let bytes_per_slot = frame_bytes
+        .checked_add(VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT)
+        .ok_or_else(|| AppError::new("Vulkan scanout staging headroom overflows its budget"))?
+        .max(VULKAN_STAGING_MIN_BYTES_PER_SLOT);
+    let frame_slots = u64::try_from(frame_slots.max(1))
+        .map_err(|_| AppError::new("Vulkan frame-slot count overflows its staging budget"))?;
+    bytes_per_slot
+        .checked_mul(frame_slots)
+        .ok_or_else(|| AppError::new("Vulkan frame slots overflow their staging budget"))
+}
+
 impl VulkanScanout {
     fn new(
         buffers: &[crate::presenter_vulkan_kms::GbmBuffer<'_, '_>],
         extent: SizeI,
     ) -> AppResult<Self> {
-        let frame_bytes = u64::try_from(extent.width)
-            .ok()
-            .and_then(|width| {
-                u64::try_from(extent.height)
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| AppError::new("Vulkan scanout extent overflows its upload budget"))?;
+        let frames_in_flight = buffers.len().max(2);
+        let staging_budget_bytes = vulkan_staging_budget_bytes(extent, frames_in_flight)?;
         let config = VulkanConfig {
             enable_validation: false,
-            frames_in_flight: buffers.len().max(2),
-            staging_budget_bytes: frame_bytes.max(4 * 1024 * 1024),
+            frames_in_flight,
+            staging_budget_bytes,
             ..VulkanConfig::default()
         };
         let instance = VulkanInstance::load(&config, &[]).map_err(app_error)?;
@@ -2115,4 +2134,59 @@ fn composite_rgba(
 
 fn app_error(error: impl std::fmt::Display) -> AppError {
     AppError::new(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vulkan_staging_budget_covers_one_full_hd_upload_per_slot() {
+        let slots = 2;
+        let budget = vulkan_staging_budget_bytes(
+            SizeI {
+                width: 1920,
+                height: 1080,
+            },
+            slots,
+        )
+        .expect("Full HD staging budget should fit");
+        let bytes_per_slot = budget / slots as u64;
+
+        assert_eq!(
+            bytes_per_slot,
+            1920 * 1080 * 4 + VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT
+        );
+        // This is the upload size reported by the original Raspberry Pi Full HD failure.
+        assert!(bytes_per_slot >= 8_294_628);
+    }
+
+    #[test]
+    fn vulkan_staging_budget_applies_the_minimum_to_every_slot() {
+        let slots = 3;
+        let budget = vulkan_staging_budget_bytes(
+            SizeI {
+                width: 640,
+                height: 480,
+            },
+            slots,
+        )
+        .expect("small scanout staging budget should fit");
+
+        assert_eq!(budget, VULKAN_STAGING_MIN_BYTES_PER_SLOT * slots as u64);
+    }
+
+    #[test]
+    fn vulkan_staging_budget_rejects_total_slot_overflow() {
+        assert!(
+            vulkan_staging_budget_bytes(
+                SizeI {
+                    width: i32::MAX,
+                    height: i32::MAX,
+                },
+                usize::MAX,
+            )
+            .is_err()
+        );
+    }
 }
