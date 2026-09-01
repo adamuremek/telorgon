@@ -71,6 +71,16 @@ pub struct SessionMetadata {
     pub git_revision: Option<String>,
     pub capabilities: Vec<String>,
     pub unavailable_metrics: Vec<String>,
+    pub input_recording_sources: Vec<InputRecordingSourceMetadata>,
+}
+
+/// One opt-in native input stream advertised to the target-aware profiler viewer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct InputRecordingSourceMetadata {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub description: &'static str,
+    pub event_prefix: &'static str,
 }
 
 impl SessionMetadata {
@@ -87,6 +97,7 @@ impl SessionMetadata {
             .and_then(Path::file_name)
             .and_then(OsStr::to_str)
             .map_or_else(|| "telorgon-application".to_owned(), bounded_text);
+        let input_recording_sources = input_recording_sources(entrypoint);
         Self {
             application: executable.clone(),
             executable,
@@ -104,8 +115,10 @@ impl SessionMetadata {
                 "cpu-spans".to_owned(),
                 "frame-counters".to_owned(),
                 "capture-download".to_owned(),
+                "opt-in-input-events".to_owned(),
             ],
             unavailable_metrics: vec!["gpu-relative-timestamps".to_owned()],
+            input_recording_sources,
         }
     }
 
@@ -122,8 +135,85 @@ impl SessionMetadata {
             git_revision: None,
             capabilities: Vec::new(),
             unavailable_metrics: Vec::new(),
+            input_recording_sources: input_recording_sources(ProfileTarget::Gui),
         }
     }
+}
+
+fn input_recording_sources(target: ProfileTarget) -> Vec<InputRecordingSourceMetadata> {
+    let common = match target {
+        ProfileTarget::Gui => vec![
+            InputRecordingSourceMetadata {
+                id: "pointer_motion",
+                label: "Pointer movement",
+                description: "Record high-rate Winit cursor movement and pointer-only frames.",
+                event_prefix: "input.gui.pointer_motion",
+            },
+            InputRecordingSourceMetadata {
+                id: "pointer_button",
+                label: "Pointer buttons",
+                description: "Record individual Winit pointer-button events.",
+                event_prefix: "input.gui.pointer_button",
+            },
+            InputRecordingSourceMetadata {
+                id: "scroll",
+                label: "Scrolling",
+                description: "Record individual Winit wheel and trackpad scroll events.",
+                event_prefix: "input.gui.scroll",
+            },
+            InputRecordingSourceMetadata {
+                id: "keyboard",
+                label: "Keyboard",
+                description: "Record individual Winit keyboard events without key content.",
+                event_prefix: "input.gui.keyboard",
+            },
+        ],
+        ProfileTarget::DesktopEnvironment => vec![
+            InputRecordingSourceMetadata {
+                id: "pointer_motion",
+                label: "libinput pointer motion",
+                description: "Record relative and absolute pointer events with queue age.",
+                event_prefix: "input.libinput.pointer_motion",
+            },
+            InputRecordingSourceMetadata {
+                id: "pointer_button",
+                label: "libinput pointer buttons",
+                description: "Record pointer-button events with queue age.",
+                event_prefix: "input.libinput.pointer_button",
+            },
+            InputRecordingSourceMetadata {
+                id: "scroll",
+                label: "libinput pointer axis",
+                description: "Record wheel and touchpad-axis events with queue age.",
+                event_prefix: "input.libinput.scroll",
+            },
+            InputRecordingSourceMetadata {
+                id: "keyboard",
+                label: "libinput keyboard",
+                description: "Record keyboard events with queue age, without key content.",
+                event_prefix: "input.libinput.keyboard",
+            },
+            InputRecordingSourceMetadata {
+                id: "touch_motion",
+                label: "libinput touch motion",
+                description: "Record high-rate touch-motion events with queue age.",
+                event_prefix: "input.libinput.touch_motion",
+            },
+            InputRecordingSourceMetadata {
+                id: "touch_contact",
+                label: "libinput touch contacts",
+                description: "Record touch down, up, and cancellation events with queue age.",
+                event_prefix: "input.libinput.touch_contact",
+            },
+            InputRecordingSourceMetadata {
+                id: "device_change",
+                label: "libinput device changes",
+                description: "Record device-added and device-removed notifications.",
+                event_prefix: "input.libinput.device_change",
+            },
+        ],
+    };
+    common
 }
 
 fn bounded_text(value: &str) -> String {
@@ -232,6 +322,42 @@ mod tests {
                     .iter()
                     .any(|value| value == "frame-counters")
             );
+            assert!(!config.metadata.input_recording_sources.is_empty());
         }
+    }
+
+    #[test]
+    fn managed_entrypoints_advertise_only_their_native_input_sources() {
+        let gui = SessionMetadata::discover_for(ProfileTarget::Gui);
+        assert!(
+            gui.input_recording_sources
+                .iter()
+                .all(|source| source.event_prefix.starts_with("input.gui."))
+        );
+        assert!(
+            !gui.input_recording_sources
+                .iter()
+                .any(|source| source.id == "touch_motion")
+        );
+
+        let desktop = SessionMetadata::discover_for(ProfileTarget::DesktopEnvironment);
+        assert!(
+            desktop
+                .input_recording_sources
+                .iter()
+                .all(|source| source.event_prefix.starts_with("input.libinput."))
+        );
+        assert!(
+            desktop
+                .input_recording_sources
+                .iter()
+                .any(|source| source.id == "touch_motion")
+        );
+        assert!(
+            desktop
+                .input_recording_sources
+                .iter()
+                .any(|source| source.id == "device_change")
+        );
     }
 }

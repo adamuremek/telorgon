@@ -6,7 +6,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 use std::time::Instant;
 
@@ -22,7 +22,26 @@ pub const MAX_PROFILE_VIEWS: usize = 1_024;
 static ACTIVE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 static ACTIVE_SESSION: Mutex<Option<Weak<SessionInner>>> = Mutex::new(None);
-static POINTER_MOVE_EVENTS_ENABLED: AtomicBool = AtomicBool::new(false);
+static INPUT_RECORDING_ENABLED: AtomicU32 = AtomicU32::new(0);
+
+/// Opt-in native input streams whose event-rate can materially perturb a profiling session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub(crate) enum InputRecordingSource {
+    PointerMotion,
+    PointerButton,
+    Scroll,
+    Keyboard,
+    TouchMotion,
+    TouchContact,
+    DeviceChange,
+}
+
+impl InputRecordingSource {
+    const fn mask(self) -> u32 {
+        1 << self as u32
+    }
+}
 
 thread_local! {
     static LOCAL_PRODUCER: RefCell<LocalProducer> = const {
@@ -236,7 +255,7 @@ impl Session {
             ));
         }
         let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed).max(1);
-        POINTER_MOVE_EVENTS_ENABLED.store(false, Ordering::Release);
+        INPUT_RECORDING_ENABLED.store(0, Ordering::Release);
         let inner = Arc::new(SessionInner {
             generation,
             origin: Instant::now(),
@@ -282,7 +301,7 @@ impl Drop for Session {
             .is_some_and(|inner| inner.generation == self.inner.generation)
         {
             *active = None;
-            POINTER_MOVE_EVENTS_ENABLED.store(false, Ordering::Release);
+            INPUT_RECORDING_ENABLED.store(0, Ordering::Release);
         }
     }
 }
@@ -512,7 +531,7 @@ impl Drop for RecordingSuppressionGuard {
 #[inline]
 #[must_use]
 pub fn pointer_move_events_enabled() -> bool {
-    POINTER_MOVE_EVENTS_ENABLED.load(Ordering::Acquire)
+    input_recording_enabled(InputRecordingSource::PointerMotion)
 }
 
 /// Changes whether future native pointer-movement details are recorded.
@@ -521,7 +540,27 @@ pub fn pointer_move_events_enabled() -> bool {
 /// new session starts; changing it never fabricates or restores records from the excluded period.
 #[inline]
 pub fn set_pointer_move_events_enabled(enabled: bool) {
-    POINTER_MOVE_EVENTS_ENABLED.store(enabled, Ordering::Release);
+    set_input_recording_enabled(InputRecordingSource::PointerMotion, enabled);
+}
+
+/// Reports whether one opt-in native input stream should publish individual profiler records.
+#[inline]
+#[must_use]
+pub(crate) fn input_recording_enabled(source: InputRecordingSource) -> bool {
+    INPUT_RECORDING_ENABLED.load(Ordering::Acquire) & source.mask() != 0
+}
+
+/// Changes whether future events from one native input stream publish profiler records.
+///
+/// The managed viewer owns this session preference. Every stream defaults to disabled, and
+/// changing a preference never fabricates records from the excluded period.
+#[inline]
+pub(crate) fn set_input_recording_enabled(source: InputRecordingSource, enabled: bool) {
+    if enabled {
+        INPUT_RECORDING_ENABLED.fetch_or(source.mask(), Ordering::AcqRel);
+    } else {
+        INPUT_RECORDING_ENABLED.fetch_and(!source.mask(), Ordering::AcqRel);
+    }
 }
 
 /// Returns whether a managed profiler session is currently active.
@@ -1105,14 +1144,22 @@ mod tests {
     }
 
     #[test]
-    fn pointer_move_collection_defaults_off_for_each_session() {
+    fn native_input_collection_is_independent_and_defaults_off_for_each_session() {
         let _serial = TEST_LOCK.lock().unwrap();
         let (session, _) = Session::start(SessionConfig::default()).unwrap();
         assert!(!pointer_move_events_enabled());
+        assert!(!input_recording_enabled(InputRecordingSource::Keyboard));
         set_pointer_move_events_enabled(true);
         assert!(pointer_move_events_enabled());
+        assert!(!input_recording_enabled(InputRecordingSource::Keyboard));
+        set_input_recording_enabled(InputRecordingSource::Keyboard, true);
+        assert!(input_recording_enabled(InputRecordingSource::Keyboard));
+        set_pointer_move_events_enabled(false);
+        assert!(!pointer_move_events_enabled());
+        assert!(input_recording_enabled(InputRecordingSource::Keyboard));
         drop(session);
         assert!(!pointer_move_events_enabled());
+        assert!(!input_recording_enabled(InputRecordingSource::Keyboard));
     }
 
     #[test]

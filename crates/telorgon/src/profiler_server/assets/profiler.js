@@ -74,6 +74,7 @@ const state = {
   viewFilter: "all",
   rawTimelineVisible: false,
   includePointerMoves: false,
+  inputRecordingSources: new Set(),
   paused: false,
   zoom: 1,
   rangeStartId: null,
@@ -119,7 +120,7 @@ function connect() {
   socket.addEventListener("open", () => {
     reconnectDelay = 500;
     setConnection("Live", "live");
-    sendPointerMovePreference();
+    sendInputRecordingPreferences();
   });
   socket.addEventListener("message", (message) => {
     if (socket !== activeSocket) return;
@@ -138,12 +139,17 @@ function connect() {
   socket.addEventListener("error", () => socket.close());
 }
 
-function sendPointerMovePreference() {
+function sendInputRecordingPreference(source, enabled) {
   if (!activeSocket || activeSocket.readyState !== WebSocket.OPEN) return;
   activeSocket.send(JSON.stringify({
-    type: "set_pointer_move_events",
-    enabled: state.includePointerMoves,
+    type: "set_input_recording",
+    source,
+    enabled,
   }));
+}
+
+function sendInputRecordingPreferences() {
+  state.inputRecordingSources.forEach((source) => sendInputRecordingPreference(source, true));
 }
 
 function scheduleReconnect() {
@@ -191,11 +197,87 @@ function acceptMetadata(text) {
     state.views = new Map((envelope.views || []).map((view) => [BigInt(view.id).toString(), view.role]));
     element("application-name").textContent = envelope.session.application;
     setApplicationConnected(true);
+    renderInputRecordingControls();
+    sendInputRecordingPreferences();
     hideError();
     renderSession();
   } catch (error) {
     showError(error instanceof Error ? error.message : "Invalid profiler metadata.");
   }
+}
+
+function availableInputSources() {
+  return state.metadata?.session?.input_recording_sources || [];
+}
+
+function renderInputRecordingControls() {
+  const root = element("input-recording-options");
+  root.replaceChildren();
+  const sources = availableInputSources();
+  if (sources.length === 0) {
+    setText("input-recording-target", "Connect a target to list its native inputs.");
+    return;
+  }
+  setText("input-recording-target", `${formatEntrypoint(state.metadata.session.entrypoint)} native sources`);
+  const supported = new Set(sources.map((source) => source.id));
+  [...state.inputRecordingSources]
+    .filter((source) => !supported.has(source))
+    .forEach((source) => {
+      state.inputRecordingSources.delete(source);
+      sendInputRecordingPreference(source, false);
+    });
+  state.includePointerMoves = state.inputRecordingSources.has("pointer_motion");
+  sources.forEach((source) => {
+    const label = document.createElement("label");
+    label.className = "input-recording-option";
+    label.title = source.description;
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = state.inputRecordingSources.has(source.id);
+    checkbox.disabled = state.metadata === null;
+    checkbox.addEventListener("change", () => setInputRecordingSource(source.id, checkbox.checked));
+    const copy = document.createElement("span");
+    copy.textContent = source.label;
+    const description = document.createElement("small");
+    description.textContent = source.description;
+    copy.append(description);
+    label.append(checkbox, copy);
+    root.append(label);
+  });
+}
+
+function setInputRecordingSource(source, enabled) {
+  if (enabled) state.inputRecordingSources.add(source);
+  else state.inputRecordingSources.delete(source);
+  state.includePointerMoves = state.inputRecordingSources.has("pointer_motion");
+  sendInputRecordingPreference(source, enabled);
+  if (!state.includePointerMoves && state.selectedFrame && !isVisibleCompletedFrame(state.selectedFrame)) {
+    state.selectedFrame = filteredCompletedFrames().at(-1) || null;
+    state.selectedEvent = null;
+  }
+  renderInputRecordingControls();
+  scheduleRender();
+}
+
+function inputSourceForEvent(event) {
+  const label = labelFor(event.labelId);
+  return availableInputSources().find((source) => label.startsWith(source.event_prefix)) || null;
+}
+
+function inputSampleForEvent(event) {
+  if (event.kind !== KIND.INSTANT) return null;
+  const source = inputSourceForEvent(event);
+  if (!source) return null;
+  const metadata = labelMetadataFor(event.labelId);
+  return {
+    event,
+    source,
+    queueAge: metadata.unit === UNIT.NANOSECONDS ? event.value : null,
+  };
+}
+
+function recordedInputSamples() {
+  return state.events.map(inputSampleForEvent).filter((sample) => sample !== null);
 }
 
 function acceptBinary(buffer) {
@@ -316,6 +398,7 @@ function eventAffectsActiveWorkspace(event) {
     return event.kind === KIND.DIAGNOSTIC || event.kind === KIND.GAP;
   }
   if (state.workspace !== "performance") return false;
+  if (state.performanceView === "inputs") return inputSampleForEvent(event) !== null;
   const frame = event.frame === 0n ? null : state.framesById.get(event.frame.toString());
   const visibleFrameEvent = frame !== null && isVisibleCompletedFrame(frame);
   if (state.performanceView !== "responsiveness") return visibleFrameEvent;
@@ -404,13 +487,18 @@ function scheduleLiveRender() {
 }
 
 function renderFrames() {
+  renderPerformancePanels();
+  if (state.performanceView === "inputs") {
+    renderInputPerformance();
+    renderInspector();
+    return;
+  }
   const rangeFrames = selectedRangeFrames();
   const rangeResponsiveness = state.performanceView === "responsiveness"
     ? analyzeResponsiveness(rangeFrames)
     : null;
   renderMetrics(rangeFrames, rangeResponsiveness);
   renderPlot();
-  renderPerformancePanels();
   renderRangeAnalysis(rangeFrames, rangeResponsiveness);
   renderInspector();
   if (state.performanceView === "work") {
@@ -1398,13 +1486,138 @@ function renderPerformancePanels() {
     overview: element("overview-panels"),
     work: element("work-panels"),
     responsiveness: element("responsiveness-panels"),
+    inputs: element("inputs-panels"),
   };
   Object.entries(panels).forEach(([view, panel]) => { panel.hidden = state.performanceView !== view; });
+  const inputsVisible = state.performanceView === "inputs";
+  element("frame-plot-region").hidden = inputsVisible;
+  element("analysis-range-toolbar").hidden = inputsVisible;
   document.querySelectorAll(".performance-view-button").forEach((button) => {
     const current = button.dataset.performanceView === state.performanceView;
     button.classList.toggle("current", current);
     button.setAttribute("aria-pressed", String(current));
   });
+}
+
+function renderInputPerformance() {
+  const samples = recordedInputSamples();
+  const enabled = state.inputRecordingSources.size;
+  const queueAges = samples
+    .map((sample) => sample.queueAge)
+    .filter((value) => value !== null)
+    .sort(compareBigInt);
+  const overTwentyMilliseconds = queueAges.filter((value) => value >= 20_000_000n).length;
+  setMetric(1, "Recorded events", samples.length.toString());
+  setMetric(2, "Sources enabled", enabled.toString());
+  setMetric(3, "Queue age p95", queueAges.length ? formatNs(bigintPercentile(queueAges, 0.95)) : "—");
+  setMetric(4, "Queue age ≥ 20 ms", overTwentyMilliseconds.toString());
+  setText("metric-dropped", state.dropped.toString());
+  renderInputSummary(samples);
+  renderInputEventPlot(samples);
+  renderInputEventLog(samples);
+}
+
+function renderInputSummary(samples) {
+  const body = element("input-summary-body");
+  body.replaceChildren();
+  availableInputSources().forEach((source) => {
+    const sourceSamples = samples.filter((sample) => sample.source.id === source.id);
+    if (sourceSamples.length === 0 && !state.inputRecordingSources.has(source.id)) return;
+    const queueAges = sourceSamples
+      .map((sample) => sample.queueAge)
+      .filter((value) => value !== null)
+      .sort(compareBigInt);
+    const row = document.createElement("tr");
+    row.append(
+      tableCell(source.label),
+      tableCell(sourceSamples.length.toString()),
+      tableCell(queueAges.length ? formatNs(bigintPercentile(queueAges, 0.95)) : "—"),
+      tableCell(queueAges.length ? formatNs(queueAges.at(-1)) : "—"),
+    );
+    body.append(row);
+  });
+  element("input-summary-empty").hidden = body.childElementCount !== 0;
+}
+
+function renderInputEventPlot(samples) {
+  const canvas = element("input-event-plot");
+  const context = canvas.getContext("2d");
+  const bounds = canvas.getBoundingClientRect();
+  const ratio = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.round(bounds.width * ratio));
+  const height = Math.max(1, Math.round(bounds.height * ratio));
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+  context.setTransform(ratio, 0, 0, ratio, 0, 0);
+  context.clearRect(0, 0, bounds.width, bounds.height);
+  const sources = availableInputSources();
+  const visible = samples.slice(-300);
+  if (sources.length === 0 || visible.length === 0) {
+    context.fillStyle = "#9aa2ad";
+    context.fillText("Enable a native input source, then interact with the target.", 8, 24);
+    return;
+  }
+  const left = Math.min(150, Math.max(92, bounds.width * 0.28));
+  const right = Math.max(left + 1, bounds.width - 8);
+  const top = 12;
+  const rowHeight = Math.max(18, (bounds.height - top - 8) / sources.length);
+  const first = visible[0].event.timestamp;
+  const last = visible.at(-1).event.timestamp;
+  const duration = last > first ? last - first : 1n;
+  context.font = "10px Inter, ui-sans-serif, system-ui, sans-serif";
+  context.textBaseline = "middle";
+  sources.forEach((source, index) => {
+    const y = top + rowHeight * (index + 0.5);
+    context.strokeStyle = "#2a2f37";
+    context.beginPath();
+    context.moveTo(left, y);
+    context.lineTo(right, y);
+    context.stroke();
+    context.fillStyle = "#9aa2ad";
+    context.fillText(source.label, 4, y);
+  });
+  visible.forEach((sample) => {
+    const sourceIndex = sources.findIndex((source) => source.id === sample.source.id);
+    if (sourceIndex < 0) return;
+    const x = left + Number((sample.event.timestamp - first) * 10_000n / duration) / 10_000 * (right - left);
+    const y = top + rowHeight * (sourceIndex + 0.5);
+    const age = sample.queueAge ?? 0n;
+    context.fillStyle = age >= 25_000_000n ? "#e36b6b" : (age >= 8_000_000n ? "#e5a14a" : "#669df6");
+    context.beginPath();
+    context.arc(x, y, age >= 20_000_000n ? 3.5 : 2.5, 0, Math.PI * 2);
+    context.fill();
+  });
+}
+
+function renderInputEventLog(samples) {
+  const body = element("input-event-log-body");
+  body.replaceChildren();
+  samples.slice(-250).reverse().forEach((sample) => {
+    const row = document.createElement("tr");
+    const eventCell = document.createElement("td");
+    eventCell.append(linkButton(inputEventName(sample), () => selectProfilerEvent(sample.event, null)));
+    row.append(
+      tableCell(formatSessionTimestamp(sample.event.timestamp)),
+      tableCell(sample.source.label),
+      eventCell,
+      tableCell(sample.queueAge === null ? "—" : formatNs(sample.queueAge)),
+      tableCell(sample.event.frame === 0n ? "—" : `#${sample.event.frame.toString()}`),
+    );
+    body.append(row);
+  });
+  element("input-event-log-empty").hidden = body.childElementCount !== 0;
+}
+
+function inputEventName(sample) {
+  const suffix = labelFor(sample.event.labelId)
+    .slice(sample.source.event_prefix.length)
+    .replace(/^\./, "")
+    .replace(/\.queue_age_ns$/, "")
+    .replaceAll(".", " ")
+    .replaceAll("_", " ");
+  return suffix || "event";
 }
 
 function renderCategorySummary(frames) {
@@ -1802,10 +2015,11 @@ function renderInspector() {
     element("inspector-heading").textContent = "Event details";
     const event = state.selectedEvent;
     const performanceCategory = performanceCategoryFor(event);
-    const frameStart = state.selectedFrame?.start || 0n;
+    const frameStart = event.frame === 0n ? 0n : (state.selectedFrame?.start || 0n);
     const relativeStart = event.domain === 2
       ? event.timestamp
       : (event.timestamp > frameStart ? event.timestamp - frameStart : 0n);
+    const inputSample = inputSampleForEvent(event);
     appendDetails(details, [
       ["Label", labelFor(event.labelId)],
       ["Performance category", performanceCategoryName(performanceCategory), `category-${performanceCategory}`],
@@ -1813,6 +2027,10 @@ function renderInspector() {
       ["Lane", state.lanes.get(event.lane) || `Lane ${event.lane}`],
       ["Start", formatNs(relativeStart)],
       ["Duration", formatNs(event.duration)],
+      ...(inputSample ? [["Input source", inputSample.source.label]] : []),
+      ...(inputSample?.queueAge !== null && inputSample?.queueAge !== undefined
+        ? [["Queue age", formatNs(inputSample.queueAge)]]
+        : []),
       ["Self time", formatNs(event.selfTime ?? eventSelfTime(event))],
       ["Parent", event.parentLabelId ? labelFor(event.parentLabelId) : "None"],
       ["Domain", event.domain === 2 ? "GPU relative" : "CPU monotonic"],
@@ -2132,6 +2350,7 @@ function selectManualRange(startFrame, endFrame) {
 function selectProfilerEvent(event, frame) {
   if (frame) state.selectedFrame = frame;
   else if (event.frame) state.selectedFrame = state.framesById.get(event.frame.toString()) || state.selectedFrame;
+  else state.selectedFrame = null;
   state.selectedEvent = event;
   state.selectedPlotPointKey = null;
   state.followLiveSelection = false;
@@ -2302,7 +2521,7 @@ function switchWorkspace(name) {
 }
 
 function switchPerformanceView(view) {
-  if (!["overview", "work", "responsiveness"].includes(view)) return;
+  if (!["overview", "work", "responsiveness", "inputs"].includes(view)) return;
   state.performanceView = view;
   state.selectedEvent = null;
   state.selectedPlotPointKey = null;
@@ -2352,6 +2571,7 @@ function disconnectViewer() {
     state.liveRenderTimer = null;
   }
   state.metadata = null;
+  renderInputRecordingControls();
   state.lanes.clear();
   state.views.clear();
   state.labels.clear();
@@ -2428,23 +2648,6 @@ function updatePauseButton() {
   if (state.metadata !== null) {
     setConnection(state.paused ? "Paused" : "Live", state.paused ? "paused" : "live");
   }
-}
-
-function togglePointerMoves() {
-  state.includePointerMoves = !state.includePointerMoves;
-  sendPointerMovePreference();
-  if (!state.includePointerMoves && state.selectedFrame && !isVisibleCompletedFrame(state.selectedFrame)) {
-    state.selectedFrame = filteredCompletedFrames().at(-1) || null;
-    state.selectedEvent = null;
-  }
-  updatePointerMovesButton();
-  scheduleRender();
-}
-
-function updatePointerMovesButton() {
-  const button = element("toggle-pointer-moves");
-  button.setAttribute("aria-pressed", String(state.includePointerMoves));
-  button.textContent = state.includePointerMoves ? "Mouse moves recorded" : "Mouse moves ignored";
 }
 
 function counterNumber(event) {
@@ -2800,7 +3003,6 @@ document.querySelectorAll(".nav-button").forEach((button) => button.addEventList
 document.querySelectorAll(".performance-view-button").forEach((button) => button.addEventListener("click", () => switchPerformanceView(button.dataset.performanceView)));
 element("pause-button").addEventListener("click", togglePause);
 element("clear-button").addEventListener("click", clearClient);
-element("toggle-pointer-moves").addEventListener("click", togglePointerMoves);
 element("clear-analysis-range").addEventListener("click", () => {
   clearManualRangeSelection();
   scheduleRender();

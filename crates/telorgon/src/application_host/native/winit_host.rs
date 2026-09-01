@@ -1379,6 +1379,11 @@ where
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                #[cfg(feature = "profiler")]
+                record_gui_input(
+                    crate::profiler::InputRecordingSource::PointerMotion,
+                    "input.gui.pointer_motion",
+                );
                 self.diagnostics.native_pointer_moves =
                     self.diagnostics.native_pointer_moves.saturating_add(1);
                 if let Some(runtime) = self.runtime.as_mut() {
@@ -1389,11 +1394,21 @@ where
                 }
             }
             WindowEvent::CursorLeft { .. } => {
+                #[cfg(feature = "profiler")]
+                record_gui_input(
+                    crate::profiler::InputRecordingSource::PointerMotion,
+                    "input.gui.pointer_motion.leave",
+                );
                 if let Some(runtime) = self.runtime.as_mut() {
                     runtime.queue_input(InputEvent::mouse_moved(PointF { x: -1.0, y: -1.0 }));
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
+                #[cfg(feature = "profiler")]
+                record_gui_input(
+                    crate::profiler::InputRecordingSource::PointerButton,
+                    "input.gui.pointer_button",
+                );
                 if let Some(runtime) = self.runtime.as_mut() {
                     let button = mouse_button(button);
                     let state = match state {
@@ -1404,6 +1419,11 @@ where
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
+                #[cfg(feature = "profiler")]
+                record_gui_input(
+                    crate::profiler::InputRecordingSource::Scroll,
+                    "input.gui.scroll",
+                );
                 let delta = match delta {
                     MouseScrollDelta::LineDelta(x, y) => PointF {
                         x: x * 24.0,
@@ -1419,6 +1439,11 @@ where
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
+                #[cfg(feature = "profiler")]
+                record_gui_input(
+                    crate::profiler::InputRecordingSource::Keyboard,
+                    "input.gui.keyboard",
+                );
                 if let WinitPhysicalKey::Code(code) = event.physical_key
                     && let Some(runtime) = self.runtime.as_mut()
                 {
@@ -1540,6 +1565,13 @@ where
     fn exiting(&mut self, event_loop: &ActiveEventLoop) {
         self.host.borrow_mut().exiting(event_loop);
         self.live_resize_handler_installed = false;
+    }
+}
+
+#[cfg(feature = "profiler")]
+fn record_gui_input(source: crate::profiler::InputRecordingSource, label: &'static str) {
+    if crate::profiler::input_recording_enabled(source) {
+        crate::profiler::record_instant(label);
     }
 }
 

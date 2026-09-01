@@ -1,6 +1,14 @@
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, c_double, c_int, c_uint, c_void};
+use std::ffi::{c_char, c_double, c_int, c_long, c_uint, c_void};
+
+pub const CLOCK_MONOTONIC: c_int = 1;
+
+#[repr(C)]
+pub struct timespec {
+    pub tv_sec: c_long,
+    pub tv_nsec: c_long,
+}
 
 macro_rules! opaque {
     ($($name:ident),* $(,)?) => {$(
@@ -144,6 +152,7 @@ unsafe extern "C" {
 
 #[link(name = "c")]
 unsafe extern "C" {
+    pub fn clock_gettime(clock_id: c_int, time: *mut timespec) -> c_int;
     pub fn free(pointer: *mut c_void);
     pub fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
     pub fn ftruncate(fd: c_int, length: i64) -> c_int;

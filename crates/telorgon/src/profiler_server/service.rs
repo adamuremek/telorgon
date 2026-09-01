@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::TcpListener as StdTcpListener;
 use std::sync::{Arc, Mutex, mpsc};
@@ -60,13 +60,42 @@ struct AppStateInner {
     store: Mutex<SessionStore>,
     live: broadcast::Sender<LiveBatch>,
     stop: watch::Receiver<bool>,
-    pointer_move_viewers: Mutex<usize>,
+    input_recording_viewers: Mutex<HashMap<ViewerInputSource, usize>>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ViewerCommand {
-    SetPointerMoveEvents { enabled: bool },
+    SetInputRecording {
+        source: ViewerInputSource,
+        enabled: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+enum ViewerInputSource {
+    PointerMotion,
+    PointerButton,
+    Scroll,
+    Keyboard,
+    TouchMotion,
+    TouchContact,
+    DeviceChange,
+}
+
+impl ViewerInputSource {
+    const fn profiler_source(self) -> crate::profiler::InputRecordingSource {
+        match self {
+            Self::PointerMotion => crate::profiler::InputRecordingSource::PointerMotion,
+            Self::PointerButton => crate::profiler::InputRecordingSource::PointerButton,
+            Self::Scroll => crate::profiler::InputRecordingSource::Scroll,
+            Self::Keyboard => crate::profiler::InputRecordingSource::Keyboard,
+            Self::TouchMotion => crate::profiler::InputRecordingSource::TouchMotion,
+            Self::TouchContact => crate::profiler::InputRecordingSource::TouchContact,
+            Self::DeviceChange => crate::profiler::InputRecordingSource::DeviceChange,
+        }
+    }
 }
 
 /// Application-owned service whose drop path synchronously stops and joins its one thread.
@@ -110,7 +139,6 @@ impl ProfilerServer {
         let (session, collector) = Session::start(SessionConfig::default()).map_err(|error| {
             ServerError::new(format!("failed to start profiler session: {error}"))
         })?;
-        crate::profiler::set_pointer_move_events_enabled(false);
         let (live, _) = broadcast::channel(32);
         let (stop_tx, stop_rx) = watch::channel(false);
         let state = AppState {
@@ -121,7 +149,7 @@ impl ProfilerServer {
                 store: Mutex::new(SessionStore::new(config.metadata)),
                 live,
                 stop: stop_rx,
-                pointer_move_viewers: Mutex::new(0),
+                input_recording_viewers: Mutex::new(HashMap::new()),
             }),
         };
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -173,7 +201,6 @@ impl ProfilerServer {
 
 impl Drop for ProfilerServer {
     fn drop(&mut self) {
-        crate::profiler::set_pointer_move_events_enabled(false);
         crate::profiler::record_instant("profiler.session.ended");
         if let Some(shutdown) = self.shutdown.take() {
             let _ = shutdown.send(());
@@ -392,7 +419,7 @@ async fn live(
 
 async fn websocket_client(mut socket: WebSocket, state: AppState) {
     let mut live = state.inner.live.subscribe();
-    let mut pointer_move_events_enabled = false;
+    let mut input_recording = HashSet::new();
     let snapshot = state
         .inner
         .store
@@ -425,12 +452,13 @@ async fn websocket_client(mut socket: WebSocket, state: AppState) {
                     }
                 }
                 Some(Ok(Message::Text(text))) => {
-                    if let Ok(ViewerCommand::SetPointerMoveEvents { enabled }) =
+                    if let Ok(ViewerCommand::SetInputRecording { source, enabled }) =
                         serde_json::from_str(text.as_str())
                     {
-                        update_pointer_move_preference(
+                        update_input_recording_preference(
                             &state,
-                            &mut pointer_move_events_enabled,
+                            &mut input_recording,
+                            source,
                             enabled,
                         );
                     }
@@ -475,25 +503,34 @@ async fn websocket_client(mut socket: WebSocket, state: AppState) {
             }
         }
     }
-    update_pointer_move_preference(&state, &mut pointer_move_events_enabled, false);
+    for source in input_recording.clone() {
+        update_input_recording_preference(&state, &mut input_recording, source, false);
+    }
 }
 
-fn update_pointer_move_preference(state: &AppState, current: &mut bool, enabled: bool) {
-    if *current == enabled {
+fn update_input_recording_preference(
+    state: &AppState,
+    current: &mut HashSet<ViewerInputSource>,
+    source: ViewerInputSource,
+    enabled: bool,
+) {
+    if current.contains(&source) == enabled {
         return;
     }
     let mut viewers = state
         .inner
-        .pointer_move_viewers
+        .input_recording_viewers
         .lock()
         .unwrap_or_else(|error| error.into_inner());
+    let count = viewers.entry(source).or_default();
     if enabled {
-        *viewers = viewers.saturating_add(1);
+        *count = count.saturating_add(1);
+        current.insert(source);
     } else {
-        *viewers = viewers.saturating_sub(1);
+        *count = count.saturating_sub(1);
+        current.remove(&source);
     }
-    *current = enabled;
-    crate::profiler::set_pointer_move_events_enabled(*viewers != 0);
+    crate::profiler::set_input_recording_enabled(source.profiler_source(), *count != 0);
 }
 
 fn response(
@@ -604,7 +641,7 @@ mod tests {
                 store: Mutex::new(SessionStore::new(SessionMetadata::for_tests())),
                 live,
                 stop,
-                pointer_move_viewers: Mutex::new(0),
+                input_recording_viewers: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -651,6 +688,7 @@ mod tests {
         assert!(INDEX_HTML.contains("Raw frame flame chart"));
         assert!(INDEX_HTML.contains("data-workspace=\"performance\""));
         assert!(INDEX_HTML.contains("data-performance-view=\"responsiveness\""));
+        assert!(INDEX_HTML.contains("data-performance-view=\"inputs\""));
         assert!(INDEX_HTML.contains("Presentation outcomes"));
         assert!(INDEX_HTML.contains("Host frame-work distribution"));
         assert!(INDEX_HTML.contains("view-filter"));
@@ -671,13 +709,17 @@ mod tests {
         assert!(!PROFILER_JS.contains("wallX("));
         assert!(!INDEX_HTML.contains("wall-clock time axis"));
         assert!(PROFILER_JS.contains("consecutiveGapsByView"));
-        assert!(INDEX_HTML.contains("toggle-pointer-moves"));
+        assert!(INDEX_HTML.contains("input-recording-options"));
+        assert!(INDEX_HTML.contains("input-event-plot"));
+        assert!(INDEX_HTML.contains("input-event-log-body"));
         assert!(INDEX_HTML.contains("lucide-play-icon"));
         assert!(INDEX_HTML.contains("lucide-pause-icon"));
         assert!(INDEX_HTML.contains("aria-label=\"Pause profiling\""));
         assert!(PROFILER_JS.contains("input.non_pointer_events.received"));
         assert!(PROFILER_JS.contains("frame.trigger.pointer_move_only"));
-        assert!(PROFILER_JS.contains("set_pointer_move_events"));
+        assert!(PROFILER_JS.contains("set_input_recording"));
+        assert!(PROFILER_JS.contains("renderInputPerformance"));
+        assert!(PROFILER_JS.contains("input_recording_sources"));
         assert!(PROFILER_JS.contains("if (state.paused) return;"));
         assert!(PROFILER_JS.contains("followLiveSelection"));
         assert!(PROFILER_JS.contains("button.setAttribute(\"aria-label\", label)"));
@@ -740,12 +782,23 @@ mod tests {
     }
 
     #[test]
-    fn pointer_move_viewer_command_is_explicit_and_bounded() {
-        let enabled: ViewerCommand =
-            serde_json::from_str(r#"{"type":"set_pointer_move_events","enabled":true}"#).unwrap();
+    fn input_recording_viewer_command_is_explicit_and_bounded() {
+        let enabled: ViewerCommand = serde_json::from_str(
+            r#"{"type":"set_input_recording","source":"pointer_motion","enabled":true}"#,
+        )
+        .unwrap();
         assert_eq!(
             enabled,
-            ViewerCommand::SetPointerMoveEvents { enabled: true }
+            ViewerCommand::SetInputRecording {
+                source: ViewerInputSource::PointerMotion,
+                enabled: true,
+            }
+        );
+        assert!(
+            serde_json::from_str::<ViewerCommand>(
+                r#"{"type":"set_input_recording","source":"clipboard","enabled":true}"#
+            )
+            .is_err()
         );
         assert!(serde_json::from_str::<ViewerCommand>(r#"{"type":"unknown"}"#).is_err());
     }

@@ -349,11 +349,22 @@ and duplicate-suppressed redraw requests, redraw callbacks, idle versus submitte
 each stable redraw reason. Input flushing separately publishes received/dispatched, non-pointer
 input, and pointer/scroll/resize coalescing totals. A pending owner turn that contains only pointer
 movement is processed normally but produces no profiler records by default, including no empty
-`input.flush`/`commands.flush` spans or repeated host-counter snapshots. The shared analysis toolbar can
-enable collection of future pointer-movement details when an investigation needs them. Frames
+`input.flush`/`commands.flush` spans or repeated host-counter snapshots. The persistent Input
+recording sidebar can enable collection of future pointer-movement details when an investigation
+needs them. Frames
 triggered only by pointer movement and their Responsiveness input signals are likewise excluded from
 Performance views while that preference is off. Frames that also carry animation, timer, command,
 resize, or other input work remain visible.
+
+The sidebar is target-aware session metadata rather than a hard-coded universal device list. GUI
+sessions advertise their supported Winit pointer, button, scroll, and keyboard streams. Linux
+desktop-environment sessions advertise their supported libinput pointer-motion, button, axis,
+keyboard, touch-motion, touch-contact, and device-change streams. Every stream is independently
+opt-in and resets off for a new profiler session. The Inputs performance view charts each retained
+sample on a source lane, summarizes event counts and queue-age percentiles, and keeps a bounded event
+log. Libinput samples carry the monotonic delay from the native event timestamp to the compositor's
+post-dispatch observation, exposing the backlog behind libinput's client-lag warning. Input payloads,
+coordinates, key values or text, touch positions, and device identities are never recorded.
 
 ### 8.1 Frame-timeline probe catalog
 
@@ -473,12 +484,13 @@ producer ring or waits for browser acknowledgement. The client coalesces renderi
 `requestAnimationFrame` and caps live repaints at ten per second so WebSocket message frequency does
 not cause an equivalent number of DOM layout passes. It invalidates only the visible workspace;
 completed pointer-move-only frames do not repaint the Performance graph while pointer movement is
-excluded.
+excluded, and the Inputs view caps its source-lane chart and event table independently.
 
 DOM updates use semantic tables, buttons, navigation, plots, and inspector regions already defined
 by the visual language in Section 12. The browser owns selection, zoom, pause, and display state.
-Only the explicit mouse-movement preference changes source collection: the authenticated WebSocket
-enables or disables future pointer-only records without replaying an excluded interval. While
+Only explicit Input recording checkboxes change source collection: the authenticated WebSocket
+enables or disables future records for one advertised native source without replaying an excluded
+interval. While
 paused through the top-bar control, the viewer discards incoming event and viewer-gap batches,
 freezes its current dataset, and establishes
 new cumulative-counter baselines when resumed. The bounded application-side session continues so a
@@ -510,7 +522,8 @@ dashboard. The initial page uses one persistent shell:
 
 - top bar: application, live/paused state, backend, connection state, an accessible pause/play icon
   toggle, Clear, and Save trace;
-- left navigation: Performance, Resources, Diagnostics, and Session;
+- left navigation: Performance, Resources, Diagnostics, and Session, followed by a persistent
+  target-aware Input recording checklist;
 - main workspace: the selected navigation surface; and
 - resizable right inspector: selected frame or event details.
 
@@ -529,12 +542,14 @@ event-ordered frame range across three views:
    latency samples. It aggregates presentation attempts by terminal outcome and lists actionable
    over-budget incidents; it does not rasterize raw event occupancy or draw full-height markers.
    Pointer-movement input is excluded from these latency signals by default and can be included with
-   the shared analysis-toolbar toggle.
+   its Input recording checkbox.
+4. **Inputs** charts opt-in native events in stable source lanes, summarizes counts and libinput
+   queue-age percentiles, and provides a bounded newest-first event log linked to event inspection.
 
-The shared mouse-movement toggle controls source collection for future pointer-only owner turns and
-the visibility of completed frames whose only scheduling trigger was a pointer move. Collection is
-off by default and resets when the profiler session restarts. The toggle does not hide a frame when
-pointer movement overlaps any other meaningful trigger.
+The pointer-movement checkbox controls source collection for future pointer-only owner turns and the
+visibility of completed frames whose only scheduling trigger was a pointer move. Every input source
+is off by default and resets when the profiler session restarts. Disabling pointer movement does not
+hide a frame when pointer movement overlaps any other meaningful trigger.
 
 The header, tables, and summaries analyze the frames currently visible in the graph. The shared
 selector provides an all-views or one-view filter, while the graph-window selector shows the latest

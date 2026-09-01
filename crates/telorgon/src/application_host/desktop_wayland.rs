@@ -238,6 +238,8 @@ impl VulkanScanout {
             .finish()
             .and_then(|frame| frame.submit())
             .map_err(app_error)?;
+        #[cfg(feature = "profiler")]
+        let _completion_wait = crate::profiler::span!("vulkan.scanout.completion_wait");
         receipt.wait(Duration::from_secs(2)).map_err(app_error)?;
         Ok(())
     }
@@ -339,6 +341,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let _profiler = crate::application_host::profiler::ManagedProfiler::start(
         crate::application_host::profiler::ProfileTarget::DesktopEnvironment,
     )?;
+    #[cfg(feature = "profiler")]
+    let _profile_view = {
+        let view = crate::profiler::ProfileViewId::PRIMARY;
+        let _ = crate::profiler::register_view(view, "Desktop environment output");
+        crate::profiler::enter_view(Some(view))
+    };
     let (_name, compositor, widgets, renderer, config) = application.into_parts()?;
     let (policy, window_frame, pointer, icons) = compositor.into_runtime_parts();
 
@@ -528,6 +536,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut keyboard = keyboard;
 
     loop {
+        #[cfg(feature = "profiler")]
+        let mut profiler_pointer_motion_seen = false;
+        #[cfg(feature = "profiler")]
+        let mut profiler_other_work_seen = repaint;
         display
             .event_loop()
             .dispatch(Some(Duration::from_millis(8)))
@@ -535,8 +547,23 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         seat.dispatch(0).map_err(app_error)?;
         if seat.state() == SeatState::Enabled {
             input.dispatch().map_err(app_error)?;
+            #[cfg(feature = "profiler")]
+            let input_observed_us = crate::platform_linux::monotonic_time_microseconds();
             while let Some(event) = input.next_event() {
                 let time_microseconds = event.time_microseconds;
+                #[cfg(feature = "profiler")]
+                {
+                    if matches!(
+                        event.kind,
+                        LinuxInputEventKind::PointerMotion { .. }
+                            | LinuxInputEventKind::PointerAbsolute { .. }
+                    ) {
+                        profiler_pointer_motion_seen = true;
+                    } else {
+                        profiler_other_work_seen = true;
+                    }
+                    record_libinput_event(event.kind, time_microseconds, input_observed_us);
+                }
                 let time = time_microseconds / 1_000;
                 let time = u32::try_from(time).unwrap_or(u32::MAX);
                 match event.kind {
@@ -874,6 +901,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         }
 
         let actions = wayland.core_mut().drain_actions().collect::<Vec<_>>();
+        #[cfg(feature = "profiler")]
+        if !actions.is_empty() {
+            profiler_other_work_seen = true;
+        }
         for action in actions {
             match action {
                 CompositorAction::PublishSurface(surface) => {
@@ -1144,6 +1175,20 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         }
 
         if repaint && seat.state() == SeatState::Enabled {
+            #[cfg(feature = "profiler")]
+            let profiler_pointer_motion_only =
+                profiler_pointer_motion_seen && !profiler_other_work_seen;
+            #[cfg(feature = "profiler")]
+            let _profile_suppression = (profiler_pointer_motion_only
+                && !crate::profiler::pointer_move_events_enabled())
+            .then(crate::profiler::suppress_current_thread);
+            #[cfg(feature = "profiler")]
+            let _profile_frame = crate::profiler::start_frame("frame.total");
+            #[cfg(feature = "profiler")]
+            crate::profiler::counter!(
+                "frame.trigger.pointer_move_only",
+                u8::from(profiler_pointer_motion_only)
+            );
             let now = start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
             let mut output = if session_locked {
                 let mut pixels = vec![0_u8; extent.width as usize * extent.height as usize * 4];
@@ -1371,25 +1416,29 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     extent.height as u32,
                 )
                 .map_err(app_error)?;
-            if first_modeset {
-                request.test(true).map_err(app_error)?;
-                let request = kms
-                    .primary_modeset_request(
-                        connector.id,
-                        &connector_properties,
-                        crtc,
-                        &crtc_properties,
-                        plane.id,
-                        &plane_properties,
-                        mode_blob.id(),
-                        framebuffers[scanout_index].id(),
-                        extent.width as u32,
-                        extent.height as u32,
-                    )
-                    .map_err(app_error)?;
-                request.commit(true, false).map_err(app_error)?;
-            } else {
-                request.commit(false, false).map_err(app_error)?;
+            {
+                #[cfg(feature = "profiler")]
+                let _kms_commit = crate::profiler::span!("presentation.kms.atomic_commit");
+                if first_modeset {
+                    request.test(true).map_err(app_error)?;
+                    let request = kms
+                        .primary_modeset_request(
+                            connector.id,
+                            &connector_properties,
+                            crtc,
+                            &crtc_properties,
+                            plane.id,
+                            &plane_properties,
+                            mode_blob.id(),
+                            framebuffers[scanout_index].id(),
+                            extent.width as u32,
+                            extent.height as u32,
+                        )
+                        .map_err(app_error)?;
+                    request.commit(true, false).map_err(app_error)?;
+                } else {
+                    request.commit(false, false).map_err(app_error)?;
+                }
             }
             if let Some(lock) = pending_session_lock.take() {
                 wayland
@@ -1411,6 +1460,95 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             first_modeset = false;
             repaint = false;
         }
+    }
+}
+
+#[cfg(feature = "profiler")]
+fn record_libinput_event(
+    kind: LinuxInputEventKind,
+    event_time_us: u64,
+    observed_time_us: Option<u64>,
+) {
+    use crate::profiler::InputRecordingSource;
+
+    let queue_age_ns = observed_time_us
+        .unwrap_or(event_time_us)
+        .saturating_sub(event_time_us)
+        .saturating_mul(1_000);
+    let (source, label, has_queue_age) = match kind {
+        LinuxInputEventKind::PointerMotion { .. } => (
+            InputRecordingSource::PointerMotion,
+            "input.libinput.pointer_motion.relative.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::PointerAbsolute { .. } => (
+            InputRecordingSource::PointerMotion,
+            "input.libinput.pointer_motion.absolute.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::PointerButton { pressed: true, .. } => (
+            InputRecordingSource::PointerButton,
+            "input.libinput.pointer_button.pressed.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::PointerButton { pressed: false, .. } => (
+            InputRecordingSource::PointerButton,
+            "input.libinput.pointer_button.released.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::PointerAxis { .. } => (
+            InputRecordingSource::Scroll,
+            "input.libinput.scroll.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::KeyboardKey { pressed: true, .. } => (
+            InputRecordingSource::Keyboard,
+            "input.libinput.keyboard.pressed.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::KeyboardKey { pressed: false, .. } => (
+            InputRecordingSource::Keyboard,
+            "input.libinput.keyboard.released.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::TouchMotion { .. } => (
+            InputRecordingSource::TouchMotion,
+            "input.libinput.touch_motion.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::TouchDown { .. } => (
+            InputRecordingSource::TouchContact,
+            "input.libinput.touch_contact.down.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::TouchUp { .. } => (
+            InputRecordingSource::TouchContact,
+            "input.libinput.touch_contact.up.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::TouchCancel => (
+            InputRecordingSource::TouchContact,
+            "input.libinput.touch_contact.cancel.queue_age_ns",
+            true,
+        ),
+        LinuxInputEventKind::DeviceAdded => (
+            InputRecordingSource::DeviceChange,
+            "input.libinput.device_change.added",
+            false,
+        ),
+        LinuxInputEventKind::DeviceRemoved => (
+            InputRecordingSource::DeviceChange,
+            "input.libinput.device_change.removed",
+            false,
+        ),
+    };
+    if !crate::profiler::input_recording_enabled(source) {
+        return;
+    }
+    if has_queue_age {
+        crate::profiler::record_instant_value(label, queue_age_ns);
+    } else {
+        crate::profiler::record_instant(label);
     }
 }
 

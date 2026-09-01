@@ -33,6 +33,13 @@
       <button class="nav-button" type="button" data-workspace="resources">Resources</button>
       <button class="nav-button" type="button" data-workspace="diagnostics">Diagnostics</button>
       <button class="nav-button" type="button" data-workspace="session">Session</button>
+
+      <section id="input-recording" class="input-recording" aria-labelledby="input-recording-heading">
+        <h2 id="input-recording-heading">Input recording</h2>
+        <p id="input-recording-target">Connect a target to list its native inputs.</p>
+        <div id="input-recording-options" class="input-recording-options"></div>
+        <p class="input-recording-caution">Off by default because high-rate probes can affect the workload being measured.</p>
+      </section>
     </nav>
 
     <main class="workspace">
@@ -51,6 +58,7 @@
               <button class="performance-view-button current" type="button" data-performance-view="overview" aria-pressed="true">Overview</button>
               <button class="performance-view-button" type="button" data-performance-view="work" aria-pressed="false">Frame Work</button>
               <button class="performance-view-button" type="button" data-performance-view="responsiveness" aria-pressed="false">Responsiveness</button>
+              <button class="performance-view-button" type="button" data-performance-view="inputs" aria-pressed="false">Inputs</button>
             </div>
           </div>
           <dl class="metrics" aria-label="Performance statistics">
@@ -62,7 +70,7 @@
           </dl>
         </div>
 
-        <div class="plot-region">
+        <div id="frame-plot-region" class="plot-region">
           <div class="performance-legend" aria-label="Performance categories">
             <span id="plot-legend-1" class="category-badge cpu statistic-line">Host turn duration</span>
             <span id="plot-legend-2" class="category-badge cpu statistic-heavy">Frame budget</span>
@@ -91,7 +99,7 @@
           </div>
         </div>
 
-        <div class="range-toolbar" aria-label="Analysis scope">
+        <div id="analysis-range-toolbar" class="range-toolbar" aria-label="Analysis scope">
           <div>
             <strong id="range-label">Waiting for frames</strong>
             <span>Analysis follows the visible graph unless you left-drag a custom range.</span>
@@ -101,7 +109,6 @@
             <select id="view-filter" aria-label="Rendered view filter">
               <option value="all">All views</option>
             </select>
-            <button id="toggle-pointer-moves" type="button" aria-pressed="false" title="Record future pointer-movement profiling details and include their frames and responsiveness signals">Mouse moves ignored</button>
             <button id="clear-analysis-range" type="button" hidden>Clear range</button>
           </div>
         </div>
@@ -263,6 +270,52 @@
           <div class="responsiveness-note">
             Successful present means the platform presentation call accepted the image. Actual scan-out timing requires display-timing support and remains unavailable when the session reports it as unsupported.
           </div>
+        </div>
+
+        <div id="inputs-panels" class="performance-view-panel" hidden>
+          <div class="analysis-grid">
+            <section class="analysis-panel" aria-labelledby="input-summary-heading">
+              <div class="analysis-heading">
+                <div>
+                  <h2 id="input-summary-heading">Recorded native inputs</h2>
+                  <span>Only sources checked in the persistent Input recording sidebar produce samples</span>
+                </div>
+              </div>
+              <div class="table-scroll">
+                <table class="analysis-table">
+                  <thead><tr><th scope="col">Source</th><th scope="col">Events</th><th scope="col">p95 queue age</th><th scope="col">Maximum queue age</th></tr></thead>
+                  <tbody id="input-summary-body"></tbody>
+                </table>
+              </div>
+              <p id="input-summary-empty" class="empty-state">Enable an input source, then interact with the target.</p>
+            </section>
+
+            <section class="analysis-panel" aria-labelledby="input-chart-heading">
+              <div class="analysis-heading">
+                <div>
+                  <h2 id="input-chart-heading">Input event stream</h2>
+                  <span>Latest 300 samples by session time; every native source has a stable lane</span>
+                </div>
+              </div>
+              <canvas id="input-event-plot" class="input-event-plot" height="190" aria-label="Timeline of opt-in native input events grouped by source"></canvas>
+            </section>
+          </div>
+
+          <section class="analysis-panel input-event-log-panel" aria-labelledby="input-log-heading">
+            <div class="analysis-heading">
+              <div>
+                <h2 id="input-log-heading">Input event log</h2>
+                <span>Latest 250 retained samples; payload content, coordinates, key values, and device identities are never recorded</span>
+              </div>
+            </div>
+            <div class="table-scroll input-event-log">
+              <table class="analysis-table">
+                <thead><tr><th scope="col">Time</th><th scope="col">Source</th><th scope="col">Event</th><th scope="col">Queue age</th><th scope="col">Frame</th></tr></thead>
+                <tbody id="input-event-log-body"></tbody>
+              </table>
+            </div>
+            <p id="input-event-log-empty" class="empty-state">No opt-in native input events have been recorded.</p>
+          </section>
         </div>
       </section>
 

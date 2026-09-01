@@ -178,12 +178,12 @@ fn metric_category(label: &str, kind: EventKind, domain: TimingDomain) -> Metric
 fn metric_unit(label: &str, kind: EventKind) -> MetricUnit {
     if matches!(kind, EventKind::Span | EventKind::GpuSpanResolved) {
         MetricUnit::Duration
+    } else if label.ends_with("_ns") {
+        MetricUnit::Nanoseconds
     } else if kind != EventKind::Counter {
         MetricUnit::None
     } else if label.ends_with("_bytes") || label.ends_with(".bytes") {
         MetricUnit::Bytes
-    } else if label.ends_with("_ns") {
-        MetricUnit::Nanoseconds
     } else if label.ends_with("_area") || label.ends_with(".area") {
         MetricUnit::Area
     } else if label.ends_with(".epoch")
@@ -440,6 +440,18 @@ mod tests {
         assert_eq!(driver.unit, MetricUnit::Identifier);
         assert_eq!(driver.aggregation, MetricAggregation::Gauge);
         assert_ne!(driver.flags & LABEL_FLAG_RESOURCE, 0);
+    }
+
+    #[test]
+    fn libinput_event_age_instants_keep_their_nanosecond_unit() {
+        let descriptor = describe_label(
+            "input.libinput.pointer_motion.relative.queue_age_ns",
+            EventKind::Instant,
+            TimingDomain::Cpu,
+        );
+        assert_eq!(descriptor.category, MetricCategory::Input);
+        assert_eq!(descriptor.unit, MetricUnit::Nanoseconds);
+        assert_eq!(descriptor.aggregation, MetricAggregation::Event);
     }
 
     #[test]
