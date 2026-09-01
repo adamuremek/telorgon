@@ -20,6 +20,7 @@ incremental = true
 strip = "none"
 
 [workspace.dependencies]
+telorgon-macros = { version = "=0.1.1", path = "crates/telorgon-macros" }
 ash = { version = "0.38", default-features = false, features = ["std", "loaded"] }
 ash-window = "0.13"
 axum = { version = "0.8", features = ["ws"] }
@@ -59,4 +60,4 @@ windows = { version = "0.62.2", features = [
     "Win32_Security",
     "Win32_System_Threading",
 ] }
-telorgon-macros = { version = "=0.1.0", path = "crates/telorgon-macros" }
+
