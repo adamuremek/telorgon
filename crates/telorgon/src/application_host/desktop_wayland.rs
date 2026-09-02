@@ -447,6 +447,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         let mut pointer_motion_seen = false;
         let mut cursor_position_dirty = false;
         let mut pointer_primary_dirty = false;
+        let mut pointer_scene_dirty = false;
         #[cfg(feature = "profiler")]
         let mut latest_pointer_event_this_turn = None::<u64>;
         let mut other_work_seen = repaint;
@@ -599,6 +600,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     &mut frame_layers,
                                     &windows,
                                     pointer_position,
+                                    session_locked,
                                     MonotonicInstant::from_nanos(
                                         time_microseconds.saturating_mul(1_000),
                                     ),
@@ -690,6 +692,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     &mut frame_layers,
                                     &windows,
                                     pointer_position,
+                                    session_locked,
                                     MonotonicInstant::from_nanos(
                                         time_microseconds.saturating_mul(1_000),
                                     ),
@@ -775,11 +778,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                         work_area,
                                         &config,
                                     )?;
+                                    pointer_scene_dirty = true;
                                 }
                                 DecorationHit::Minimize => {
                                     if let Some(window) = windows.get_mut(&surface) {
                                         window.minimized = true;
                                         stacking_order.retain(|candidate| *candidate != surface);
+                                        pointer_scene_dirty = true;
                                     }
                                 }
                                 DecorationHit::ShellAction(action) => {
@@ -1303,6 +1308,18 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             )
                         },
                     );
+                    let server_decorated = role == SurfaceRole::XdgToplevel
+                        && wayland.decoration_mode(surface)
+                            != Some(crate::compositor_wayland::DecorationMode::ClientSide);
+                    let pointer_geometry_changed =
+                        !matches!(role, SurfaceRole::Cursor | SurfaceRole::DragIcon)
+                            && previous_window.is_none_or(|window| {
+                                window.role != role
+                                    || window.position != reconciled_position
+                                    || window.size != image.extent
+                                    || window.minimized != minimized
+                                    || window.server_decorated != server_decorated
+                            });
                     windows.insert(
                         surface,
                         ClientWindow {
@@ -1310,9 +1327,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             role,
                             parent,
                             offset,
-                            server_decorated: role == SurfaceRole::XdgToplevel
-                                && wayland.decoration_mode(surface)
-                                    != Some(crate::compositor_wayland::DecorationMode::ClientSide),
+                            server_decorated,
                             position: reconciled_position,
                             size: image.extent,
                             requested_size,
@@ -1333,6 +1348,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     if is_new && !matches!(role, SurfaceRole::Cursor | SurfaceRole::DragIcon) {
                         stacking_order.push(surface);
                     }
+                    pointer_scene_dirty |= pointer_geometry_changed;
                     if session_locked && role == SurfaceRole::SessionLock {
                         wayland
                             .set_keyboard_focus(1, Some(surface), display.next_serial())
@@ -1365,9 +1381,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         touch_targets.clear();
                         wayland.touch_cancel(1).map_err(app_error)?;
                     }
-                    if pointer_focus == Some(surface) {
-                        pointer_focus = None;
-                    }
+                    pointer_scene_dirty = true;
                     repaint = true;
                 }
                 CompositorAction::ActivateSurface {
@@ -1382,6 +1396,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         stacking_order.retain(|candidate| *candidate != surface);
                         stacking_order.push(surface);
                         focus_toplevel(&display, &mut wayland, &windows, Some(surface))?;
+                        pointer_scene_dirty = true;
                         repaint = true;
                     }
                 }
@@ -1415,6 +1430,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         work_area,
                         &config,
                     )?;
+                    pointer_scene_dirty = true;
                     repaint = true;
                 }
                 CompositorAction::FullscreenToplevel {
@@ -1430,12 +1446,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         extent,
                         &config,
                     )?;
+                    pointer_scene_dirty = true;
                     repaint = true;
                 }
                 CompositorAction::MinimizeToplevel(surface) => {
                     if let Some(window) = windows.get_mut(&surface) {
                         window.minimized = true;
                         stacking_order.retain(|candidate| *candidate != surface);
+                        pointer_scene_dirty = true;
                         repaint = true;
                     }
                 }
@@ -1463,12 +1481,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         touch_targets.clear();
                         wayland.touch_cancel(1).map_err(app_error)?;
                     }
+                    pointer_scene_dirty = true;
                     repaint = true;
                 }
                 CompositorAction::SessionLockCancelled(lock) => {
                     if pending_session_lock == Some(lock) && !wayland.session_locked() {
                         pending_session_lock = None;
                         session_locked = false;
+                        pointer_scene_dirty = true;
                         repaint = true;
                     }
                 }
@@ -1477,19 +1497,42 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         pending_session_lock = None;
                     }
                     session_locked = false;
+                    pointer_scene_dirty = true;
                     repaint = true;
                 }
                 CompositorAction::StartDrag {
                     seat: _,
                     origin: _,
                     icon: _,
+                } => repaint = true,
+                CompositorAction::FinishDrag { icon: _ } => {
+                    pointer_scene_dirty = true;
+                    repaint = true;
                 }
-                | CompositorAction::FinishDrag { icon: _ } => repaint = true,
                 CompositorAction::RepaintOutput(_) => repaint = true,
                 CompositorAction::ImportBuffer(_)
                 | CompositorAction::ReleaseBuffer(_)
                 | CompositorAction::DisconnectClient(_) => {}
             }
+        }
+
+        if pointer_scene_dirty
+            && window_interaction.is_none()
+            && (!wayland.drag_active(1) || wayland.drag_touch_slot(1).is_some())
+        {
+            repaint |= reconcile_pointer_state(
+                &display,
+                &mut wayland,
+                &mut frame_layers,
+                &windows,
+                &stacking_order,
+                session_locked,
+                &mut pointer_focus,
+                pointer_position,
+                &config,
+                &icon_layers,
+                runtime_now,
+            )?;
         }
 
         flush_resize_configures(

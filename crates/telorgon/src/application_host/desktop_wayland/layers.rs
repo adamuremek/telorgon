@@ -119,20 +119,24 @@ pub(super) fn route_frame_pointer_motion(
     frames: &mut BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
     windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
     position: PointF,
+    session_locked: bool,
     now: MonotonicInstant,
 ) -> bool {
     let mut repaint = false;
     for (surface, frame) in frames {
-        let local = windows.get(surface).map_or(
-            PointF {
-                x: -1_000_000.0,
-                y: -1_000_000.0,
-            },
-            |window| PointF {
-                x: position.x - window.position.x as f32,
-                y: position.y - window.position.y as f32,
-            },
-        );
+        let local = windows
+            .get(surface)
+            .filter(|window| !window.minimized && !session_locked)
+            .map_or(
+                PointF {
+                    x: -1_000_000.0,
+                    y: -1_000_000.0,
+                },
+                |window| PointF {
+                    x: position.x - window.position.x as f32,
+                    y: position.y - window.position.y as f32,
+                },
+            );
         repaint |= frame.layer.pointer_motion(local, now);
     }
     repaint

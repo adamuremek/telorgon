@@ -337,37 +337,40 @@ impl VulkanScanout {
         self.device
             .apply_scene_delta(&mut self.scene, &delta)
             .map_err(app_error)?;
-        let target = self
-            .targets
-            .get_mut(target_index)
-            .ok_or_else(|| AppError::new("Vulkan scanout target index is invalid"))?;
-        let target = target.target();
         let clear = self.scene.background();
-        let mut frame = self.device.begin_owned_frame().map_err(app_error)?;
-        {
-            let mut context = frame.context_mut();
-            self.device
-                .render(
-                    &mut self.scene,
-                    &mut context,
-                    &target,
-                    &RenderRequest {
-                        force: true,
-                        load: if render_damage.is_some() {
-                            TargetLoad::Preserve
-                        } else {
-                            TargetLoad::Clear(clear)
+        let receipt = {
+            let target = self
+                .targets
+                .get_mut(target_index)
+                .ok_or_else(|| AppError::new("Vulkan scanout target index is invalid"))?
+                .target();
+            let mut frame = self.device.begin_owned_frame().map_err(app_error)?;
+            {
+                let mut context = frame.context_mut();
+                self.device
+                    .render(
+                        &mut self.scene,
+                        &mut context,
+                        &target,
+                        &RenderRequest {
+                            force: true,
+                            load: if render_damage.is_some() {
+                                TargetLoad::Preserve
+                            } else {
+                                TargetLoad::Clear(clear)
+                            },
+                            store: TargetStore::Store,
+                            region: render_damage,
                         },
-                        store: TargetStore::Store,
-                        region: render_damage,
-                    },
-                )
-                .map_err(app_error)?;
-        }
-        let receipt = frame
-            .finish()
-            .and_then(|frame| frame.submit())
-            .map_err(app_error)?;
+                    )
+                    .map_err(app_error)?;
+            }
+            frame
+                .finish()
+                .and_then(|frame| frame.submit())
+                .map_err(app_error)?
+        };
+        self.targets[target_index].mark_initialized();
         self.target_versions[target_index] = self.content_version;
         self.completion_worker.submit(target_index, receipt)
     }

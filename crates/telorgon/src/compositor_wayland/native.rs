@@ -1361,22 +1361,28 @@ impl NativeState {
             .ok_or_else(|| NativeCompositorError::new("unknown seat"))?
             .pointer_focus;
         if let Some(previous) = previous {
-            let surface_resource = self.surface_resource(previous.surface)?;
-            for resource in self.resources_for_client(
-                previous.client,
-                |kind| matches!(kind, ResourceKind::Pointer(candidate) if candidate == seat_id),
-            )? {
-                self.post_event(
-                    resource,
-                    "wl_pointer",
-                    "leave",
-                    &mut [
-                        ffi::wl_argument { u: serial },
-                        ffi::wl_argument {
-                            o: surface_resource,
-                        },
-                    ],
-                )?;
+            if let Some(surface_resource) = self
+                .resource_for_kind(
+                    |kind| matches!(kind, ResourceKind::Surface(candidate) if candidate == previous.surface),
+                )?
+                .map(|resource| resource.identity() as *mut ffi::wl_resource)
+            {
+                for resource in self.resources_for_client(
+                    previous.client,
+                    |kind| matches!(kind, ResourceKind::Pointer(candidate) if candidate == seat_id),
+                )? {
+                    self.post_event(
+                        resource,
+                        "wl_pointer",
+                        "leave",
+                        &mut [
+                            ffi::wl_argument { u: serial },
+                            ffi::wl_argument {
+                                o: surface_resource,
+                            },
+                        ],
+                    )?;
+                }
             }
             self.clear_selection_for_client(seat_id, previous.client)?;
         }
@@ -1430,9 +1436,9 @@ impl NativeState {
         };
         let seat = self.core.seats.get_mut(&seat_id).expect("seat checked");
         seat.pointer_focus = focus;
-        if focus.is_none() {
-            seat.cursor = crate::compositor_wayland::CursorImage::TelorgonDefault;
-        }
+        // A client cursor is scoped to the focus that authorized it. Do not retain it while the
+        // new focus decides which cursor to install, or after the old surface has been destroyed.
+        seat.cursor = crate::compositor_wayland::CursorImage::TelorgonDefault;
         self.update_pointer_constraints(seat_id, focus.map(|focus| focus.surface))?;
         Ok(())
     }

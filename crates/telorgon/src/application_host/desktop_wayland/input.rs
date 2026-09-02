@@ -12,6 +12,13 @@ pub(super) enum DecorationHit {
     ShellAction(crate::ShellActionId),
 }
 
+fn pointer_focus_requires_transition(
+    seat_focus: Option<WaylandSurfaceId>,
+    next: Option<WaylandSurfaceId>,
+) -> bool {
+    seat_focus != next
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_pointer_focus(
     display: &Display,
@@ -24,16 +31,60 @@ pub(super) fn update_pointer_focus(
     config: &LinuxDesktopConfig,
 ) -> AppResult<()> {
     let next = hit_test_surface(windows, stacking_order, position, config, session_locked);
-    if next != *current {
+    let seat_focus = wayland
+        .core()
+        .seats
+        .get(&1)
+        .and_then(|seat| seat.pointer_focus)
+        .map(|focus| focus.surface);
+    if pointer_focus_requires_transition(seat_focus, next) {
         let local = next.map_or(position, |surface| {
             surface_local_position(windows, surface, position, config)
         });
         wayland
             .set_pointer_focus(1, next, local, display.next_serial())
             .map_err(app_error)?;
-        *current = next;
     }
+    *current = next;
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn reconcile_pointer_state(
+    display: &Display,
+    wayland: &mut NativeCompositor<'_>,
+    frames: &mut BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    stacking_order: &[WaylandSurfaceId],
+    session_locked: bool,
+    current: &mut Option<WaylandSurfaceId>,
+    position: PointF,
+    config: &LinuxDesktopConfig,
+    icons: &[(String, Layer)],
+    now: MonotonicInstant,
+) -> AppResult<bool> {
+    update_pointer_focus(
+        display,
+        wayland,
+        windows,
+        stacking_order,
+        session_locked,
+        current,
+        position,
+        config,
+    )?;
+    let repaint = route_frame_pointer_motion(frames, windows, position, session_locked, now);
+    set_decoration_pointer_cursor(
+        wayland,
+        frames,
+        windows,
+        stacking_order,
+        *current,
+        position,
+        config,
+        icons,
+    );
+    Ok(repaint)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -387,5 +438,21 @@ pub(super) fn normalized_output_position(normalized: PointF, extent: SizeI) -> P
     PointF {
         x: normalized.x.clamp(0.0, 1.0) * (extent.width - 1) as f32,
         y: normalized.y.clamp(0.0, 1.0) * (extent.height - 1) as f32,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seat_focus_is_authoritative_when_the_local_cache_is_stale() {
+        let surface = WaylandSurfaceId::from_raw(7).unwrap();
+        let stale_local_cache = Some(surface);
+        let seat_focus = None;
+        let next = Some(surface);
+
+        assert_eq!(stale_local_cache, next);
+        assert!(pointer_focus_requires_transition(seat_focus, next));
     }
 }

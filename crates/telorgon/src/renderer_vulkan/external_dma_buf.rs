@@ -285,6 +285,14 @@ mod linux {
     use crate::renderer_vulkan::target::{VulkanImageState, VulkanTarget};
     use crate::renderer_vulkan::{HostedImageUse, VulkanDevice};
 
+    pub(super) fn scanout_initial_layout(initialized: bool) -> vk::ImageLayout {
+        if initialized {
+            vk::ImageLayout::GENERAL
+        } else {
+            vk::ImageLayout::UNDEFINED
+        }
+    }
+
     #[derive(Debug)]
     pub struct VulkanDmaBufPlane {
         pub memory: OwnedFd,
@@ -371,6 +379,7 @@ mod linux {
         memory: vk::DeviceMemory,
         format: vk::Format,
         extent: vk::Extent2D,
+        initialized: bool,
     }
 
     impl VulkanDmaBufScanoutTarget {
@@ -570,6 +579,7 @@ mod linux {
                 memory: guard.memory,
                 format: candidate.format,
                 extent: extent_vk,
+                initialized: false,
             };
             guard.armed = false;
             Ok(result)
@@ -599,7 +609,7 @@ mod linux {
                     ..crate::render::RenderTargetInfo::full(extent)
                 },
                 initial_state: VulkanImageState {
-                    layout: vk::ImageLayout::GENERAL,
+                    layout: scanout_initial_layout(self.initialized),
                     stage: vk::PipelineStageFlags2::NONE,
                     access: vk::AccessFlags2::NONE,
                 },
@@ -612,6 +622,12 @@ mod linux {
                 final_queue_family: vk::QUEUE_FAMILY_FOREIGN_EXT,
                 _borrow: PhantomData,
             }
+        }
+
+        /// Records that a submitted frame transitioned this imported image out of its creation
+        /// layout. Subsequent acquisitions must preserve the KMS-owned contents in `GENERAL`.
+        pub(crate) fn mark_initialized(&mut self) {
+            self.initialized = true;
         }
     }
 
@@ -1514,6 +1530,19 @@ mod tests {
         assert_eq!(
             state.begin().unwrap_err().kind(),
             RenderErrorKind::HostContract
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn scanout_layout_discards_only_before_the_first_submission() {
+        assert_eq!(
+            linux::scanout_initial_layout(false),
+            vk::ImageLayout::UNDEFINED
+        );
+        assert_eq!(
+            linux::scanout_initial_layout(true),
+            vk::ImageLayout::GENERAL
         );
     }
 }
