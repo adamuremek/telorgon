@@ -5,6 +5,8 @@ pub struct RenderRequest {
     pub force: bool,
     pub load: TargetLoad,
     pub store: TargetStore,
+    /// Optional target-space damage/render clip. This does not replace the target's viewport
+    /// mapping in [`crate::render::RenderTargetInfo::region`].
     pub region: Option<RectI>,
 }
 

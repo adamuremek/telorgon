@@ -64,11 +64,10 @@ impl SoftwareScanout {
                 &target,
                 &RenderRequest {
                     force: true,
-                    load: if render_damage.is_some() {
-                        TargetLoad::Preserve
-                    } else {
-                        TargetLoad::Clear(clear)
-                    },
+                    // The software surface is retained by this scanout path. Clearing redraws
+                    // only `render_damage`; pixels outside it remain in the owned framebuffer.
+                    // `Preserve` is reserved for host-provided targets and is unsupported here.
+                    load: TargetLoad::Clear(clear),
                     store: TargetStore::Store,
                     region: render_damage,
                 },

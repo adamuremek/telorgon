@@ -89,8 +89,13 @@ impl RenderBackend for VulkanDevice {
                 "Vulkan records one target per owned frame",
             ));
         }
-        let region = request.region.unwrap_or(target.info.region);
-        validate_region(region, target)?;
+        // The target region is the viewport that maps the logical scene into the target. A
+        // request region is only a damage/render clip inside that viewport. Treating damage as
+        // the viewport scales the whole scene into the damaged rectangle (and, for a compositor,
+        // produces an apparent desktop-within-a-window feedback image).
+        let target_region = target.info.region;
+        let render_region = request.region.unwrap_or(target_region);
+        validate_render_region(render_region, target)?;
         if target.info.sample_count != 1 {
             return Err(unsupported("Vulkan supports one sample per pixel"));
         }
@@ -125,7 +130,7 @@ impl RenderBackend for VulkanDevice {
         };
         let buffer_allocations = plan.buffer_allocations;
         let buffer_growths = plan.buffer_growths;
-        let view_mapping = ViewMapping::new(scene.extent, region);
+        let view_mapping = ViewMapping::new(scene.extent, target_region);
         let view = gpu_view(scene, target, view_mapping);
         let staged = {
             #[cfg(feature = "instrumentation")]
@@ -220,7 +225,7 @@ impl RenderBackend for VulkanDevice {
             .load_op(load_op)
             .store_op(store_op)
             .clear_value(clear);
-        let render_area = rect2d(region);
+        let render_area = rect2d(render_region);
         #[cfg(feature = "instrumentation")]
         frame.core.write_profiler_timestamp(
             PROFILER_TIMESTAMP_RENDER_BEGIN,
@@ -249,10 +254,10 @@ impl RenderBackend for VulkanDevice {
                 frame.core.command_buffer,
                 0,
                 &[vk::Viewport {
-                    x: region.x as f32,
-                    y: region.y as f32,
-                    width: region.width as f32,
-                    height: region.height as f32,
+                    x: target_region.x as f32,
+                    y: target_region.y as f32,
+                    width: target_region.width as f32,
+                    height: target_region.height as f32,
                     min_depth: 0.0,
                     max_depth: 1.0,
                 }],
@@ -264,7 +269,7 @@ impl RenderBackend for VulkanDevice {
         #[cfg(feature = "instrumentation")]
         let draws_span = crate::profiler::span!("draws.record");
         for batch in &scene.batches {
-            let scissor = batch_scissor(scene, batch, view_mapping);
+            let scissor = batch_scissor(scene, batch, view_mapping, render_region);
             if scissor.extent.width == 0 || scissor.extent.height == 0 {
                 continue;
             }
@@ -402,7 +407,7 @@ impl RenderBackend for VulkanDevice {
             batches: draw_count,
             draws: draw_count,
             dispatches: 0,
-            damage_area: region.width as f32 * region.height as f32,
+            damage_area: render_region.width as f32 * render_region.height as f32,
         };
         #[cfg(feature = "instrumentation")]
         {
@@ -1095,20 +1100,51 @@ impl ViewMapping {
     }
 }
 
-fn batch_scissor(scene: &VulkanScene, batch: &DrawBatch, mapping: ViewMapping) -> vk::Rect2D {
-    let clipped = if batch.key.clip.0 == 0 {
-        return rect2d(mapping.target_region);
+fn batch_scissor(
+    scene: &VulkanScene,
+    batch: &DrawBatch,
+    mapping: ViewMapping,
+    render_region: RectI,
+) -> vk::Rect2D {
+    let scene_scissor = if batch.key.clip.0 == 0 {
+        rect2d(mapping.target_region)
     } else {
-        scene
+        let clipped = scene
             .clips
             .iter()
             .find(|clip| clip.id == batch.key.clip)
-            .map(|clip| clip.rect)
+            .map(|clip| clip.rect);
+        let Some(rect) = clipped else {
+            return empty_scissor(render_region);
+        };
+        mapping.logical_rect_to_scissor(rect)
     };
-    let Some(rect) = clipped else {
-        return empty_scissor(mapping.target_region);
-    };
-    mapping.logical_rect_to_scissor(rect)
+    intersect_scissor(scene_scissor, render_region)
+}
+
+fn intersect_scissor(scissor: vk::Rect2D, region: RectI) -> vk::Rect2D {
+    let left = scissor.offset.x.max(region.x);
+    let top = scissor.offset.y.max(region.y);
+    let right = scissor
+        .offset
+        .x
+        .saturating_add(scissor.extent.width as i32)
+        .min(region.right());
+    let bottom = scissor
+        .offset
+        .y
+        .saturating_add(scissor.extent.height as i32)
+        .min(region.bottom());
+    if right <= left || bottom <= top {
+        return empty_scissor(region);
+    }
+    vk::Rect2D {
+        offset: vk::Offset2D { x: left, y: top },
+        extent: vk::Extent2D {
+            width: (right - left) as u32,
+            height: (bottom - top) as u32,
+        },
+    }
 }
 
 fn empty_scissor(region: RectI) -> vk::Rect2D {
@@ -1158,17 +1194,18 @@ fn rect2d(region: RectI) -> vk::Rect2D {
     }
 }
 
-fn validate_region(region: RectI, target: &VulkanTarget<'_>) -> RenderResult<()> {
-    if region.x < 0
-        || region.y < 0
+fn validate_render_region(region: RectI, target: &VulkanTarget<'_>) -> RenderResult<()> {
+    let target_region = target.info.region;
+    if region.x < target_region.x
+        || region.y < target_region.y
         || region.width <= 0
         || region.height <= 0
-        || region.x.saturating_add(region.width) > target.extent.width as i32
-        || region.y.saturating_add(region.height) > target.extent.height as i32
+        || region.right() > target_region.right()
+        || region.bottom() > target_region.bottom()
     {
         return Err(RenderError::new(
             RenderErrorKind::InvalidTarget,
-            "Vulkan render region is outside the target",
+            "Vulkan render region is outside the target region",
         ));
     }
     Ok(())
@@ -1299,6 +1336,49 @@ mod tests {
                 width: 200,
                 height: 75
             }
+        );
+    }
+
+    #[test]
+    fn damage_clips_the_full_viewport_without_remapping_the_scene() {
+        let target_region = RectI {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        };
+        let damage = RectI {
+            x: 320,
+            y: 180,
+            width: 800,
+            height: 600,
+        };
+        let mapping = ViewMapping::new(
+            SizeF {
+                width: 1920.0,
+                height: 1080.0,
+            },
+            target_region,
+        );
+
+        // The scene still maps one-to-one across the complete output. Damage only restricts
+        // which pixels are touched; it must never become a window-sized viewport.
+        assert_eq!(
+            mapping.logical_rect_to_scissor(mapping.logical_bounds()),
+            rect2d(target_region)
+        );
+        assert_eq!(
+            intersect_scissor(rect2d(target_region), damage),
+            rect2d(damage)
+        );
+        assert_eq!(
+            mapping.logical_rect_to_scissor(RectF {
+                x: 320.0,
+                y: 180.0,
+                width: 800.0,
+                height: 600.0,
+            }),
+            rect2d(damage)
         );
     }
 }
