@@ -1720,7 +1720,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         } else {
             None
         };
-        display.event_loop().dispatch(wait).map_err(app_error)?;
+        display.dispatch_and_flush(wait).map_err(app_error)?;
 
         if seat_ready.swap(false, Ordering::AcqRel) {
             seat.dispatch(0).map_err(app_error)?;
@@ -2773,7 +2773,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         .map_err(app_error)?;
                 }
             }
-            display.flush_clients();
             let animation_now = MonotonicInstant::from_nanos(
                 start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
             );

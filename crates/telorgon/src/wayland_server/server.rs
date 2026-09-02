@@ -68,6 +68,17 @@ impl Display {
         unsafe { ffi::wl_display_flush_clients(self.raw.as_ptr()) };
     }
 
+    /// Flushes queued events, dispatches one event-loop turn, and immediately flushes replies.
+    ///
+    /// Keeping both flushes at this boundary prevents the loop from blocking with events queued
+    /// by either the previous owner turn or newly dispatched client requests.
+    pub fn dispatch_and_flush(&self, timeout: Option<Duration>) -> ServerResult<()> {
+        self.flush_clients();
+        self.event_loop().dispatch(timeout)?;
+        self.flush_clients();
+        Ok(())
+    }
+
     pub fn current_serial(&self) -> u32 {
         unsafe { ffi::wl_display_get_serial(self.raw.as_ptr()) }
     }
@@ -483,6 +494,26 @@ fn native_zero(
 mod tests {
     use super::*;
 
+    use std::io::{Read, Write};
+    use std::os::fd::IntoRawFd;
+    use std::os::unix::net::UnixStream;
+
+    fn display_request(object: u32, opcode: u16, new_id: u32) -> [u8; 12] {
+        let mut bytes = [0_u8; 12];
+        bytes[0..4].copy_from_slice(&object.to_ne_bytes());
+        bytes[4..8].copy_from_slice(&(((12_u32) << 16) | u32::from(opcode)).to_ne_bytes());
+        bytes[8..12].copy_from_slice(&new_id.to_ne_bytes());
+        bytes
+    }
+
+    unsafe extern "C" fn ignore_global_bind(
+        _client: *mut ffi::wl_client,
+        _data: *mut c_void,
+        _version: u32,
+        _id: u32,
+    ) {
+    }
+
     #[test]
     fn timeout_conversion_rejects_values_beyond_native_range_without_dispatching() {
         let oversized = Duration::from_millis(i32::MAX as u64 + 1);
@@ -494,5 +525,49 @@ mod tests {
         fn assert_not_copy<T>() {}
         assert_not_copy::<Display>();
         assert_not_copy::<EventSource>();
+    }
+
+    #[test]
+    fn late_client_registry_sync_is_flushed_without_an_external_wake() {
+        let display = Display::new().unwrap();
+        let _global = unsafe {
+            display.create_global(
+                &ffi::wl_compositor_interface,
+                1,
+                std::ptr::null_mut(),
+                Some(ignore_global_bind),
+            )
+        }
+        .unwrap();
+        let (mut client_socket, server_socket) = UnixStream::pair().unwrap();
+        let client =
+            unsafe { ffi::wl_client_create(display.raw.as_ptr(), server_socket.into_raw_fd()) };
+        assert!(!client.is_null());
+
+        client_socket.write_all(&display_request(1, 1, 2)).unwrap();
+        client_socket.write_all(&display_request(1, 0, 3)).unwrap();
+
+        display.dispatch_and_flush(Some(Duration::ZERO)).unwrap();
+
+        client_socket
+            .set_read_timeout(Some(Duration::from_millis(250)))
+            .unwrap();
+        let mut replies = [0_u8; 48];
+        client_socket.read_exact(&mut replies).unwrap();
+
+        let registry_object = u32::from_ne_bytes(replies[0..4].try_into().unwrap());
+        let registry_header = u32::from_ne_bytes(replies[4..8].try_into().unwrap());
+        let interface_length = u32::from_ne_bytes(replies[12..16].try_into().unwrap());
+        assert_eq!(registry_object, 2);
+        assert_eq!(registry_header & 0xffff, 0);
+        assert_eq!(registry_header >> 16, 36);
+        assert_eq!(interface_length, 14);
+        assert_eq!(&replies[16..29], b"wl_compositor");
+
+        let callback_object = u32::from_ne_bytes(replies[36..40].try_into().unwrap());
+        let callback_header = u32::from_ne_bytes(replies[40..44].try_into().unwrap());
+        assert_eq!(callback_object, 3);
+        assert_eq!(callback_header & 0xffff, 0);
+        assert_eq!(callback_header >> 16, 12);
     }
 }

@@ -176,6 +176,7 @@ unsafe extern "C" {
         uid: *mut u32,
         gid: *mut u32,
     );
+    pub fn wl_client_create(display: *mut wl_display, fd: c_int) -> *mut wl_client;
     pub fn wl_client_destroy(client: *mut wl_client);
     pub fn wl_client_flush(client: *mut wl_client);
     pub fn wl_client_post_no_memory(client: *mut wl_client);
