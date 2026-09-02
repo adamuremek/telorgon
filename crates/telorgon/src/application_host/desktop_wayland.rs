@@ -1323,11 +1323,47 @@ struct ClientWindow {
 enum WindowInteraction {
     Move {
         surface: WaylandSurfaceId,
+        pointer_start: PointF,
+        position_start: PointI,
     },
     Resize {
         surface: WaylandSurfaceId,
         edge: ResizeEdge,
+        pointer_start: PointF,
+        position_start: PointI,
+        size_start: SizeI,
     },
+}
+
+impl WindowInteraction {
+    fn begin_move(
+        windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+        surface: WaylandSurfaceId,
+        pointer_start: PointF,
+    ) -> Option<Self> {
+        let window = windows.get(&surface)?;
+        Some(Self::Move {
+            surface,
+            pointer_start,
+            position_start: window.position,
+        })
+    }
+
+    fn begin_resize(
+        windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+        surface: WaylandSurfaceId,
+        edge: ResizeEdge,
+        pointer_start: PointF,
+    ) -> Option<Self> {
+        let window = windows.get(&surface)?;
+        Some(Self::Resize {
+            surface,
+            edge,
+            pointer_start,
+            position_start: window.position,
+            size_start: window.requested_size,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1807,7 +1843,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     &mut wayland,
                                     &mut windows,
                                     interaction,
-                                    delta,
+                                    pointer_position,
                                     extent,
                                     &config,
                                 )?;
@@ -1884,10 +1920,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             constraint.kind == PointerConstraintKind::Locked
                         }) {
                             let previous_position = pointer_position;
-                            let delta = PointF {
-                                x: proposed.x - pointer_position.x,
-                                y: proposed.y - pointer_position.y,
-                            };
                             pointer_position = constraint.as_ref().map_or(proposed, |constraint| {
                                 constrain_pointer(
                                     &windows,
@@ -1902,7 +1934,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     &mut wayland,
                                     &mut windows,
                                     interaction,
-                                    delta,
+                                    pointer_position,
                                     extent,
                                     &config,
                                 )?;
@@ -1984,11 +2016,19 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             focus_toplevel(&display, &mut wayland, &windows, Some(surface))?;
                             match hit {
                                 DecorationHit::Titlebar => {
-                                    window_interaction = Some(WindowInteraction::Move { surface });
+                                    window_interaction = WindowInteraction::begin_move(
+                                        &windows,
+                                        surface,
+                                        pointer_position,
+                                    );
                                 }
                                 DecorationHit::Resize(edge) => {
-                                    window_interaction =
-                                        Some(WindowInteraction::Resize { surface, edge });
+                                    window_interaction = WindowInteraction::begin_resize(
+                                        &windows,
+                                        surface,
+                                        edge,
+                                        pointer_position,
+                                    );
                                 }
                                 DecorationHit::Close => {
                                     wayland.close_toplevel(surface).map_err(app_error)?;
@@ -2456,6 +2496,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         (None, PointI::default(), position)
                     };
                     let is_new = !windows.contains_key(&surface);
+                    let requested_size = retained_requested_size(
+                        windows.get(&surface).map(|window| window.requested_size),
+                        image.extent,
+                    );
                     let (
                         restore_geometry,
                         maximized,
@@ -2490,7 +2534,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     != Some(crate::compositor_wayland::DecorationMode::ClientSide),
                             position,
                             size: image.extent,
-                            requested_size: image.extent,
+                            requested_size,
                             restore_geometry,
                             maximized,
                             fullscreen,
@@ -2520,7 +2564,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     stacking_order.retain(|candidate| *candidate != surface);
                     if matches!(
                         window_interaction,
-                        Some(WindowInteraction::Move { surface: candidate }
+                        Some(WindowInteraction::Move {
+                            surface: candidate,
+                            ..
+                        }
                             | WindowInteraction::Resize {
                                 surface: candidate,
                                 ..
@@ -2556,14 +2603,20 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     if windows.get(&surface).is_some_and(|window| {
                         !window.maximized && !window.fullscreen && !window.minimized
                     }) {
-                        window_interaction = Some(WindowInteraction::Move { surface });
+                        window_interaction =
+                            WindowInteraction::begin_move(&windows, surface, pointer_position);
                     }
                 }
                 CompositorAction::ResizeToplevel { surface, edge } => {
                     if windows.get(&surface).is_some_and(|window| {
                         !window.maximized && !window.fullscreen && !window.minimized
                     }) {
-                        window_interaction = Some(WindowInteraction::Resize { surface, edge });
+                        window_interaction = WindowInteraction::begin_resize(
+                            &windows,
+                            surface,
+                            edge,
+                            pointer_position,
+                        );
                     }
                 }
                 CompositorAction::MaximizeToplevel { surface, maximized } => {
@@ -3759,84 +3812,126 @@ fn apply_window_interaction(
     wayland: &mut NativeCompositor<'_>,
     windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
     interaction: WindowInteraction,
-    delta: PointF,
+    pointer_position: PointF,
     output: SizeI,
     config: &LinuxDesktopConfig,
 ) -> AppResult<()> {
-    let (surface, edge) = match interaction {
-        WindowInteraction::Move { surface } => (surface, None),
-        WindowInteraction::Resize { surface, edge } => (surface, Some(edge)),
-    };
-    let Some(window) = windows.get_mut(&surface) else {
-        return Ok(());
-    };
-    let delta = PointI {
-        x: delta.x.round() as i32,
-        y: delta.y.round() as i32,
-    };
-    let Some(edge) = edge else {
-        window.position.x = window
-            .position
-            .x
-            .saturating_add(delta.x)
-            .clamp(-window.size.width + 32, output.width - 32);
-        window.position.y = window
-            .position
-            .y
-            .saturating_add(delta.y)
-            .clamp(0, output.height - config.titlebar_height.max(1));
-        return Ok(());
-    };
-    let mut size = window.requested_size;
-    let minimum_width = 64;
-    let minimum_height = 48;
+    match interaction {
+        WindowInteraction::Move {
+            surface,
+            pointer_start,
+            position_start,
+        } => {
+            let Some(window) = windows.get_mut(&surface) else {
+                return Ok(());
+            };
+            let delta = rounded_pointer_delta(pointer_start, pointer_position);
+            window.position.x = position_start
+                .x
+                .saturating_add(delta.x)
+                .clamp(32_i32.saturating_sub(window.size.width), output.width - 32);
+            window.position.y = position_start
+                .y
+                .saturating_add(delta.y)
+                .clamp(0, output.height - config.titlebar_height.max(1));
+        }
+        WindowInteraction::Resize {
+            surface,
+            edge,
+            pointer_start,
+            position_start,
+            size_start,
+        } => {
+            let delta = rounded_pointer_delta(pointer_start, pointer_position);
+            let (position, size) =
+                resize_drag_geometry(position_start, size_start, edge, delta, output);
+            let Some(window) = windows.get_mut(&surface) else {
+                return Ok(());
+            };
+            window.position = position;
+            if size != window.requested_size {
+                window.requested_size = size;
+                wayland
+                    .configure_toplevel(
+                        surface,
+                        Some(size),
+                        window_toplevel_states(window, true, true),
+                    )
+                    .map_err(app_error)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn retained_requested_size(previous: Option<SizeI>, committed: SizeI) -> SizeI {
+    previous.unwrap_or(committed)
+}
+
+fn rounded_pointer_delta(start: PointF, current: PointF) -> PointI {
+    PointI {
+        x: (current.x - start.x).round() as i32,
+        y: (current.y - start.y).round() as i32,
+    }
+}
+
+fn resize_drag_geometry(
+    position_start: PointI,
+    size_start: SizeI,
+    edge: ResizeEdge,
+    delta: PointI,
+    output: SizeI,
+) -> (PointI, SizeI) {
+    const MINIMUM_WIDTH: i32 = 64;
+    const MINIMUM_HEIGHT: i32 = 48;
+
+    let mut position = position_start;
+    let mut size = size_start;
+    let maximum_width = output.width.max(MINIMUM_WIDTH);
+    let maximum_height = output.height.max(MINIMUM_HEIGHT);
     if matches!(
         edge,
         ResizeEdge::Left | ResizeEdge::TopLeft | ResizeEdge::BottomLeft
     ) {
-        let next = size.width.saturating_sub(delta.x).max(minimum_width);
-        window.position.x = window
-            .position
+        size.width = size_start
+            .width
+            .saturating_sub(delta.x)
+            .clamp(MINIMUM_WIDTH, maximum_width);
+        position.x = position_start
             .x
-            .saturating_add(size.width.saturating_sub(next));
-        size.width = next;
+            .saturating_add(size_start.width.saturating_sub(size.width));
     }
     if matches!(
         edge,
         ResizeEdge::Right | ResizeEdge::TopRight | ResizeEdge::BottomRight
     ) {
-        size.width = size.width.saturating_add(delta.x).max(minimum_width);
+        size.width = size_start
+            .width
+            .saturating_add(delta.x)
+            .clamp(MINIMUM_WIDTH, maximum_width);
     }
     if matches!(
         edge,
         ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight
     ) {
-        let next = size.height.saturating_sub(delta.y).max(minimum_height);
-        window.position.y = window
-            .position
+        size.height = size_start
+            .height
+            .saturating_sub(delta.y)
+            .clamp(MINIMUM_HEIGHT, maximum_height);
+        position.y = position_start
             .y
-            .saturating_add(size.height.saturating_sub(next));
-        size.height = next;
+            .saturating_add(size_start.height.saturating_sub(size.height));
     }
     if matches!(
         edge,
         ResizeEdge::Bottom | ResizeEdge::BottomLeft | ResizeEdge::BottomRight
     ) {
-        size.height = size.height.saturating_add(delta.y).max(minimum_height);
+        size.height = size_start
+            .height
+            .saturating_add(delta.y)
+            .clamp(MINIMUM_HEIGHT, maximum_height);
     }
-    size.width = size.width.min(output.width.max(minimum_width));
-    size.height = size.height.min(output.height.max(minimum_height));
-    if size != window.requested_size {
-        window.requested_size = size;
-        wayland
-            .configure_toplevel(
-                surface,
-                Some(size),
-                window_toplevel_states(window, true, true),
-            )
-            .map_err(app_error)?;
-    }
-    Ok(())
+    (position, size)
 }
 
 fn finish_window_interaction(
@@ -4922,5 +5017,140 @@ mod tests {
             Some(PointerIcon::Default)
         );
         assert_eq!(semantic_pointer_fallback(PointerIcon::Default), None);
+    }
+
+    #[test]
+    fn client_commits_do_not_roll_back_a_newer_requested_resize() {
+        let committed = SizeI {
+            width: 640,
+            height: 480,
+        };
+        let requested = SizeI {
+            width: 720,
+            height: 540,
+        };
+
+        assert_eq!(retained_requested_size(None, committed), committed);
+        assert_eq!(
+            retained_requested_size(Some(requested), committed),
+            requested
+        );
+    }
+
+    #[test]
+    fn resize_drag_geometry_is_derived_from_the_press_time_baseline() {
+        let position = PointI { x: 100, y: 80 };
+        let size = SizeI {
+            width: 400,
+            height: 300,
+        };
+        let output = SizeI {
+            width: 1920,
+            height: 1080,
+        };
+
+        assert_eq!(
+            resize_drag_geometry(
+                position,
+                size,
+                ResizeEdge::Right,
+                PointI { x: 50, y: 0 },
+                output,
+            ),
+            (
+                position,
+                SizeI {
+                    width: 450,
+                    height: 300,
+                },
+            )
+        );
+        assert_eq!(
+            resize_drag_geometry(
+                position,
+                size,
+                ResizeEdge::Right,
+                PointI { x: 20, y: 0 },
+                output,
+            )
+            .1
+            .width,
+            420
+        );
+        assert_eq!(
+            resize_drag_geometry(
+                position,
+                size,
+                ResizeEdge::Bottom,
+                PointI { x: 0, y: 70 },
+                output,
+            )
+            .1
+            .height,
+            370
+        );
+    }
+
+    #[test]
+    fn left_and_top_resize_edges_keep_the_opposite_edges_anchored() {
+        let position = PointI { x: 100, y: 80 };
+        let size = SizeI {
+            width: 400,
+            height: 300,
+        };
+        let output = SizeI {
+            width: 1920,
+            height: 1080,
+        };
+        let (resized_position, resized_size) = resize_drag_geometry(
+            position,
+            size,
+            ResizeEdge::TopLeft,
+            PointI { x: 40, y: 30 },
+            output,
+        );
+
+        assert_eq!(resized_position, PointI { x: 140, y: 110 });
+        assert_eq!(
+            resized_size,
+            SizeI {
+                width: 360,
+                height: 270,
+            }
+        );
+        assert_eq!(
+            resized_position.x + resized_size.width,
+            position.x + size.width
+        );
+        assert_eq!(
+            resized_position.y + resized_size.height,
+            position.y + size.height
+        );
+
+        let (minimum_position, minimum_size) = resize_drag_geometry(
+            position,
+            size,
+            ResizeEdge::TopLeft,
+            PointI {
+                x: 10_000,
+                y: 10_000,
+            },
+            output,
+        );
+        assert_eq!(
+            minimum_size,
+            SizeI {
+                width: 64,
+                height: 48
+            }
+        );
+        assert_eq!(
+            minimum_position.x + minimum_size.width,
+            position.x + size.width
+        );
+        assert_eq!(
+            minimum_position.y + minimum_size.height,
+            position.y + size.height
+        );
     }
 }
