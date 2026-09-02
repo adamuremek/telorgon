@@ -759,11 +759,11 @@ impl<'display> NativeCompositor<'display> {
             .map_err(error)
     }
 
-    /// Copies one committed SHM buffer into host-owned bytes suitable for a Telorgon image resource.
-    pub fn read_shm_buffer(
+    /// Captures immutable SHM metadata plus a duplicated FD for copying outside protocol state.
+    pub fn shm_buffer_reader(
         &self,
         buffer: WaylandBufferId,
-    ) -> Result<ShmImage, NativeCompositorError> {
+    ) -> Result<ShmBufferReader, NativeCompositorError> {
         let BufferDescriptor::Shm(descriptor) = self
             .state
             .core
@@ -772,26 +772,27 @@ impl<'display> NativeCompositor<'display> {
         else {
             return Err(NativeCompositorError::new("buffer is not shared memory"));
         };
-        let fd = self.duplicate_shm_fd(buffer)?;
-        let file = std::fs::File::from(fd);
-        let length = descriptor.stride as usize * descriptor.size.height as usize;
-        let mut pixels = vec![0_u8; length];
-        let mut read = 0;
-        while read < pixels.len() {
-            let count = file
-                .read_at(&mut pixels[read..], descriptor.offset as u64 + read as u64)
-                .map_err(error)?;
-            if count == 0 {
-                return Err(NativeCompositorError::new(
-                    "shared-memory buffer ended before its declared extent",
-                ));
-            }
-            read += count;
-        }
-        Ok(ShmImage {
+        Ok(ShmBufferReader {
             descriptor: *descriptor,
-            pixels,
+            file: std::fs::File::from(self.duplicate_shm_fd(buffer)?),
         })
+    }
+
+    /// Copies one committed SHM buffer into host-owned bytes suitable for a Telorgon image resource.
+    pub fn read_shm_buffer(
+        &self,
+        buffer: WaylandBufferId,
+    ) -> Result<ShmImage, NativeCompositorError> {
+        self.shm_buffer_reader(buffer)?.read_full()
+    }
+
+    /// Copies one buffer-local rectangle from a committed SHM buffer into tightly packed rows.
+    pub fn read_shm_buffer_region(
+        &self,
+        buffer: WaylandBufferId,
+        rect: RectI,
+    ) -> Result<ShmImageRegion, NativeCompositorError> {
+        self.shm_buffer_reader(buffer)?.read_region(rect)
     }
 
     pub fn set_pointer_focus(
@@ -1021,12 +1022,14 @@ impl<'display> NativeCompositor<'display> {
     }
 
     pub fn release_buffer(&self, buffer: WaylandBufferId) -> Result<(), NativeCompositorError> {
-        let resource = self
-            .state
-            .resource_for_kind(
-                |kind| matches!(kind, ResourceKind::Buffer(candidate) if candidate == buffer),
-            )?
-            .ok_or_else(|| NativeCompositorError::new("wl_buffer resource is absent"))?;
+        let Some(resource) = self.state.resource_for_kind(
+            |kind| matches!(kind, ResourceKind::Buffer(candidate) if candidate == buffer),
+        )?
+        else {
+            // A client may destroy wl_buffer after attach. The duplicated storage FD remains valid,
+            // but there is no live protocol object to receive release once the copy completes.
+            return Ok(());
+        };
         self.state
             .post_event(resource, "wl_buffer", "release", &mut [])
     }
@@ -1101,9 +1104,122 @@ impl<'display> NativeCompositor<'display> {
     }
 }
 
+#[derive(Debug)]
+pub struct ShmBufferReader {
+    descriptor: ShmBuffer,
+    file: std::fs::File,
+}
+
+impl ShmBufferReader {
+    pub fn read_full(self) -> Result<ShmImage, NativeCompositorError> {
+        let height = usize::try_from(self.descriptor.size.height)
+            .map_err(|_| NativeCompositorError::new("invalid SHM image height"))?;
+        let length = (self.descriptor.stride as usize)
+            .checked_mul(height)
+            .ok_or_else(|| NativeCompositorError::new("SHM image length overflow"))?;
+        let mut pixels = vec![0_u8; length];
+        read_shm_exact(
+            &self.file,
+            self.descriptor.offset as u64,
+            &mut pixels,
+            "shared-memory buffer ended before its declared extent",
+        )?;
+        Ok(ShmImage {
+            descriptor: self.descriptor,
+            pixels,
+        })
+    }
+
+    pub fn read_region(self, rect: RectI) -> Result<ShmImageRegion, NativeCompositorError> {
+        let right = i64::from(rect.x) + i64::from(rect.width);
+        let bottom = i64::from(rect.y) + i64::from(rect.height);
+        if rect.x < 0
+            || rect.y < 0
+            || rect.width <= 0
+            || rect.height <= 0
+            || right > i64::from(self.descriptor.size.width)
+            || bottom > i64::from(self.descriptor.size.height)
+        {
+            return Err(NativeCompositorError::new(
+                "SHM read rectangle lies outside the buffer",
+            ));
+        }
+        let bytes_per_pixel = self
+            .descriptor
+            .format
+            .bytes_per_pixel()
+            .ok_or_else(|| NativeCompositorError::new("unsupported SHM pixel format"))?
+            as usize;
+        let row_bytes = (rect.width as usize)
+            .checked_mul(bytes_per_pixel)
+            .ok_or_else(|| NativeCompositorError::new("SHM region row size overflow"))?;
+        let length = row_bytes
+            .checked_mul(rect.height as usize)
+            .ok_or_else(|| NativeCompositorError::new("SHM region size overflow"))?;
+        let x_bytes = (rect.x as usize)
+            .checked_mul(bytes_per_pixel)
+            .ok_or_else(|| NativeCompositorError::new("SHM x offset overflow"))?;
+        let mut pixels = vec![0_u8; length];
+        for row in 0..rect.height as usize {
+            let file_offset = self
+                .descriptor
+                .offset
+                .checked_add(
+                    (rect.y as usize + row)
+                        .checked_mul(self.descriptor.stride as usize)
+                        .ok_or_else(|| NativeCompositorError::new("SHM row offset overflow"))?,
+                )
+                .and_then(|offset| offset.checked_add(x_bytes))
+                .ok_or_else(|| NativeCompositorError::new("SHM region offset overflow"))?;
+            read_shm_exact(
+                &self.file,
+                file_offset as u64,
+                &mut pixels[row * row_bytes..(row + 1) * row_bytes],
+                "shared-memory buffer ended before its damaged region",
+            )?;
+        }
+        Ok(ShmImageRegion {
+            descriptor: self.descriptor,
+            rect,
+            row_bytes,
+            pixels,
+        })
+    }
+}
+
+fn read_shm_exact(
+    file: &std::fs::File,
+    offset: u64,
+    target: &mut [u8],
+    eof_context: &'static str,
+) -> Result<(), NativeCompositorError> {
+    let mut read = 0;
+    while read < target.len() {
+        let read_offset = offset
+            .checked_add(read as u64)
+            .ok_or_else(|| NativeCompositorError::new("SHM read offset overflow"))?;
+        let count = file
+            .read_at(&mut target[read..], read_offset)
+            .map_err(error)?;
+        if count == 0 {
+            return Err(NativeCompositorError::new(eof_context));
+        }
+        read += count;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShmImage {
     pub descriptor: ShmBuffer,
+    pub pixels: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShmImageRegion {
+    pub descriptor: ShmBuffer,
+    pub rect: RectI,
+    pub row_bytes: usize,
     pub pixels: Vec<u8>,
 }
 

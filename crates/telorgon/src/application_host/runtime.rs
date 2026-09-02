@@ -214,6 +214,18 @@ impl AppRuntimeCore<CompositionDriver> {
         self.view.composition_diagnostics()
     }
 
+    #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
+    pub(crate) fn update_composition_root(
+        &mut self,
+        candidate: Box<dyn crate::compose::ErasedComponent>,
+    ) -> AppResult<bool> {
+        let changed = self.view.update_composition_root(candidate)?;
+        if changed {
+            self.sync_interaction();
+        }
+        Ok(changed)
+    }
+
     pub fn close_composition(&mut self) -> AppResult<()> {
         self.view.unmount_composition()?;
         self.sync_interaction();

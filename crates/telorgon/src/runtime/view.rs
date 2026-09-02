@@ -471,6 +471,30 @@ impl ViewRuntime<CompositionDriver> {
         self.driver().diagnostics()
     }
 
+    #[cfg(any(test, all(feature = "desktop-wayland-linux", target_os = "linux")))]
+    pub(crate) fn update_composition_root(
+        &mut self,
+        candidate: Box<dyn crate::compose::ErasedComponent>,
+    ) -> RuntimeResult<bool> {
+        let mut frame_requested = false;
+        let changed = {
+            let mut context = DriverContext {
+                ui: &mut self.ui,
+                commands: &mut self.commands,
+                frame_requested: &mut frame_requested,
+            };
+            self.driver.update_root_candidate(&mut context, candidate)
+        };
+        if frame_requested {
+            self.scheduler.request();
+        }
+        self.sync_deadline();
+        match self.driver_mut().take_error() {
+            Some(error) => Err(error),
+            None => Ok(changed),
+        }
+    }
+
     pub fn unmount_composition(&mut self) -> RuntimeResult<()> {
         let mut frame_requested = false;
         self.driver.close(&mut DriverContext {
@@ -497,6 +521,131 @@ mod tests {
     use std::rc::Rc;
 
     const LISTEN_TEST: u16 = 1;
+
+    struct ComposedRootInput {
+        label: String,
+        mounts: Rc<Cell<usize>>,
+        unmounts: Rc<Cell<usize>>,
+    }
+
+    impl crate::compose::ComponentFields for ComposedRootInput {
+        type InputSnapshot = (String,);
+
+        fn update_inputs(&mut self, incoming: Self) -> bool {
+            let changed = self.label != incoming.label;
+            self.label = incoming.label;
+            changed
+        }
+
+        fn capture_inputs(&self) -> Self::InputSnapshot {
+            (self.label.clone(),)
+        }
+
+        fn restore_inputs(&mut self, snapshot: Self::InputSnapshot) -> bool {
+            let changed = self.label != snapshot.0;
+            self.label = snapshot.0;
+            changed
+        }
+    }
+
+    impl crate::compose::Component for ComposedRootInput {
+        fn view(&self) -> impl crate::compose::View {
+            crate::compose::text(self.label.clone())
+        }
+
+        fn mounted(&mut self, _cx: &mut crate::compose::MountContext<Self>) {
+            self.mounts.set(self.mounts.get() + 1);
+        }
+
+        fn unmounted(&mut self, _cx: &mut crate::compose::UnmountContext<Self>) {
+            self.unmounts.set(self.unmounts.get() + 1);
+        }
+    }
+
+    struct AlternateComposedRoot {
+        mounts: Rc<Cell<usize>>,
+    }
+
+    impl crate::compose::ComponentFields for AlternateComposedRoot {
+        type InputSnapshot = ();
+
+        fn update_inputs(&mut self, _incoming: Self) -> bool {
+            false
+        }
+
+        fn capture_inputs(&self) -> Self::InputSnapshot {}
+
+        fn restore_inputs(&mut self, _snapshot: Self::InputSnapshot) -> bool {
+            false
+        }
+    }
+
+    impl crate::compose::Component for AlternateComposedRoot {
+        fn view(&self) -> impl crate::compose::View {
+            crate::compose::text("alternate")
+        }
+
+        fn mounted(&mut self, _cx: &mut crate::compose::MountContext<Self>) {
+            self.mounts.set(self.mounts.get() + 1);
+        }
+    }
+
+    #[test]
+    fn composed_root_inputs_reconcile_without_remounting() {
+        let mounts = Rc::new(Cell::new(0));
+        let unmounts = Rc::new(Cell::new(0));
+        let mut runtime = ViewRuntime::from_composed(ComposedRootInput {
+            label: "inactive".to_owned(),
+            mounts: Rc::clone(&mounts),
+            unmounts: Rc::clone(&unmounts),
+        })
+        .unwrap();
+        assert_eq!(mounts.get(), 1);
+        let mounted = runtime.composition_diagnostics().components_mounted;
+
+        assert!(
+            runtime
+                .update_composition_root(Box::new(ComposedRootInput {
+                    label: "active".to_owned(),
+                    mounts: Rc::clone(&mounts),
+                    unmounts: Rc::clone(&unmounts),
+                }))
+                .unwrap()
+        );
+        assert_eq!(mounts.get(), 1);
+        assert_eq!(
+            runtime.composition_diagnostics().components_mounted,
+            mounted
+        );
+        assert!(runtime.scheduler().needs_frame());
+
+        assert!(
+            !runtime
+                .update_composition_root(Box::new(ComposedRootInput {
+                    label: "active".to_owned(),
+                    mounts: Rc::clone(&mounts),
+                    unmounts: Rc::clone(&unmounts),
+                }))
+                .unwrap()
+        );
+
+        let alternate_mounts = Rc::new(Cell::new(0));
+        assert!(
+            runtime
+                .update_composition_root(Box::new(AlternateComposedRoot {
+                    mounts: Rc::clone(&alternate_mounts),
+                }))
+                .unwrap()
+        );
+        assert_eq!(mounts.get(), 1);
+        assert_eq!(unmounts.get(), 1);
+        assert_eq!(alternate_mounts.get(), 1);
+        assert_eq!(
+            runtime.composition_diagnostics().components_mounted,
+            mounted + 1
+        );
+        assert_eq!(runtime.composition_diagnostics().components_unmounted, 1);
+    }
 
     struct Counter {
         creates: Rc<Cell<usize>>,

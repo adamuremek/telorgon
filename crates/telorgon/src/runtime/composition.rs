@@ -272,6 +272,110 @@ impl CompositionDriver {
         self.last_error.take()
     }
 
+    #[cfg(any(test, all(feature = "desktop-wayland-linux", target_os = "linux")))]
+    pub(crate) fn update_root_candidate(
+        &mut self,
+        context: &mut DriverContext<'_>,
+        candidate: Box<dyn ErasedComponent>,
+    ) -> bool {
+        let Some(root) = self.root_component else {
+            self.record_error("composition root is not mounted");
+            return false;
+        };
+        let same_type = self
+            .arena
+            .get(root)
+            .and_then(|slot| slot.component.as_deref())
+            .is_some_and(|component| {
+                component.component_type_id() == candidate.component_type_id()
+            });
+        let result = if same_type {
+            self.update_component_candidate(context.ui, root, candidate)
+        } else {
+            self.replace_root_candidate(context.ui, root, candidate)
+        };
+        match result {
+            Ok(changed) => {
+                *context.frame_requested |= changed;
+                changed
+            }
+            Err(error) => {
+                self.record_error(error);
+                false
+            }
+        }
+    }
+
+    #[cfg(any(test, all(feature = "desktop-wayland-linux", target_os = "linux")))]
+    fn replace_root_candidate(
+        &mut self,
+        ui: &mut crate::ui::MountedUi,
+        previous: ComponentInstanceId,
+        candidate: Box<dyn ErasedComponent>,
+    ) -> Result<bool, ViewError> {
+        let parent = self.view_root.ok_or(ViewError::StaleParent)?.0;
+        let next = self.arena.insert(candidate);
+        let rendered = match self.render_component(next) {
+            Ok(rendered) => rendered,
+            Err(error) => {
+                self.arena.remove(next);
+                return Err(error);
+            }
+        };
+        let Some(mut writer) = MountWriter::under(ui, parent) else {
+            self.arena.remove(next);
+            return Err(ViewError::StaleParent);
+        };
+        let mounted = match self.mount_element(&mut writer, rendered.element, next) {
+            Ok(mounted) => mounted,
+            Err(error) => {
+                self.arena.remove(next);
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.commit_signal_dependencies(next, rendered.signals) {
+            self.remove_mounted(ui, mounted);
+            self.arena.remove(next);
+            return Err(error);
+        }
+        self.arena
+            .get_mut(next)
+            .ok_or(ViewError::StaleParent)?
+            .child = Some(Box::new(mounted));
+        let requested = self
+            .arena
+            .get_mut(next)
+            .and_then(|slot| slot.component.as_deref_mut())
+            .ok_or(ViewError::StaleParent)?
+            .mounted_erased(next);
+        if requested {
+            self.signal_invalidations
+                .lock()
+                .expect("composition invalidation queue poisoned")
+                .push(next);
+        }
+
+        if let Some(child) = self
+            .arena
+            .get_mut(previous)
+            .and_then(|slot| slot.child.take())
+        {
+            self.remove_mounted(ui, *child);
+        }
+        if let Some(component) = self
+            .arena
+            .get_mut(previous)
+            .and_then(|slot| slot.component.as_deref_mut())
+        {
+            component.unmounted_erased(previous);
+        }
+        self.arena.remove(previous);
+        self.root_component = Some(next);
+        self.diagnostics.components_unmounted += 1;
+        self.diagnostics.components_mounted += 1;
+        Ok(true)
+    }
+
     fn record_error(&mut self, error: impl ToString) {
         self.diagnostics.invalid_views += 1;
         self.last_error = Some(RuntimeError::new(error.to_string()));
@@ -956,7 +1060,7 @@ impl CompositionDriver {
         ui: &mut crate::ui::MountedUi,
         id: ComponentInstanceId,
         candidate: Box<dyn ErasedComponent>,
-    ) -> Result<(), ViewError> {
+    ) -> Result<bool, ViewError> {
         let changed = self
             .arena
             .get_mut(id)
@@ -965,7 +1069,7 @@ impl CompositionDriver {
             .update_from(candidate)?;
         if !changed {
             self.diagnostics.components_reused += 1;
-            return Ok(());
+            return Ok(false);
         }
         let requested = self
             .arena
@@ -973,7 +1077,8 @@ impl CompositionDriver {
             .and_then(|slot| slot.component.as_deref_mut())
             .is_some_and(|component| component.inputs_changed_erased(id));
         let _ = requested;
-        self.reconcile_component(ui, id)
+        self.reconcile_component(ui, id)?;
+        Ok(true)
     }
 
     fn reconcile_component(
@@ -1256,9 +1361,9 @@ impl CompositionDriver {
                 *props = candidate;
                 Ok(())
             }
-            (MountedKind::Component { id, .. }, ElementKind::Component(candidate)) => {
-                self.update_component_candidate(ui, *id, candidate)
-            }
+            (MountedKind::Component { id, .. }, ElementKind::Component(candidate)) => self
+                .update_component_candidate(ui, *id, candidate)
+                .map(|_| ()),
             _ => unreachable!("equal element identities have equal payload variants"),
         };
         if let Err(error) = result {

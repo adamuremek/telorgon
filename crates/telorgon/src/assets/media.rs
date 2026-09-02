@@ -7,7 +7,7 @@ use crate::assets::{
     asset_image_id,
 };
 use crate::core::{ColorRgba8, SizeI};
-use crate::render::{ImageAlphaMode, ImageColorEncoding, ImageResource};
+use crate::render::{ImageAlphaMode, ImageColorEncoding, ImagePixelFormat, ImageResource};
 
 const MAX_DIMENSION: u32 = 4096;
 const MAX_DECODED_BYTES: u64 = 64 * 1024 * 1024;
@@ -50,7 +50,8 @@ impl DecodedAssetImage {
             extent: self.extent,
             color_encoding: ImageColorEncoding::Srgb,
             alpha_mode: self.alpha_mode,
-            pixels_rgba8: Arc::clone(&self.pixels_rgba8),
+            pixel_format: ImagePixelFormat::Rgba8,
+            pixels: Arc::clone(&self.pixels_rgba8),
         }
     }
 }

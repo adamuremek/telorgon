@@ -3,11 +3,14 @@ use std::os::fd::OwnedFd;
 use std::sync::Arc;
 
 use crate::compositor_wayland::{
-    BufferTransform, DmaBufFormat, DmaBufImage, ShmFormat, ShmImage, ViewportSource, ViewportState,
-    WaylandBufferId,
+    BufferTransform, DmaBufFormat, DmaBufImage, ShmFormat, ShmImage, ShmImageRegion,
+    ViewportSource, ViewportState, WaylandBufferId,
 };
 use crate::core::{RectI, SizeI};
-use crate::render::{ImageAlphaMode, ImageColorEncoding, ImageId, ImageResource};
+use crate::render::{
+    ImageAlphaMode, ImageColorEncoding, ImageId, ImagePixelFormat, ImageResource,
+    ImageResourceUpdate,
+};
 use crate::renderer_vulkan::{
     HostedImageUse, VulkanDevice, VulkanDmaBufImport, VulkanDmaBufPlane, VulkanExternalImageLease,
     VulkanExternalImageOrigin, VulkanScene,
@@ -40,10 +43,6 @@ pub fn shm_image_resource(
         .bytes_per_pixel()
         .ok_or_else(|| CompositorRenderError::new("unsupported SHM pixel format"))?
         as usize;
-    let output_len = width
-        .checked_mul(height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| CompositorRenderError::new("SHM image size overflow"))?;
     let row_bytes = width
         .checked_mul(source_pixel_bytes)
         .ok_or_else(|| CompositorRenderError::new("SHM row size overflow"))?;
@@ -59,71 +58,129 @@ pub fn shm_image_resource(
         ));
     }
 
-    let mut rgba = vec![0_u8; output_len];
-    for y in 0..height {
-        let source = &image.pixels[y * stride..y * stride + row_bytes];
-        let target = &mut rgba[y * width * 4..(y + 1) * width * 4];
-        match descriptor.format {
-            ShmFormat::Argb8888 | ShmFormat::Xrgb8888 => {
-                for (source, target) in source.chunks_exact(4).zip(target.chunks_exact_mut(4)) {
-                    target.copy_from_slice(&[
-                        source[2],
-                        source[1],
-                        source[0],
-                        if descriptor.format == ShmFormat::Argb8888 {
-                            source[3]
-                        } else {
-                            255
-                        },
-                    ]);
-                }
-            }
-            ShmFormat::Abgr8888 | ShmFormat::Xbgr8888 => {
-                for (source, target) in source.chunks_exact(4).zip(target.chunks_exact_mut(4)) {
-                    target.copy_from_slice(&[
-                        source[0],
-                        source[1],
-                        source[2],
-                        if descriptor.format == ShmFormat::Abgr8888 {
-                            source[3]
-                        } else {
-                            255
-                        },
-                    ]);
-                }
-            }
-            ShmFormat::Rgb565 => {
-                for (source, target) in source.chunks_exact(2).zip(target.chunks_exact_mut(4)) {
-                    let value = u16::from_le_bytes([source[0], source[1]]);
-                    let red = ((value >> 11) & 0x1f) as u8;
-                    let green = ((value >> 5) & 0x3f) as u8;
-                    let blue = (value & 0x1f) as u8;
-                    target.copy_from_slice(&[
-                        (red << 3) | (red >> 2),
-                        (green << 2) | (green >> 4),
-                        (blue << 3) | (blue >> 2),
-                        255,
-                    ]);
-                }
-            }
-            ShmFormat::Other(_) => unreachable!("bytes-per-pixel rejected unknown format"),
-        }
-    }
+    let (pixel_format, pixels) =
+        convert_shm_rows(descriptor.format, width, height, stride, image.pixels)?;
     Ok(ImageResource {
         image: imported_image_id(buffer),
         content_version,
         extent: descriptor.size,
         color_encoding: ImageColorEncoding::Srgb,
-        alpha_mode: match descriptor.format {
-            ShmFormat::Argb8888 | ShmFormat::Abgr8888 => ImageAlphaMode::Premultiplied,
-            _ => ImageAlphaMode::Opaque,
-        },
-        pixels_rgba8: Arc::from(rgba),
+        alpha_mode: shm_alpha_mode(descriptor.format),
+        pixel_format,
+        pixels: Arc::from(pixels),
     })
 }
 
+pub fn shm_image_update(
+    buffer: WaylandBufferId,
+    content_version: u64,
+    image: ShmImageRegion,
+) -> Result<ImageResourceUpdate, CompositorRenderError> {
+    if content_version == 0 {
+        return Err(CompositorRenderError::new(
+            "SHM content version must be nonzero",
+        ));
+    }
+    let width = image.rect.width as usize;
+    let height = image.rect.height as usize;
+    let (pixel_format, pixels) = convert_shm_rows(
+        image.descriptor.format,
+        width,
+        height,
+        image.row_bytes,
+        image.pixels,
+    )?;
+    Ok(ImageResourceUpdate {
+        image: imported_image_id(buffer),
+        content_version,
+        extent: image.descriptor.size,
+        rect: image.rect,
+        row_bytes: width * 4,
+        color_encoding: ImageColorEncoding::Srgb,
+        alpha_mode: shm_alpha_mode(image.descriptor.format),
+        pixel_format,
+        pixels: Arc::from(pixels),
+    })
+}
+
+pub fn shm_image_metadata(
+    format: ShmFormat,
+) -> Result<(ImagePixelFormat, ImageAlphaMode), CompositorRenderError> {
+    if format.bytes_per_pixel().is_none() {
+        return Err(CompositorRenderError::new("unsupported SHM pixel format"));
+    }
+    let pixel_format = match format {
+        ShmFormat::Argb8888 | ShmFormat::Xrgb8888 => ImagePixelFormat::Bgra8,
+        ShmFormat::Abgr8888 | ShmFormat::Xbgr8888 | ShmFormat::Rgb565 => ImagePixelFormat::Rgba8,
+        ShmFormat::Other(_) => unreachable!("bytes-per-pixel rejected unknown format"),
+    };
+    Ok((pixel_format, shm_alpha_mode(format)))
+}
+
+fn shm_alpha_mode(format: ShmFormat) -> ImageAlphaMode {
+    match format {
+        ShmFormat::Argb8888 | ShmFormat::Abgr8888 => ImageAlphaMode::Premultiplied,
+        _ => ImageAlphaMode::Opaque,
+    }
+}
+
+fn convert_shm_rows(
+    format: ShmFormat,
+    width: usize,
+    height: usize,
+    source_stride: usize,
+    source_pixels: Vec<u8>,
+) -> Result<(ImagePixelFormat, Vec<u8>), CompositorRenderError> {
+    let source_pixel_bytes = format
+        .bytes_per_pixel()
+        .ok_or_else(|| CompositorRenderError::new("unsupported SHM pixel format"))?
+        as usize;
+    let source_row_bytes = width
+        .checked_mul(source_pixel_bytes)
+        .ok_or_else(|| CompositorRenderError::new("SHM row size overflow"))?;
+    let output_row_bytes = width
+        .checked_mul(4)
+        .ok_or_else(|| CompositorRenderError::new("SHM output row size overflow"))?;
+    let output_len = output_row_bytes
+        .checked_mul(height)
+        .ok_or_else(|| CompositorRenderError::new("SHM image size overflow"))?;
+    if source_stride < source_row_bytes
+        || source_pixels.len() < source_stride.saturating_mul(height)
+    {
+        return Err(CompositorRenderError::new(
+            "SHM bytes do not cover the declared rows",
+        ));
+    }
+    let (pixel_format, _) = shm_image_metadata(format)?;
+    if format != ShmFormat::Rgb565 && source_stride == output_row_bytes {
+        return Ok((pixel_format, source_pixels));
+    }
+    let mut output = vec![0_u8; output_len];
+    for row in 0..height {
+        let source = &source_pixels[row * source_stride..row * source_stride + source_row_bytes];
+        let target = &mut output[row * output_row_bytes..(row + 1) * output_row_bytes];
+        if format == ShmFormat::Rgb565 {
+            for (source, target) in source.chunks_exact(2).zip(target.chunks_exact_mut(4)) {
+                let value = u16::from_le_bytes([source[0], source[1]]);
+                let red = ((value >> 11) & 0x1f) as u8;
+                let green = ((value >> 5) & 0x3f) as u8;
+                let blue = (value & 0x1f) as u8;
+                target.copy_from_slice(&[
+                    (red << 3) | (red >> 2),
+                    (green << 2) | (green >> 4),
+                    (blue << 3) | (blue >> 2),
+                    255,
+                ]);
+            }
+        } else {
+            target.copy_from_slice(source);
+        }
+    }
+    Ok((pixel_format, output))
+}
+
 /// Applies `wl_surface` buffer transform/scale and the committed viewporter state to a retained
-/// RGBA image. Sampling is deterministic nearest-neighbor so the software reference and a future
+/// four-channel image. Sampling is deterministic nearest-neighbor so the software reference and a future
 /// Vulkan compositor can share the exact surface geometry contract.
 pub fn transform_surface_image(
     image: ImageResource,
@@ -134,6 +191,9 @@ pub fn transform_surface_image(
     if buffer_scale <= 0 {
         return Err(CompositorRenderError::new("buffer scale must be positive"));
     }
+    if buffer_scale == 1 && transform == BufferTransform::Normal && viewport.is_none() {
+        return Ok(image);
+    }
     let input_width = usize::try_from(image.extent.width)
         .map_err(|_| CompositorRenderError::new("invalid image width"))?;
     let input_height = usize::try_from(image.extent.height)
@@ -142,7 +202,7 @@ pub fn transform_surface_image(
         .checked_mul(input_height)
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| CompositorRenderError::new("surface image size overflow"))?;
-    if input_width == 0 || input_height == 0 || image.pixels_rgba8.len() < expected {
+    if input_width == 0 || input_height == 0 || image.pixels.len() < expected {
         return Err(CompositorRenderError::new(
             "surface image does not cover its extent",
         ));
@@ -182,7 +242,7 @@ pub fn transform_surface_image(
             );
             let source = (source_y * input_width + source_x) * 4;
             let target = (y * logical_width + x) * 4;
-            logical[target..target + 4].copy_from_slice(&image.pixels_rgba8[source..source + 4]);
+            logical[target..target + 4].copy_from_slice(&image.pixels[source..source + 4]);
         }
     }
 
@@ -241,7 +301,7 @@ pub fn transform_surface_image(
     }
     Ok(ImageResource {
         extent: destination,
-        pixels_rgba8: Arc::from(pixels),
+        pixels: Arc::from(pixels),
         ..image
     })
 }
@@ -411,7 +471,7 @@ mod tests {
     use crate::core::SizeI;
 
     #[test]
-    fn xrgb_shm_is_swizzled_and_forced_opaque() {
+    fn xrgb_shm_retains_native_bgra_bytes_and_is_forced_opaque() {
         let buffer = WaylandBufferId::from_raw(7).unwrap();
         let resource = shm_image_resource(
             buffer,
@@ -430,8 +490,45 @@ mod tests {
             },
         )
         .unwrap();
-        assert_eq!(&*resource.pixels_rgba8, &[1, 2, 3, 255]);
+        assert_eq!(&*resource.pixels, &[3, 2, 1, 0]);
+        assert_eq!(resource.pixel_format, ImagePixelFormat::Bgra8);
         assert_eq!(resource.alpha_mode, ImageAlphaMode::Opaque);
+    }
+
+    #[test]
+    fn damaged_argb_region_stays_tightly_packed_and_native_bgra() {
+        let buffer = WaylandBufferId::from_raw(7).unwrap();
+        let rect = RectI {
+            x: 3,
+            y: 4,
+            width: 2,
+            height: 1,
+        };
+        let update = shm_image_update(
+            buffer,
+            2,
+            ShmImageRegion {
+                descriptor: ShmBuffer {
+                    offset: 16,
+                    size: SizeI {
+                        width: 20,
+                        height: 10,
+                    },
+                    stride: 96,
+                    format: ShmFormat::Argb8888,
+                },
+                rect,
+                row_bytes: 8,
+                pixels: vec![3, 2, 1, 4, 7, 6, 5, 8],
+            },
+        )
+        .unwrap();
+
+        assert_eq!(update.rect, rect);
+        assert_eq!(update.row_bytes, 8);
+        assert_eq!(update.pixel_format, ImagePixelFormat::Bgra8);
+        assert_eq!(update.alpha_mode, ImageAlphaMode::Premultiplied);
+        assert_eq!(&*update.pixels, &[3, 2, 1, 4, 7, 6, 5, 8]);
     }
 
     #[test]
@@ -445,7 +542,8 @@ mod tests {
             },
             color_encoding: ImageColorEncoding::Srgb,
             alpha_mode: ImageAlphaMode::Opaque,
-            pixels_rgba8: Arc::from([
+            pixel_format: ImagePixelFormat::Rgba8,
+            pixels: Arc::from([
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ]),
         };
@@ -458,7 +556,7 @@ mod tests {
                 height: 1
             }
         );
-        assert_eq!(&*scaled.pixels_rgba8, &[255, 255, 255, 255]);
+        assert_eq!(&*scaled.pixels, &[255, 255, 255, 255]);
 
         let cropped = transform_surface_image(
             image,
@@ -485,6 +583,6 @@ mod tests {
                 height: 2
             }
         );
-        assert_eq!(&cropped.pixels_rgba8[..4], &[0, 0, 255, 255]);
+        assert_eq!(&cropped.pixels[..4], &[0, 0, 255, 255]);
     }
 }

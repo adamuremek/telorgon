@@ -9,9 +9,10 @@ use crate::gpu_abi::{
 };
 use crate::render::{
     BatchKey, BoxInstance, DirtyRanges, DrawItem, GlyphInstance, ImageAlphaMode,
-    ImageColorEncoding, ImageId, ImageInstance, ImageResourceDelta, MaterialInstance, MaterialKind,
-    MaterialResource, MaterialResourceDelta, PipelineKind, PrimitiveKind, RenderClip, RenderError,
-    RenderErrorKind, RenderResult, RenderSceneDelta, RenderSpatialNode, apply_patches,
+    ImageColorEncoding, ImageId, ImageInstance, ImagePixelFormat, ImageResourceDelta,
+    MaterialInstance, MaterialKind, MaterialResource, MaterialResourceDelta, PipelineKind,
+    PrimitiveKind, RenderClip, RenderError, RenderErrorKind, RenderResult, RenderSceneDelta,
+    RenderSpatialNode, apply_patches,
 };
 use ash::vk;
 use bytemuck::Zeroable;
@@ -23,6 +24,7 @@ use crate::renderer_vulkan::image::AllocatedImage;
 use crate::renderer_vulkan::upload::{ImageUploadChunk, RetainedGpuBuffer, SceneUploadPlan};
 
 static NEXT_SCENE_ID: AtomicU64 = AtomicU64::new(1);
+const MAX_RETIRED_IMAGES_PER_TEXTURE: usize = 2;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct VulkanSceneMetrics {
@@ -46,6 +48,7 @@ pub(crate) struct DrawBatch {
 #[derive(Default)]
 struct RetainedTexture {
     image: Option<Arc<AllocatedImage>>,
+    retired: Vec<Arc<AllocatedImage>>,
     extent: SizeI,
     format: vk::Format,
     generation: u64,
@@ -63,6 +66,7 @@ impl RetainedTexture {
         if self.image.is_some() && self.extent == extent && self.format == format {
             return Ok(false);
         }
+        self.retired.clear();
         self.image = Some(Arc::new(AllocatedImage::new_sampled(
             Arc::clone(device),
             vk::Extent2D {
@@ -79,6 +83,56 @@ impl RetainedTexture {
         Ok(true)
     }
 
+    fn prepare_write(
+        &mut self,
+        device: &Arc<DeviceInner>,
+        name: &str,
+        preserve_contents: bool,
+    ) -> crate::render::RenderResult<Option<Arc<AllocatedImage>>> {
+        let Some(current) = self.image.as_ref() else {
+            return Ok(None);
+        };
+        if !self.initialized || Arc::strong_count(current) == 1 {
+            return Ok(None);
+        }
+
+        let previous = self
+            .image
+            .take()
+            .expect("retained texture must exist while preparing a write");
+        let reusable = self
+            .retired
+            .iter()
+            .position(|image| Arc::strong_count(image) == 1)
+            .map(|index| self.retired.swap_remove(index));
+        let replacement_was_initialized = reusable.is_some();
+        let replacement = match reusable {
+            Some(image) => image,
+            None => Arc::new(AllocatedImage::new_sampled(
+                Arc::clone(device),
+                vk::Extent2D {
+                    width: self.extent.width.max(1) as u32,
+                    height: self.extent.height.max(1) as u32,
+                },
+                self.format,
+                name,
+            )?),
+        };
+        self.retired.push(Arc::clone(&previous));
+        while self.retired.len() > MAX_RETIRED_IMAGES_PER_TEXTURE {
+            let removable = self
+                .retired
+                .iter()
+                .position(|image| Arc::strong_count(image) == 1)
+                .unwrap_or(0);
+            self.retired.swap_remove(removable);
+        }
+        self.image = Some(replacement);
+        self.generation = self.generation.saturating_add(1);
+        self.initialized = replacement_was_initialized;
+        Ok(preserve_contents.then_some(previous))
+    }
+
     fn image(&self) -> &Arc<AllocatedImage> {
         self.image
             .as_ref()
@@ -90,6 +144,7 @@ struct VulkanImageResource {
     extent: SizeI,
     color_encoding: ImageColorEncoding,
     alpha_mode: ImageAlphaMode,
+    pixel_format: ImagePixelFormat,
     pixels: Vec<u8>,
     pending: Vec<ImageUploadChunk>,
     texture: RetainedTexture,
@@ -362,6 +417,7 @@ impl VulkanScene {
                             extent: update.extent,
                             color_encoding: update.color_encoding,
                             alpha_mode: update.alpha_mode,
+                            pixel_format: update.pixel_format,
                             pixels: vec![
                                 0;
                                 update.extent.width as usize
@@ -374,9 +430,11 @@ impl VulkanScene {
                     });
                     if resource.extent != update.extent
                         || resource.color_encoding != update.color_encoding
+                        || resource.pixel_format != update.pixel_format
                     {
                         resource.extent = update.extent;
                         resource.color_encoding = update.color_encoding;
+                        resource.pixel_format = update.pixel_format;
                         resource.pixels.resize(
                             update.extent.width as usize * update.extent.height as usize * 4,
                             0,
@@ -392,7 +450,7 @@ impl VulkanScene {
                         let target = (update.rect.y as usize + row) * destination_stride
                             + update.rect.x as usize * 4;
                         resource.pixels[target..target + copy_bytes]
-                            .copy_from_slice(&update.pixels_rgba8[source..source + copy_bytes]);
+                            .copy_from_slice(&update.pixels[source..source + copy_bytes]);
                     }
                     resource.pending.push(ImageUploadChunk {
                         offset: vk::Offset3D {
@@ -406,7 +464,7 @@ impl VulkanScene {
                             depth: 1,
                         },
                         row_bytes: update.row_bytes,
-                        bytes: update.pixels_rgba8.to_vec(),
+                        bytes: update.pixels.to_vec(),
                     });
                 }
             }
@@ -765,15 +823,21 @@ impl VulkanScene {
         }
 
         if !self.gpu_glyphs.is_empty() {
-            if self.atlas_texture.initialized && !self.atlas_pending.is_empty() {
-                self.atlas_texture.image = None;
-            }
             let allocated = self.atlas_texture.ensure(
                 device,
                 self.atlas_extent,
                 vk::Format::R8_UNORM,
                 "Telorgon glyph atlas",
             )?;
+            let preserve_from = if allocated || self.atlas_pending.is_empty() {
+                None
+            } else {
+                self.atlas_texture.prepare_write(
+                    device,
+                    "Telorgon glyph atlas",
+                    !image_upload_is_full(&self.atlas_pending, self.atlas_extent, 1),
+                )?
+            };
             let chunks = if allocated {
                 vec![ImageUploadChunk {
                     offset: vk::Offset3D::default(),
@@ -791,26 +855,33 @@ impl VulkanScene {
             plan.push_image_uploads(
                 Arc::clone(self.atlas_texture.image()),
                 self.atlas_texture.initialized,
+                preserve_from,
                 1,
                 chunks,
             );
         }
         for resource in self.image_resources.values_mut() {
-            if resource.texture.initialized && !resource.pending.is_empty() {
-                // Copy-on-write keeps image updates independent from submissions that may still
-                // be sampling the prior version.
-                resource.texture.image = None;
-            }
-            let format = match resource.color_encoding {
-                ImageColorEncoding::Linear => vk::Format::R8G8B8A8_UNORM,
-                ImageColorEncoding::Srgb => vk::Format::R8G8B8A8_SRGB,
+            let format = match (resource.pixel_format, resource.color_encoding) {
+                (ImagePixelFormat::Rgba8, ImageColorEncoding::Linear) => vk::Format::R8G8B8A8_UNORM,
+                (ImagePixelFormat::Rgba8, ImageColorEncoding::Srgb) => vk::Format::R8G8B8A8_SRGB,
+                (ImagePixelFormat::Bgra8, ImageColorEncoding::Linear) => vk::Format::B8G8R8A8_UNORM,
+                (ImagePixelFormat::Bgra8, ImageColorEncoding::Srgb) => vk::Format::B8G8R8A8_SRGB,
             };
             let allocated = resource.texture.ensure(
                 device,
                 resource.extent,
                 format,
-                "Telorgon retained RGBA image",
+                "Telorgon retained four-channel image",
             )?;
+            let preserve_from = if allocated || resource.pending.is_empty() {
+                None
+            } else {
+                resource.texture.prepare_write(
+                    device,
+                    "Telorgon retained four-channel image",
+                    !image_upload_is_full(&resource.pending, resource.extent, 4),
+                )?
+            };
             let chunks = if allocated {
                 vec![ImageUploadChunk {
                     offset: vk::Offset3D::default(),
@@ -828,6 +899,7 @@ impl VulkanScene {
             plan.push_image_uploads(
                 Arc::clone(resource.texture.image()),
                 resource.texture.initialized,
+                preserve_from,
                 4,
                 chunks,
             );
@@ -1052,6 +1124,27 @@ fn ensure_optional_buffer(
         ensure_buffer(device, buffer, dirty, len, bytes, name, plan)
     }
 }
+
+fn image_upload_is_full(
+    chunks: &[ImageUploadChunk],
+    extent: SizeI,
+    bytes_per_pixel: usize,
+) -> bool {
+    let [chunk] = chunks else {
+        return false;
+    };
+    chunk.offset == vk::Offset3D::default()
+        && chunk.extent
+            == vk::Extent3D {
+                width: extent.width.max(0) as u32,
+                height: extent.height.max(0) as u32,
+                depth: 1,
+            }
+        && chunk.row_bytes == extent.width.max(0) as usize * bytes_per_pixel
+        && chunk.bytes.len()
+            == extent.width.max(0) as usize * extent.height.max(0) as usize * bytes_per_pixel
+}
+
 fn patch_gpu_values<T, U: Clone + Zeroable>(
     target: &mut Vec<U>,
     patches: &[crate::render::RangePatch<T>],
@@ -1364,5 +1457,36 @@ mod tests {
 
         assert_eq!(packed.tint_spatial_clip_texture[0], pack(tint));
         assert_eq!(packed.flags, 1 | (1 << 2));
+    }
+
+    #[test]
+    fn full_image_upload_detection_rejects_regional_chunks() {
+        let extent = SizeI {
+            width: 8,
+            height: 4,
+        };
+        let full = ImageUploadChunk {
+            offset: vk::Offset3D::default(),
+            extent: vk::Extent3D {
+                width: 8,
+                height: 4,
+                depth: 1,
+            },
+            row_bytes: 32,
+            bytes: vec![0; 128],
+        };
+        assert!(image_upload_is_full(&[full], extent, 4));
+
+        let region = ImageUploadChunk {
+            offset: vk::Offset3D { x: 2, y: 1, z: 0 },
+            extent: vk::Extent3D {
+                width: 3,
+                height: 2,
+                depth: 1,
+            },
+            row_bytes: 12,
+            bytes: vec![0; 24],
+        };
+        assert!(!image_upload_is_full(&[region], extent, 4));
     }
 }

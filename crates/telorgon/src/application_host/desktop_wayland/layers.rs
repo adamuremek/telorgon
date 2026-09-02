@@ -7,6 +7,8 @@ pub(super) struct Layer {
     surface: SoftwareSurface,
     content_version: u64,
     retained_pixels: Arc<[u8]>,
+    retained_version: u64,
+    pending_update: DesktopImageUpdate,
 }
 
 impl Layer {
@@ -29,6 +31,8 @@ impl Layer {
             surface: SoftwareSurface::default(),
             content_version: 0,
             retained_pixels: Arc::from([]),
+            retained_version: 0,
+            pending_update: DesktopImageUpdate::Unchanged,
         })
     }
 
@@ -56,7 +60,8 @@ impl Layer {
         let target = SoftwareTarget::new(RenderTargetInfo::full(extent));
         let clear = self.scene.background();
         let mut frame = self.surface.begin_frame();
-        self.renderer
+        let stats = self
+            .renderer
             .render(
                 &mut self.scene,
                 &mut frame,
@@ -69,8 +74,17 @@ impl Layer {
                 },
             )
             .map_err(app_error)?;
+        if !stats.recorded {
+            return Ok(self.surface.pixels_rgba8());
+        }
         self.content_version = self.content_version.wrapping_add(1).max(1);
-        self.retained_pixels = Arc::from(self.surface.pixels_rgba8());
+        let update = layer_update_from_damage(&self.surface, extent);
+        self.pending_update = merge_layer_update(
+            std::mem::replace(&mut self.pending_update, DesktopImageUpdate::Unchanged),
+            update,
+            &self.surface,
+            extent,
+        );
         Ok(self.surface.pixels_rgba8())
     }
 
@@ -78,8 +92,17 @@ impl Layer {
         self.content_version
     }
 
-    pub(super) fn pixels(&self) -> Arc<[u8]> {
+    pub(super) fn pixels(&mut self) -> Arc<[u8]> {
+        if self.retained_version != self.content_version {
+            self.retained_pixels = Arc::from(self.surface.pixels_rgba8());
+            self.retained_version = self.content_version;
+        }
+        self.pending_update = DesktopImageUpdate::Unchanged;
         Arc::clone(&self.retained_pixels)
+    }
+
+    pub(super) fn take_update(&mut self) -> DesktopImageUpdate {
+        std::mem::replace(&mut self.pending_update, DesktopImageUpdate::Unchanged)
     }
 
     pub(super) fn pointer_motion(&mut self, position: PointF, now: MonotonicInstant) -> bool {
@@ -113,6 +136,63 @@ impl Layer {
     fn animation_active(&self) -> bool {
         self.runtime.animation_active()
     }
+}
+
+fn layer_update_from_damage(surface: &SoftwareSurface, extent: SizeI) -> DesktopImageUpdate {
+    let damage = surface.presented_damage();
+    if damage.full {
+        return DesktopImageUpdate::Full(Arc::from(surface.pixels_rgba8()));
+    }
+    let rect = damage
+        .rects
+        .iter()
+        .map(|rect| rect.to_i32())
+        .filter_map(|rect| intersect_rect(rect, full_rect(extent)))
+        .reduce(union_rect);
+    rect.map_or(DesktopImageUpdate::Unchanged, |rect| {
+        DesktopImageUpdate::Region {
+            rect,
+            row_bytes: rect.width as usize * 4,
+            pixels: copy_software_region(surface.pixels_rgba8(), extent, rect).into(),
+        }
+    })
+}
+
+fn merge_layer_update(
+    previous: DesktopImageUpdate,
+    current: DesktopImageUpdate,
+    surface: &SoftwareSurface,
+    extent: SizeI,
+) -> DesktopImageUpdate {
+    match (previous, current) {
+        (DesktopImageUpdate::Unchanged, current) => current,
+        (previous, DesktopImageUpdate::Unchanged) => previous,
+        (_, DesktopImageUpdate::Full(_)) | (DesktopImageUpdate::Full(_), _) => {
+            DesktopImageUpdate::Full(Arc::from(surface.pixels_rgba8()))
+        }
+        (
+            DesktopImageUpdate::Region { rect: left, .. },
+            DesktopImageUpdate::Region { rect: right, .. },
+        ) => {
+            let rect = union_rect(left, right);
+            DesktopImageUpdate::Region {
+                rect,
+                row_bytes: rect.width as usize * 4,
+                pixels: copy_software_region(surface.pixels_rgba8(), extent, rect).into(),
+            }
+        }
+    }
+}
+
+fn copy_software_region(source: &[u8], extent: SizeI, rect: RectI) -> Vec<u8> {
+    let stride = extent.width as usize * 4;
+    let row_bytes = rect.width as usize * 4;
+    let mut pixels = Vec::with_capacity(row_bytes * rect.height as usize);
+    for row in rect.y as usize..rect.bottom() as usize {
+        let start = row * stride + rect.x as usize * 4;
+        pixels.extend_from_slice(&source[start..start + row_bytes]);
+    }
+    pixels
 }
 
 pub(super) fn route_frame_pointer_motion(
@@ -245,24 +325,14 @@ pub(super) fn refresh_window_frames(
         let previous_outer = frames
             .get(&surface)
             .map_or(fallback_outer, |frame| frame.outer);
-        let rebuild = frames
-            .get(&surface)
-            .is_none_or(|frame| frame.model != model);
-        if rebuild {
+        let created = !frames.contains_key(&surface);
+        if created {
             let mut driver = factory.compose(model.clone());
             driver.set_wake({
                 let wake = wake.clone();
                 move || wake.notify()
             });
-            let mut layer = Layer::new(driver, previous_outer, assets)?;
-            if let Some((revision, icon)) = &icon_image {
-                let mut resource =
-                    shm_image_resource(icon.buffer, (*revision).max(1), icon.image.clone())
-                        .map_err(app_error)?;
-                resource.image = icon_image_id.expect("image source produced an image id");
-                resource.content_version = (*revision).max(1);
-                layer.runtime.set_image_resource(resource)?;
-            }
+            let layer = Layer::new(driver, previous_outer, assets)?;
             frames.insert(
                 surface,
                 WindowFrameLayer {
@@ -270,7 +340,7 @@ pub(super) fn refresh_window_frames(
                     layer,
                     snapshot: None,
                     outer: previous_outer,
-                    pixels: Arc::from([]),
+                    icon_image: None,
                     content_version: 0,
                 },
             );
@@ -279,8 +349,28 @@ pub(super) fn refresh_window_frames(
         let frame = frames
             .get_mut(&surface)
             .expect("window frame was created above");
+        if !created && frame.model != model {
+            frame
+                .layer
+                .runtime
+                .update_composition_root(factory.candidate(model.clone()))?;
+        }
+        if frame.icon_image != icon_image_id {
+            if let Some(previous) = frame.icon_image {
+                frame.layer.runtime.remove_image_resource(previous);
+            }
+            if let Some((revision, icon)) = &icon_image {
+                let mut resource =
+                    shm_image_resource(icon.buffer, (*revision).max(1), icon.image.clone())
+                        .map_err(app_error)?;
+                resource.image = icon_image_id.expect("image source produced an image id");
+                resource.content_version = (*revision).max(1);
+                frame.layer.runtime.set_image_resource(resource)?;
+            }
+            frame.icon_image = icon_image_id;
+        }
         frame.model = model;
-        frame.layer.render(frame.outer, now, rebuild)?;
+        frame.layer.render(frame.outer, now, created)?;
         let mut snapshot =
             WindowChromeSnapshot::derive(frame.layer.runtime.ui(), frame.layer.runtime.layout())
                 .map_err(app_error)?;
@@ -309,7 +399,6 @@ pub(super) fn refresh_window_frames(
         }
         frame.snapshot = Some(snapshot.clone());
         frame.layer.render(frame.outer, now, false)?;
-        frame.pixels = frame.layer.pixels();
         frame.content_version = frame.layer.content_version();
         updates.push((
             surface,
@@ -350,7 +439,7 @@ pub(super) struct WindowFrameLayer {
     pub(super) layer: Layer,
     pub(super) snapshot: Option<WindowChromeSnapshot>,
     pub(super) outer: SizeI,
-    pub(super) pixels: Arc<[u8]>,
+    icon_image: Option<ImageId>,
     pub(super) content_version: u64,
 }
 
@@ -387,8 +476,8 @@ pub(super) fn prepare_desktop_layers(
     now: u64,
     first_modeset: bool,
     background: &mut Layer,
-    frames: &BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
-    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    frames: &mut BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
     stacking_order: &[WaylandSurfaceId],
     widgets: &mut [WidgetLayer],
     icons: &mut [(String, Layer)],
@@ -405,12 +494,13 @@ pub(super) fn prepare_desktop_layers(
         layers.push(DesktopLayer {
             key: DesktopLayerKey::Background,
             content_version: background.content_version(),
-            pixels,
+            update: DesktopImageUpdate::Full(pixels),
             extent,
             position: PointI::default(),
             clip: None,
             alpha_mode: ImageAlphaMode::Opaque,
-            damage: None,
+            pixel_format: ImagePixelFormat::Rgba8,
+            visible: true,
         });
     }
 
@@ -428,34 +518,35 @@ pub(super) fn prepare_desktop_layers(
         })
         .collect::<BTreeMap<_, _>>();
     for surface in stacking_order {
-        let Some(window) = windows.get(surface) else {
+        let Some(window) = windows.get_mut(surface) else {
             continue;
         };
-        if matches!(window.role, SurfaceRole::Cursor | SurfaceRole::DragIcon)
-            || window.minimized
-            || (window.role == SurfaceRole::SessionLock) != session_locked
-        {
+        if matches!(window.role, SurfaceRole::Cursor | SurfaceRole::DragIcon) {
             continue;
         }
+        let visible =
+            !window.minimized && (window.role == SurfaceRole::SessionLock) == session_locked;
         let position = placements.get(surface).copied().unwrap_or(window.position);
         let outer = window
             .chrome_outer
             .unwrap_or_else(|| legacy_window_outer(window, config));
         if window_is_decorated(window)
-            && let Some(frame) = frames.get(surface)
+            && let Some(frame) = frames.get_mut(surface)
         {
             layers.push(DesktopLayer {
                 key: DesktopLayerKey::Frame(surface.get()),
                 content_version: frame.content_version,
-                pixels: Arc::clone(&frame.pixels),
+                update: frame.layer.take_update(),
                 extent: frame.outer,
                 position,
                 clip: None,
                 alpha_mode: ImageAlphaMode::Straight,
-                damage: None,
+                pixel_format: ImagePixelFormat::Rgba8,
+                visible,
             });
         }
-        if window_is_decorated(window)
+        if visible
+            && window_is_decorated(window)
             && window.chrome.is_none()
             && window.role == SurfaceRole::XdgToplevel
         {
@@ -476,7 +567,7 @@ pub(super) fn prepare_desktop_layers(
                 layers.push(DesktopLayer {
                     key: DesktopLayerKey::LegacyControl(surface.get(), index as u8),
                     content_version: icon.content_version(),
-                    pixels,
+                    update: DesktopImageUpdate::Full(pixels),
                     extent: icon_extent,
                     position: PointI {
                         x: position.x + outer.width
@@ -488,7 +579,8 @@ pub(super) fn prepare_desktop_layers(
                     },
                     clip: None,
                     alpha_mode: ImageAlphaMode::Premultiplied,
-                    damage: None,
+                    pixel_format: ImagePixelFormat::Rgba8,
+                    visible: true,
                 });
             }
         }
@@ -512,12 +604,13 @@ pub(super) fn prepare_desktop_layers(
         layers.push(DesktopLayer {
             key: DesktopLayerKey::Surface(surface.get()),
             content_version: window.revision,
-            pixels: Arc::clone(&window.rgba),
+            update: window.take_image_update(),
             extent: window.size,
             position: content_position,
             clip: preview_clip,
             alpha_mode: window.alpha_mode,
-            damage: window.damage,
+            pixel_format: window.pixel_format,
+            visible,
         });
     }
 
@@ -530,21 +623,22 @@ pub(super) fn prepare_desktop_layers(
             layers.push(DesktopLayer {
                 key: DesktopLayerKey::Widget(index as u32),
                 content_version: widget.layer.content_version(),
-                pixels,
+                update: DesktopImageUpdate::Full(pixels),
                 extent: widget_extent,
                 position,
                 clip: None,
                 alpha_mode: ImageAlphaMode::Straight,
-                damage: None,
+                pixel_format: ImagePixelFormat::Rgba8,
+                visible: true,
             });
         }
         if let Some((surface, icon)) =
-            drag_icon.and_then(|surface| windows.get(&surface).map(|icon| (surface, icon)))
+            drag_icon.and_then(|surface| windows.get_mut(&surface).map(|icon| (surface, icon)))
         {
             layers.push(DesktopLayer {
                 key: DesktopLayerKey::DragIcon(surface.get()),
                 content_version: icon.revision,
-                pixels: Arc::clone(&icon.rgba),
+                update: icon.take_image_update(),
                 extent: icon.size,
                 position: PointI {
                     x: drag_position.x.round() as i32,
@@ -552,7 +646,8 @@ pub(super) fn prepare_desktop_layers(
                 },
                 clip: None,
                 alpha_mode: icon.alpha_mode,
-                damage: icon.damage,
+                pixel_format: icon.pixel_format,
+                visible: true,
             });
         }
     }
@@ -560,7 +655,7 @@ pub(super) fn prepare_desktop_layers(
         layers.push(DesktopLayer {
             key: DesktopLayerKey::Cursor,
             content_version: cursor_image_signature(cursor),
-            pixels: Arc::from(cursor.rgba.as_slice()),
+            update: DesktopImageUpdate::Full(Arc::from(cursor.rgba.as_slice())),
             extent: cursor.size,
             position: PointI {
                 x: pointer_position.x.round() as i32 - cursor.hotspot.x,
@@ -572,7 +667,8 @@ pub(super) fn prepare_desktop_layers(
             } else {
                 ImageAlphaMode::Straight
             },
-            damage: None,
+            pixel_format: ImagePixelFormat::Rgba8,
+            visible: true,
         });
     }
     Ok(layers)

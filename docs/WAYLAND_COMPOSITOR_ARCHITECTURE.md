@@ -90,9 +90,11 @@ resource, client, socket, and event-loop implementation.
 Within the managed host, `desktop_wayland.rs` is the single-owner orchestration loop. Its sibling
 modules isolate cursor-plane/KMS lifetime tracking, event sources and input profiling, geometry and
 damage math, pointer routing and hit testing, resize transactions, composed layer preparation,
-pointer visuals, retained desktop-scene synchronization, and Vulkan/software scanout. These
-boundaries are internal and do not create additional compositor-owner threads; the Vulkan
-completion waiter remains the one explicitly isolated blocking worker.
+pointer visuals, retained desktop-scene synchronization, bounded full-SHM copying, and
+Vulkan/software scanout. These boundaries are internal and do not create additional owners. Two
+explicit blocking operations are isolated: the Vulkan completion waiter and a single bounded SHM
+copy worker. The latter receives only duplicated FDs plus immutable commit metadata; it never
+accesses Wayland objects or compositor state.
 
 ## Protocol source and advertisement rules
 
@@ -214,21 +216,34 @@ control, pointer, and cursor-shape visual path therefore remains ordinary Telorg
 
 The operational managed path is entirely Telorgon-rendered:
 
-1. The compositor copies a committed SHM buffer with checked offset/stride/extent arithmetic.
-2. `telorgon-compositor-render` converts supported little-endian Wayland pixel formats to a retained
-   Telorgon `ImageResource` with explicit alpha/color metadata, then applies the committed
-   `wl_surface` transform/scale and viewporter crop/destination using bounded deterministic
-   sampling.
+1. The compositor copies a committed SHM buffer with checked offset/stride/extent arithmetic. Once
+   a direct, same-size surface has a retained image, `wl_surface` damage limits positional I/O to
+   tightly packed damaged rows. New images, metadata changes, transformed/viewported surfaces, and
+   full-surface damage take a bounded FIFO worker path so full pixel I/O and conversion do not stall
+   the input/protocol owner. That worker also prepares independent client-retained and scene-owned
+   snapshots, so accepting a completed full image does not perform another whole-buffer copy on the
+   owner. The owner applies completed revisions in order, delays `wl_buffer` release until every
+   queued read of that buffer is done, and ignores superseded images only when a later queued full
+   copy covers them.
+2. `telorgon-compositor-render` preserves little-endian ARGB/XRGB as native BGRA and ABGR/XBGR as
+   native RGBA, with explicit alpha/color metadata; only RGB565 and geometry transformations need
+   pixel conversion. Buffer transform/scale and viewporter crop/destination use bounded
+   deterministic sampling.
 3. Client images, the composed background, composed server frames, shell widgets, popups, drag
    icons, and the software cursor are synchronized into one renderer-neutral retained desktop
-   scene with stable image/node identities. Client damage updates the corresponding retained image
-   region; movement and interactive preview changes damage the union of old and new bounds. A
-   committed buffer that is stale during resize is clipped to the desired content rectangle and is
-   never stretched.
-4. The selected renderer composites that scene. Vulkan applies the scene delta and draws its
+   scene with stable image/node identities. Client and composed-chrome damage update only the
+   corresponding retained image region; hidden/minimized layers retain their image identity without
+   contributing a draw. Focus-state changes reconcile the existing window-frame component root
+   instead of recreating its runtime. Movement and interactive preview changes damage the union of
+   old and new bounds. A committed buffer that is stale during resize is clipped to the desired
+   content rectangle and is never stretched.
+4. The selected renderer composites that scene. Vulkan stages only changed image rows. If an older
+   submission still samples that image, a reusable copy-on-write texture receives an on-GPU content
+   preserve followed by the regional patch; an idle texture is patched in place. It then draws the
    individual layers directly into the selected imported GBM target, without a full-screen CPU
-   flatten/upload. Software applies the same delta to its retained reference surface and copies
-   only the accumulated damaged region into the mapped GBM target. The composed pointer uses three
+   flatten/upload. Software patches the same retained resources, applies the same delta to its
+   retained reference surface, and copies only accumulated output damage into the mapped GBM
+   target. The composed pointer uses three
    completion-retired ARGB8888 GBM cursor buffers when an atomic cursor plane is available;
    otherwise it remains an ordinary retained desktop-scene layer.
 5. Three linear GBM scanout buffers receive the primary output. Primary and cursor state are
@@ -263,6 +278,15 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
 
 - Incoming protocol FDs become `OwnedFd` immediately; duplicated FDs have one documented owner.
 - SHM reads use positional I/O and never mutate a client's shared file offset.
+- The SHM worker owns only duplicated files and immutable snapshots. Wayland state/application and
+  `wl_buffer.release` remain owner-thread operations; the request mailbox and deferred FIFO have
+  explicit hard bounds. Full client and scene snapshots are prepared on that worker and transferred
+  to the owner without another whole-image copy.
+- A direct SHM regional update carries tightly packed native-order rows through the desktop scene;
+  a renderer may not reinterpret damage as permission to discard pixels outside that rectangle.
+- Vulkan image replacement while an older submission is in flight preserves the old contents with
+  a transfer-source/transfer-destination image copy before applying regional staging bytes. Both
+  images remain completion-pinned, and only an unpinned retired image may re-enter the pool.
 - A DMA-BUF buffer owns all plane FDs until duplicated into a generation-scoped renderer lease.
 - Explicit acquire/release state is keyed by `(surface, commit revision)`, not merely by surface.
 - Vulkan explicit modifier imports use `VkSubresourceLayout::size == 0`, as required by the Vulkan
@@ -285,6 +309,35 @@ The implementation is based on the following primary specifications and source a
 - [DRM KMS documentation](https://docs.kernel.org/gpu/drm-kms.html) and the official libdrm [`xf86drmMode.h`](https://cgit.freedesktop.org/drm/libdrm/tree/xf86drmMode.h) define atomic presentation and exact ABI layouts. The source audit caught the legacy coordinate fields that precede `possible_crtcs` in `drmModePlane`.
 - The [Vulkan explicit DRM modifier structure](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageDrmFormatModifierExplicitCreateInfoEXT.html) requires each explicit plane layout's `size` to be zero.
 - wgpu commit `d99c241a3b9dcc0f6674d990d007d79e94d39862` was inspected for DMA-BUF import capability and ownership invariants; Flutter commit `51fd9afadf309ba5337320bd3653f5345c156cb9` was inspected for sync-FD ownership and frame-slot reuse. Those projects are references only; no framework code or abstraction was copied.
+
+### Retained SHM and chrome-update audit
+
+The concern was focus-triggered whole-frame work: rebuilding composed window chrome and copying,
+converting, then re-uploading complete SHM images on the compositor/input owner thread. Telorgon's
+component, render-scene, software, Vulkan, and Wayland ownership documents were read first. Egui
+commit `fd54387eac03f57ca772a8fb590ceaadf780f31c` was inspected at
+`crates/egui-wgpu/src/renderer.rs::update_texture` and `epaint/src/textures.rs::TexturesDelta` for
+retained texture identity and partial writes. Xilem/Masonry commit
+`ce7b04d2ba2d9d7a8c364f2ab109e2083121e144` was inspected at
+`xilem_core/src/views/any_view.rs::dyn_rebuild` and
+`masonry/src/properties/content_color.rs` for same-type in-place reconciliation and property-scoped
+invalidations. No reference code or abstraction was copied.
+
+The [Wayland `wl_surface.damage_buffer` contract](https://wayland.freedesktop.org/docs/html/apa.html#protocol-spec-wl_surface-request-damage_buffer)
+defines damage in buffer coordinates as the area where pending buffer contents differ from current
+surface contents. The Vulkan [copy-command rules](https://docs.vulkan.org/spec/latest/chapters/copies.html)
+and [format rules](https://docs.vulkan.org/spec/latest/chapters/formats.html) govern the regional
+buffer-to-image writes, image preservation copy, row length, and native BGRA/RGBA formats.
+
+Adopted invariants are: a same-type root update preserves component/runtime identity; a partial
+write preserves all pixels outside its rectangle; native four-channel SHM order remains explicit;
+and resources named by an incomplete Vulkan submission remain pinned. Rebuilding every frame on
+focus, flattening the desktop through software before Vulkan, and replacing a sampled image with a
+full CPU re-upload were rejected because each scales work with unaffected state. Portable tests
+cover root reconciliation, regional desktop damage, hidden-layer retention, native SHM channel
+order, software BGRA sampling, and upload classification. Linux hardware timing and visual
+qualification remain user-run gaps; profiler spans distinguish worker-full and owner-regional SHM
+copies and publish the actual copied byte count.
 
 ### Atomic cursor-plane audit
 

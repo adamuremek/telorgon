@@ -189,6 +189,20 @@ pub enum ImageAlphaMode {
     Opaque,
 }
 
+/// Byte order of one four-channel image texel in CPU memory.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum ImagePixelFormat {
+    #[default]
+    Rgba8,
+    Bgra8,
+}
+
+impl ImagePixelFormat {
+    pub const fn bytes_per_pixel(self) -> usize {
+        4
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageResource {
     pub image: ImageId,
@@ -196,7 +210,8 @@ pub struct ImageResource {
     pub extent: SizeI,
     pub color_encoding: ImageColorEncoding,
     pub alpha_mode: ImageAlphaMode,
-    pub pixels_rgba8: Arc<[u8]>,
+    pub pixel_format: ImagePixelFormat,
+    pub pixels: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -208,7 +223,8 @@ pub struct ImageResourceUpdate {
     pub row_bytes: usize,
     pub color_encoding: ImageColorEncoding,
     pub alpha_mode: ImageAlphaMode,
-    pub pixels_rgba8: Arc<[u8]>,
+    pub pixel_format: ImagePixelFormat,
+    pub pixels: Arc<[u8]>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -390,6 +406,17 @@ pub struct RenderSceneDelta {
     pub material_resources: Vec<MaterialResourceDelta>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct RetainedImageResource {
+    image: ImageId,
+    content_version: u64,
+    extent: SizeI,
+    color_encoding: ImageColorEncoding,
+    alpha_mode: ImageAlphaMode,
+    pixel_format: ImagePixelFormat,
+    pixels: Arc<[u8]>,
+}
+
 #[derive(Clone, Debug)]
 pub struct RenderScene {
     pub extent: SizeF,
@@ -408,7 +435,7 @@ pub struct RenderScene {
     draw_order_dirty: bool,
     atlas_extent: SizeI,
     atlas_pages: Vec<AtlasPageUpdate>,
-    image_resources: BTreeMap<ImageId, ImageResource>,
+    image_resources: BTreeMap<ImageId, RetainedImageResource>,
     image_resource_updates: Vec<ImageResourceDelta>,
     material_resources: BTreeMap<MaterialId, MaterialResource>,
     material_resource_updates: Vec<MaterialResourceDelta>,
@@ -455,7 +482,18 @@ impl RenderScene {
                 "image resource content version cannot move backwards",
             ));
         }
-        if self.image_resources.get(&resource.image) == Some(&resource) {
+        if self
+            .image_resources
+            .get(&resource.image)
+            .is_some_and(|current| {
+                current.content_version == resource.content_version
+                    && current.extent == resource.extent
+                    && current.color_encoding == resource.color_encoding
+                    && current.alpha_mode == resource.alpha_mode
+                    && current.pixel_format == resource.pixel_format
+                    && current.pixels.as_ref() == resource.pixels.as_ref()
+            })
+        {
             return Ok(());
         }
         let row_bytes = resource.extent.width as usize * 4;
@@ -472,12 +510,24 @@ impl RenderScene {
             row_bytes,
             color_encoding: resource.color_encoding,
             alpha_mode: resource.alpha_mode,
-            pixels_rgba8: Arc::clone(&resource.pixels_rgba8),
+            pixel_format: resource.pixel_format,
+            pixels: Arc::clone(&resource.pixels),
         };
         let image = resource.image;
         let extent = update.extent;
         let rect = update.rect;
-        self.image_resources.insert(image, resource);
+        self.image_resources.insert(
+            image,
+            RetainedImageResource {
+                image: resource.image,
+                content_version: resource.content_version,
+                extent: resource.extent,
+                color_encoding: resource.color_encoding,
+                alpha_mode: resource.alpha_mode,
+                pixel_format: resource.pixel_format,
+                pixels: Arc::clone(&resource.pixels),
+            },
+        );
         self.image_resource_updates
             .push(ImageResourceDelta::Write(update));
         self.damage_image_instance_regions(image, extent, rect);
@@ -498,6 +548,7 @@ impl RenderScene {
         if resource.extent != update.extent
             || resource.color_encoding != update.color_encoding
             || resource.alpha_mode != update.alpha_mode
+            || resource.pixel_format != update.pixel_format
             || update.content_version < resource.content_version
         {
             return Err(RenderError::new(
@@ -505,21 +556,20 @@ impl RenderScene {
                 "image region update metadata does not match the retained resource",
             ));
         }
-        let mut pixels = resource.pixels_rgba8.to_vec();
         let destination_stride = resource.extent.width as usize * 4;
         let copy_bytes = update.rect.width as usize * 4;
+        let pixels = Arc::make_mut(&mut resource.pixels);
         for row in 0..update.rect.height as usize {
             let source = row * update.row_bytes;
             let target =
                 (update.rect.y as usize + row) * destination_stride + update.rect.x as usize * 4;
             pixels[target..target + copy_bytes]
-                .copy_from_slice(&update.pixels_rgba8[source..source + copy_bytes]);
+                .copy_from_slice(&update.pixels[source..source + copy_bytes]);
         }
         let image = update.image;
         let extent = update.extent;
         let rect = update.rect;
         resource.content_version = update.content_version;
-        resource.pixels_rgba8 = pixels.into();
         self.image_resource_updates
             .push(ImageResourceDelta::Write(update));
         self.damage_image_instance_regions(image, extent, rect);
@@ -760,7 +810,7 @@ impl RenderScene {
     }
 }
 
-fn full_image_update(resource: &ImageResource) -> ImageResourceUpdate {
+fn full_image_update(resource: &RetainedImageResource) -> ImageResourceUpdate {
     ImageResourceUpdate {
         image: resource.image,
         content_version: resource.content_version,
@@ -774,7 +824,8 @@ fn full_image_update(resource: &ImageResource) -> ImageResourceUpdate {
         row_bytes: resource.extent.width as usize * 4,
         color_encoding: resource.color_encoding,
         alpha_mode: resource.alpha_mode,
-        pixels_rgba8: Arc::clone(&resource.pixels_rgba8),
+        pixel_format: resource.pixel_format,
+        pixels: Arc::clone(&resource.pixels),
     }
 }
 
@@ -786,10 +837,10 @@ fn validate_image_resource(resource: &ImageResource) -> RenderResult<()> {
         ));
     }
     let required = resource.extent.width as usize * resource.extent.height as usize * 4;
-    if resource.pixels_rgba8.len() != required {
+    if resource.pixels.len() != required {
         return Err(RenderError::new(
             RenderErrorKind::InvalidScene,
-            "full image resource payload must be tightly packed RGBA8",
+            "full image resource payload must be tightly packed four-channel texels",
         ));
     }
     Ok(())
@@ -807,7 +858,7 @@ fn validate_image_update(update: &ImageResourceUpdate) -> RenderResult<()> {
         || rect.bottom() > update.extent.height
         || update.row_bytes < rect.width as usize * 4
         || !update.row_bytes.is_multiple_of(4)
-        || update.pixels_rgba8.len() < update.row_bytes * rect.height as usize
+        || update.pixels.len() < update.row_bytes * rect.height as usize
     {
         return Err(RenderError::new(
             RenderErrorKind::InvalidScene,
@@ -831,4 +882,73 @@ pub fn apply_patches<T: Clone>(target: &mut Vec<T>, patches: &[RangePatch<T>], f
         }
     }
     target.truncate(final_len);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::RectI;
+
+    #[test]
+    fn regional_image_updates_preserve_other_pixels_and_older_deltas() {
+        let image = ImageId(7);
+        let original: Arc<[u8]> =
+            Arc::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+        let mut scene = RenderScene::default();
+        scene.extent = SizeF {
+            width: 2.0,
+            height: 2.0,
+        };
+        scene
+            .set_image_resource(ImageResource {
+                image,
+                content_version: 1,
+                extent: SizeI {
+                    width: 2,
+                    height: 2,
+                },
+                color_encoding: ImageColorEncoding::Srgb,
+                alpha_mode: ImageAlphaMode::Straight,
+                pixel_format: ImagePixelFormat::Rgba8,
+                pixels: Arc::clone(&original),
+            })
+            .unwrap();
+        let first = scene.take_delta().unwrap();
+
+        scene
+            .update_image_resource_region(ImageResourceUpdate {
+                image,
+                content_version: 2,
+                extent: SizeI {
+                    width: 2,
+                    height: 2,
+                },
+                rect: RectI {
+                    x: 1,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                },
+                row_bytes: 4,
+                color_encoding: ImageColorEncoding::Srgb,
+                alpha_mode: ImageAlphaMode::Straight,
+                pixel_format: ImagePixelFormat::Rgba8,
+                pixels: Arc::from([21, 22, 23, 24]),
+            })
+            .unwrap();
+
+        let ImageResourceDelta::Write(first_write) = &first.image_resources[0] else {
+            panic!("initial image delta must be a write");
+        };
+        assert_eq!(first_write.pixels.as_ref(), original.as_ref());
+
+        let snapshot = scene.snapshot_delta(SizeI::default(), Vec::new());
+        let ImageResourceDelta::Write(snapshot_write) = &snapshot.image_resources[0] else {
+            panic!("snapshot image delta must be a write");
+        };
+        assert_eq!(
+            snapshot_write.pixels.as_ref(),
+            &[1, 2, 3, 4, 21, 22, 23, 24, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+    }
 }

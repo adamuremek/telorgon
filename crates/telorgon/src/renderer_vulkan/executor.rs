@@ -154,6 +154,7 @@ impl RenderBackend for VulkanDevice {
                 &staged,
             )
         };
+        frame.core.images.extend(staged.retained_images());
         #[cfg(feature = "instrumentation")]
         frame.core.write_profiler_timestamp(
             PROFILER_TIMESTAMP_UPLOAD_END,
@@ -606,7 +607,7 @@ fn validate_resource_updates(delta: &RenderSceneDelta) -> RenderResult<()> {
                 || rect.bottom() > update.extent.height
                 || update.row_bytes < rect.width as usize * 4
                 || !update.row_bytes.is_multiple_of(4)
-                || update.pixels_rgba8.len() < update.row_bytes.saturating_mul(rect.height as usize)
+                || update.pixels.len() < update.row_bytes.saturating_mul(rect.height as usize)
             {
                 return Err(invalid_scene(
                     "Vulkan image resource update has invalid geometry, stride, or payload",
@@ -949,7 +950,7 @@ fn record_uploads(
                 .size(vk::WHOLE_SIZE)
         })
         .collect::<Vec<_>>();
-    let before_images = uploads
+    let mut before_images = uploads
         .image_destinations
         .iter()
         .map(|destination| {
@@ -976,6 +977,19 @@ fn record_uploads(
                 .subresource_range(color_range())
         })
         .collect::<Vec<_>>();
+    before_images.extend(uploads.image_destinations.iter().filter_map(|destination| {
+        destination.preserve_from.as_ref().map(|source| {
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .image(source.raw())
+                .subresource_range(color_range())
+        })
+    }));
     unsafe {
         device.cmd_pipeline_barrier2(
             command_buffer,
@@ -993,6 +1007,34 @@ fn record_uploads(
             );
         }
         for destination in &uploads.image_destinations {
+            if let Some(source) = &destination.preserve_from {
+                device.cmd_copy_image2(
+                    command_buffer,
+                    &vk::CopyImageInfo2::default()
+                        .src_image(source.raw())
+                        .src_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                        .dst_image(destination.image.raw())
+                        .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .regions(&[vk::ImageCopy2::default()
+                            .src_subresource(vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            })
+                            .dst_subresource(vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            })
+                            .extent(vk::Extent3D {
+                                width: destination.image.extent.width,
+                                height: destination.image.extent.height,
+                                depth: 1,
+                            })]),
+                );
+            }
             device.cmd_copy_buffer_to_image2(
                 command_buffer,
                 &vk::CopyBufferToImageInfo2::default()
@@ -1020,7 +1062,7 @@ fn record_uploads(
                 .size(vk::WHOLE_SIZE)
         })
         .collect::<Vec<_>>();
-    let after_images = uploads
+    let mut after_images = uploads
         .image_destinations
         .iter()
         .map(|destination| {
@@ -1035,6 +1077,19 @@ fn record_uploads(
                 .subresource_range(color_range())
         })
         .collect::<Vec<_>>();
+    after_images.extend(uploads.image_destinations.iter().filter_map(|destination| {
+        destination.preserve_from.as_ref().map(|source| {
+            vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                .dst_stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image(source.raw())
+                .subresource_range(color_range())
+        })
+    }));
     unsafe {
         device.cmd_pipeline_barrier2(
             command_buffer,

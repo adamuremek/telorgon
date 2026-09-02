@@ -5,12 +5,12 @@ use crate::core::{ColorRgba8, RectF, RectI, SizeF, SizeI};
 
 use crate::render::{
     BlendMode, Border, BoxInstance, ColorSpace, DamageRegion, DrawItem, GlyphInstance,
-    ImageAlphaMode, ImageColorEncoding, ImageId, ImageInstance, ImageResourceDelta, MaterialId,
-    MaterialInstance, MaterialKind, MaterialResource, MaterialResourceDelta, PrimitiveKind,
-    ReadbackFormat, ReadbackImage, ReadbackRequest, RenderBackend, RenderClip, RenderError,
-    RenderErrorKind, RenderReadback, RenderRequest, RenderResult, RenderSceneDelta,
-    RenderSpatialNode, RenderStats, RenderTargetInfo, SceneUpdateStats, Shadow, SpatialId,
-    TargetLoad, apply_patches,
+    ImageAlphaMode, ImageColorEncoding, ImageId, ImageInstance, ImagePixelFormat,
+    ImageResourceDelta, MaterialId, MaterialInstance, MaterialKind, MaterialResource,
+    MaterialResourceDelta, PrimitiveKind, ReadbackFormat, ReadbackImage, ReadbackRequest,
+    RenderBackend, RenderClip, RenderError, RenderErrorKind, RenderReadback, RenderRequest,
+    RenderResult, RenderSceneDelta, RenderSpatialNode, RenderStats, RenderTargetInfo,
+    SceneUpdateStats, Shadow, SpatialId, TargetLoad, apply_patches,
 };
 
 #[derive(Clone, Debug)]
@@ -18,6 +18,7 @@ struct SoftwareImage {
     extent: SizeI,
     color_encoding: ImageColorEncoding,
     alpha_mode: ImageAlphaMode,
+    pixel_format: ImagePixelFormat,
     pixels: Vec<u8>,
 }
 
@@ -122,6 +123,7 @@ impl RenderBackend for SoftwareRenderer {
                             extent: update.extent,
                             color_encoding: update.color_encoding,
                             alpha_mode: update.alpha_mode,
+                            pixel_format: update.pixel_format,
                             pixels: vec![
                                 0;
                                 update.extent.width as usize
@@ -129,8 +131,9 @@ impl RenderBackend for SoftwareRenderer {
                                     * 4
                             ],
                         });
-                    if image.extent != update.extent {
+                    if image.extent != update.extent || image.pixel_format != update.pixel_format {
                         image.extent = update.extent;
+                        image.pixel_format = update.pixel_format;
                         image.pixels.resize(
                             update.extent.width as usize * update.extent.height as usize * 4,
                             0,
@@ -145,7 +148,7 @@ impl RenderBackend for SoftwareRenderer {
                         let target = (update.rect.y as usize + row) * destination_stride
                             + update.rect.x as usize * 4;
                         image.pixels[target..target + copy_bytes]
-                            .copy_from_slice(&update.pixels_rgba8[source..source + copy_bytes]);
+                            .copy_from_slice(&update.pixels[source..source + copy_bytes]);
                     }
                 }
                 ImageResourceDelta::Remove(image) => {
@@ -965,8 +968,14 @@ fn draw_image(
             });
             let u = (local.x - instance.rect.x) / instance.rect.width;
             let v = (local.y - instance.rect.y) / instance.rect.height;
-            let sampled =
-                sample_image_linear(&image.pixels, image.extent, image.color_encoding, u, v);
+            let sampled = sample_image_linear(
+                &image.pixels,
+                image.extent,
+                image.color_encoding,
+                image.pixel_format,
+                u,
+                v,
+            );
             let opacity = instance.opacity.clamp(0.0, 1.0);
             if let Some(tint) = instance.tint {
                 let source_alpha = match image.alpha_mode {
@@ -1162,6 +1171,7 @@ fn sample_image_linear(
     pixels: &[u8],
     extent: SizeI,
     encoding: ImageColorEncoding,
+    pixel_format: ImagePixelFormat,
     u: f32,
     v: f32,
 ) -> [f32; 4] {
@@ -1182,11 +1192,16 @@ fn sample_image_linear(
             ImageColorEncoding::Linear => f32::from(channel) / 255.0,
             ImageColorEncoding::Srgb => srgb_decode_byte(channel),
         };
+        let channels = &pixels[index..index + 4];
+        let (red, green, blue) = match pixel_format {
+            ImagePixelFormat::Rgba8 => (channels[0], channels[1], channels[2]),
+            ImagePixelFormat::Bgra8 => (channels[2], channels[1], channels[0]),
+        };
         [
-            decode(pixels[index]),
-            decode(pixels[index + 1]),
-            decode(pixels[index + 2]),
-            f32::from(pixels[index + 3]) / 255.0,
+            decode(red),
+            decode(green),
+            decode(blue),
+            f32::from(channels[3]) / 255.0,
         ]
     };
     let top_left = fetch(x0, y0);
@@ -1337,6 +1352,7 @@ mod tests {
             },
             color_encoding: ImageColorEncoding::Srgb,
             alpha_mode: ImageAlphaMode::Straight,
+            pixel_format: ImagePixelFormat::Rgba8,
             pixels: vec![0, 0, 0, 255],
         };
         let instance = ImageInstance {
@@ -1354,6 +1370,26 @@ mod tests {
         draw_image(&mut raster, &instance, None, None, rect, &image);
 
         assert_eq!(pixels, [255, 255, 255, 255]);
+    }
+
+    #[test]
+    fn bgra_images_are_sampled_in_logical_rgb_order() {
+        let sampled = sample_image_linear(
+            &[3, 2, 255, 128],
+            SizeI {
+                width: 1,
+                height: 1,
+            },
+            ImageColorEncoding::Srgb,
+            ImagePixelFormat::Bgra8,
+            0.5,
+            0.5,
+        );
+
+        assert!(sampled[0] > 0.99);
+        assert!(sampled[1] < 0.001);
+        assert!(sampled[2] < 0.001);
+        assert!((sampled[3] - 128.0 / 255.0).abs() < 0.001);
     }
 
     #[test]
@@ -1610,7 +1646,8 @@ mod tests {
                 },
                 color_encoding: ImageColorEncoding::Srgb,
                 alpha_mode: ImageAlphaMode::Straight,
-                pixels_rgba8: Arc::from([255, 0, 0, 255, 0, 255, 0, 128]),
+                pixel_format: ImagePixelFormat::Rgba8,
+                pixels: Arc::from([255, 0, 0, 255, 0, 255, 0, 128]),
             })
             .unwrap();
         source.images.upsert(

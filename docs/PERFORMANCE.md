@@ -88,8 +88,10 @@ Portable and compile-only tests in `telorgon-renderer-vulkan` currently verify:
 - reusable per-frame command pools, command buffers, descriptor pools/sets, and mapped staging;
 - generation-safe descriptor reuse and completion-pinned buffer retirement;
 - typed staging and device-local budget exhaustion;
-- versioned R8 atlas and RGBA image uploads, copy-on-write sampled-image replacement, stable
-  per-draw texture descriptors, dense spatial/clip IDs, and analytic rounded clips;
+- versioned R8 atlas and native RGBA/BGRA image uploads, regional staging writes, in-place updates
+  for idle sampled images, completion-safe on-GPU preservation into reusable copy-on-write images,
+  stable per-draw texture descriptors, full-image-free regional CPU retention with older-delta
+  preservation, dense spatial/clip IDs, and analytic rounded clips;
 - deterministic software rendering of the same ordered box/glyph/image/material scene; and
 - passing developer-hardware E4 retained-resource and managed Windows E5 recovery harnesses.
 

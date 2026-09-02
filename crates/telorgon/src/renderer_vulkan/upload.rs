@@ -97,6 +97,7 @@ pub(crate) struct SceneUploadPlan {
 pub(crate) struct ImageUploadGroup {
     pub(crate) image: Arc<AllocatedImage>,
     pub(crate) previously_initialized: bool,
+    pub(crate) preserve_from: Option<Arc<AllocatedImage>>,
     pub(crate) bytes_per_pixel: u32,
     pub(crate) chunks: Vec<ImageUploadChunk>,
 }
@@ -143,6 +144,7 @@ impl SceneUploadPlan {
         &mut self,
         image: Arc<AllocatedImage>,
         previously_initialized: bool,
+        preserve_from: Option<Arc<AllocatedImage>>,
         bytes_per_pixel: u32,
         chunks: Vec<ImageUploadChunk>,
     ) {
@@ -156,6 +158,7 @@ impl SceneUploadPlan {
         self.image_groups.push(ImageUploadGroup {
             image,
             previously_initialized,
+            preserve_from,
             bytes_per_pixel,
             chunks,
         });
@@ -178,6 +181,7 @@ pub(crate) struct StagedUploads {
 pub(crate) struct StagedImageDestination {
     pub(crate) image: Arc<AllocatedImage>,
     pub(crate) previously_initialized: bool,
+    pub(crate) preserve_from: Option<Arc<AllocatedImage>>,
     pub(crate) regions: Vec<vk::BufferImageCopy2<'static>>,
 }
 
@@ -234,6 +238,7 @@ impl StagedUploads {
             image_destinations.push(StagedImageDestination {
                 image: group.image,
                 previously_initialized: group.previously_initialized,
+                preserve_from: group.preserve_from,
                 regions,
             });
         }
@@ -255,7 +260,20 @@ impl StagedUploads {
     }
 
     pub(crate) fn copy_count(&self) -> u32 {
-        (self.destinations.len() + self.image_destinations.len()) as u32
+        (self.destinations.len()
+            + self.image_destinations.len()
+            + self
+                .image_destinations
+                .iter()
+                .filter(|destination| destination.preserve_from.is_some())
+                .count()) as u32
+    }
+
+    pub(crate) fn retained_images(&self) -> impl Iterator<Item = Arc<AllocatedImage>> + '_ {
+        self.image_destinations.iter().flat_map(|destination| {
+            std::iter::once(Arc::clone(&destination.image))
+                .chain(destination.preserve_from.iter().map(Arc::clone))
+        })
     }
 }
 

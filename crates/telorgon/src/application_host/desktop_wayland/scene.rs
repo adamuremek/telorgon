@@ -4,8 +4,8 @@ use std::sync::Arc;
 use crate::core::{ColorRgba8, PointI, RectF, RectI, SizeF, SizeI};
 use crate::render::{
     BatchKey, BlendMode, ClipId, DrawItem, ImageAlphaMode, ImageColorEncoding, ImageId,
-    ImageInstance, ImageResource, ImageResourceUpdate, PipelineKind, PrimitiveKind, RenderClip,
-    RenderScene, RenderSceneDelta, SpatialId,
+    ImageInstance, ImagePixelFormat, ImageResource, ImageResourceUpdate, PipelineKind,
+    PrimitiveKind, RenderClip, RenderScene, RenderSceneDelta, SpatialId,
 };
 use crate::scene::NodeId;
 use crate::ui::CornerRadii;
@@ -23,18 +23,30 @@ pub(super) enum DesktopLayerKey {
 }
 
 #[derive(Clone)]
+pub(super) enum DesktopImageUpdate {
+    Unchanged,
+    Full(Arc<[u8]>),
+    Region {
+        rect: RectI,
+        row_bytes: usize,
+        pixels: Arc<[u8]>,
+    },
+}
+
+#[derive(Clone)]
 pub(super) struct DesktopLayer {
     pub key: DesktopLayerKey,
     pub content_version: u64,
-    pub pixels: Arc<[u8]>,
+    pub update: DesktopImageUpdate,
     pub extent: SizeI,
     pub position: PointI,
     /// A compositor-space clip. This is how a stale committed client buffer is constrained to
     /// the current interactive-resize preview without stretching it.
     pub clip: Option<RectI>,
     pub alpha_mode: ImageAlphaMode,
-    /// Local image damage for this content generation. `None` requests a full resource update.
-    pub damage: Option<RectI>,
+    pub pixel_format: ImagePixelFormat,
+    /// Invisible layers keep their retained resource while contributing no draw or hit geometry.
+    pub visible: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -47,6 +59,7 @@ struct SceneEntry {
     content_version: u64,
     extent: SizeI,
     alpha_mode: ImageAlphaMode,
+    pixel_format: ImagePixelFormat,
 }
 
 pub(super) struct DesktopScene {
@@ -123,6 +136,7 @@ impl DesktopScene {
                         content_version: 0,
                         extent: SizeI::default(),
                         alpha_mode: ImageAlphaMode::Straight,
+                        pixel_format: ImagePixelFormat::Rgba8,
                     };
                     self.next_node = self.next_node.wrapping_add(1).max(1);
                     self.next_image = self.next_image.wrapping_add(1).max(0x7000_0000);
@@ -131,12 +145,13 @@ impl DesktopScene {
             };
 
             let source_changed = entry.source_version != layer.content_version;
-            let metadata_changed =
-                entry.extent != layer.extent || entry.alpha_mode != layer.alpha_mode;
-            if entry.content_version == 0
-                || metadata_changed
-                || (source_changed && layer.damage.is_none())
-            {
+            let metadata_changed = entry.extent != layer.extent
+                || entry.alpha_mode != layer.alpha_mode
+                || entry.pixel_format != layer.pixel_format;
+            if entry.content_version == 0 || metadata_changed {
+                let DesktopImageUpdate::Full(pixels) = &layer.update else {
+                    continue;
+                };
                 let content_version = entry.content_version.wrapping_add(1).max(1);
                 self.source
                     .set_image_resource(ImageResource {
@@ -145,43 +160,82 @@ impl DesktopScene {
                         extent: layer.extent,
                         color_encoding: ImageColorEncoding::Srgb,
                         alpha_mode: layer.alpha_mode,
-                        pixels_rgba8: Arc::clone(&layer.pixels),
+                        pixel_format: layer.pixel_format,
+                        pixels: Arc::clone(pixels),
                     })
                     .expect("validated desktop image resource");
                 entry.content_version = content_version;
                 entry.source_version = layer.content_version;
                 entry.extent = layer.extent;
                 entry.alpha_mode = layer.alpha_mode;
-            } else if source_changed
-                && let Some(rect) = layer.damage.and_then(|rect| {
-                    intersect(
+                entry.pixel_format = layer.pixel_format;
+            } else if source_changed {
+                match &layer.update {
+                    DesktopImageUpdate::Unchanged => {}
+                    DesktopImageUpdate::Full(pixels) => {
+                        let content_version = entry.content_version.wrapping_add(1).max(1);
+                        self.source
+                            .set_image_resource(ImageResource {
+                                image: entry.image,
+                                content_version,
+                                extent: layer.extent,
+                                color_encoding: ImageColorEncoding::Srgb,
+                                alpha_mode: layer.alpha_mode,
+                                pixel_format: layer.pixel_format,
+                                pixels: Arc::clone(pixels),
+                            })
+                            .expect("validated desktop image resource");
+                        entry.content_version = content_version;
+                    }
+                    DesktopImageUpdate::Region {
                         rect,
-                        RectI {
-                            x: 0,
-                            y: 0,
-                            width: layer.extent.width,
-                            height: layer.extent.height,
-                        },
-                    )
-                })
-            {
-                let content_version = entry.content_version.wrapping_add(1).max(1);
-                self.source
-                    .update_image_resource_region(ImageResourceUpdate {
-                        image: entry.image,
-                        content_version,
-                        extent: layer.extent,
-                        rect,
-                        row_bytes: rect.width as usize * 4,
-                        color_encoding: ImageColorEncoding::Srgb,
-                        alpha_mode: layer.alpha_mode,
-                        pixels_rgba8: copy_region(&layer.pixels, layer.extent, rect).into(),
-                    })
-                    .expect("validated desktop image damage");
-                entry.content_version = content_version;
+                        row_bytes,
+                        pixels,
+                    } => {
+                        let Some(rect) = intersect(
+                            *rect,
+                            RectI {
+                                x: 0,
+                                y: 0,
+                                width: layer.extent.width,
+                                height: layer.extent.height,
+                            },
+                        ) else {
+                            continue;
+                        };
+                        let content_version = entry.content_version.wrapping_add(1).max(1);
+                        self.source
+                            .update_image_resource_region(ImageResourceUpdate {
+                                image: entry.image,
+                                content_version,
+                                extent: layer.extent,
+                                rect,
+                                row_bytes: *row_bytes,
+                                color_encoding: ImageColorEncoding::Srgb,
+                                alpha_mode: layer.alpha_mode,
+                                pixel_format: layer.pixel_format,
+                                pixels: Arc::clone(pixels),
+                            })
+                            .expect("validated desktop image damage");
+                        entry.content_version = content_version;
+                    }
+                }
             }
             entry.source_version = layer.content_version;
             let content_version = entry.content_version.max(1);
+
+            if !layer.visible {
+                if let Some(previous) = self.source.images.get(entry.node).copied() {
+                    self.source
+                        .damage
+                        .add(previous.view_bounds, self.source.extent);
+                }
+                self.source.images.remove(entry.node);
+                self.source.clips.remove(entry.node);
+                entry.bounds = RectF::ZERO;
+                self.entries.insert(layer.key, entry);
+                continue;
+            }
 
             let rect = RectF {
                 x: layer.position.x as f32,
@@ -309,20 +363,29 @@ pub(super) fn delta_damage(delta: &RenderSceneDelta, extent: SizeI) -> Option<Re
 }
 
 fn valid_layer(layer: &DesktopLayer) -> bool {
-    layer.extent.width > 0
-        && layer.extent.height > 0
-        && layer.pixels.len() >= layer.extent.width as usize * layer.extent.height as usize * 4
-}
-
-fn copy_region(source: &[u8], extent: SizeI, rect: RectI) -> Vec<u8> {
-    let stride = extent.width as usize * 4;
-    let row_bytes = rect.width as usize * 4;
-    let mut pixels = Vec::with_capacity(row_bytes * rect.height as usize);
-    for row in rect.y as usize..(rect.y + rect.height) as usize {
-        let start = row * stride + rect.x as usize * 4;
-        pixels.extend_from_slice(&source[start..start + row_bytes]);
+    if layer.extent.width <= 0 || layer.extent.height <= 0 {
+        return false;
     }
-    pixels
+    match &layer.update {
+        DesktopImageUpdate::Unchanged => true,
+        DesktopImageUpdate::Full(pixels) => {
+            pixels.len() >= layer.extent.width as usize * layer.extent.height as usize * 4
+        }
+        DesktopImageUpdate::Region {
+            rect,
+            row_bytes,
+            pixels,
+        } => {
+            rect.x >= 0
+                && rect.y >= 0
+                && rect.width > 0
+                && rect.height > 0
+                && rect.right() <= layer.extent.width
+                && rect.bottom() <= layer.extent.height
+                && *row_bytes >= rect.width as usize * 4
+                && pixels.len() >= row_bytes.saturating_mul(rect.height as usize)
+        }
+    }
 }
 
 fn size_f(size: SizeI) -> SizeF {
@@ -377,7 +440,7 @@ mod tests {
         DesktopLayer {
             key: DesktopLayerKey::Surface(9),
             content_version: 1,
-            pixels: vec![255; 100 * 80 * 4].into(),
+            update: DesktopImageUpdate::Full(vec![255; 100 * 80 * 4].into()),
             extent: SizeI {
                 width: 100,
                 height: 80,
@@ -385,7 +448,8 @@ mod tests {
             position,
             clip,
             alpha_mode: ImageAlphaMode::Opaque,
-            damage: None,
+            pixel_format: ImagePixelFormat::Rgba8,
+            visible: true,
         }
     }
 
@@ -464,12 +528,17 @@ mod tests {
         let _ = scene.synchronize(extent, vec![layer(position, None)]);
         let mut updated = layer(position, None);
         updated.content_version = 2;
-        updated.damage = Some(RectI {
+        let rect = RectI {
             x: 4,
             y: 5,
             width: 8,
             height: 6,
-        });
+        };
+        updated.update = DesktopImageUpdate::Region {
+            rect,
+            row_bytes: rect.width as usize * 4,
+            pixels: vec![128; rect.width as usize * rect.height as usize * 4].into(),
+        };
         let delta = scene.synchronize(extent, vec![updated]).unwrap();
         assert!(!delta.damage.full);
         let damage = delta_damage(&delta, extent).unwrap();
@@ -477,6 +546,35 @@ mod tests {
         assert!(damage.y >= 33 && damage.y <= 35);
         assert!(damage.width <= 12);
         assert!(damage.height <= 10);
+    }
+
+    #[test]
+    fn hiding_and_restoring_a_layer_retains_its_image_resource() {
+        let extent = SizeI {
+            width: 800,
+            height: 600,
+        };
+        let position = PointI { x: 20, y: 30 };
+        let mut scene = DesktopScene::new(extent);
+        let _ = scene.synchronize(extent, vec![layer(position, None)]);
+        let entry = scene.entries[&DesktopLayerKey::Surface(9)];
+
+        let mut hidden = layer(position, None);
+        hidden.update = DesktopImageUpdate::Unchanged;
+        hidden.visible = false;
+        let hidden_delta = scene.synchronize(extent, vec![hidden]).unwrap();
+        assert!(hidden_delta.image_resources.is_empty());
+        assert!(scene.source.images.get(entry.node).is_none());
+
+        let mut restored = layer(position, None);
+        restored.update = DesktopImageUpdate::Unchanged;
+        let restored_delta = scene.synchronize(extent, vec![restored]).unwrap();
+        assert!(restored_delta.image_resources.is_empty());
+        assert_eq!(
+            scene.entries[&DesktopLayerKey::Surface(9)].image,
+            entry.image
+        );
+        assert!(scene.source.images.get(entry.node).is_some());
     }
 
     #[test]
@@ -488,15 +586,18 @@ mod tests {
         let solid = |key, extent: SizeI, rgba: [u8; 4], position| DesktopLayer {
             key,
             content_version: 1,
-            pixels: (0..extent.width * extent.height)
-                .flat_map(|_| rgba)
-                .collect::<Vec<_>>()
-                .into(),
+            update: DesktopImageUpdate::Full(
+                (0..extent.width * extent.height)
+                    .flat_map(|_| rgba)
+                    .collect::<Vec<_>>()
+                    .into(),
+            ),
             extent,
             position,
             clip: None,
             alpha_mode: ImageAlphaMode::Opaque,
-            damage: None,
+            pixel_format: ImagePixelFormat::Rgba8,
+            visible: true,
         };
         let mut desktop = DesktopScene::new(extent);
         let delta = desktop

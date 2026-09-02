@@ -595,7 +595,12 @@ impl WindowFrameFactory {
 
     #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
     pub(crate) fn compose(&self, model: WindowChromeModel) -> CompositionDriver {
-        CompositionDriver::from_erased_for_target((self.compose)(model), RuntimeTarget::Compositor)
+        CompositionDriver::from_erased_for_target(self.candidate(model), RuntimeTarget::Compositor)
+    }
+
+    #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
+    pub(crate) fn candidate(&self, model: WindowChromeModel) -> Box<dyn ErasedComponent> {
+        (self.compose)(model)
     }
 }
 

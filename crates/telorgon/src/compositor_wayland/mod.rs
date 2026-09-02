@@ -31,8 +31,8 @@ pub use id::{ClientId, ProtocolObjectId, WaylandBufferId, WaylandSurfaceId};
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
 pub use native::{
     DmaBufFormat, DmaBufImage, NativeCompositor, NativeCompositorError, PointerConstraintKind,
-    PointerConstraintState, ShmImage, ToplevelIconImage, ToplevelIconSnapshot, ViewportSource,
-    ViewportState,
+    PointerConstraintState, ShmBufferReader, ShmImage, ShmImageRegion, ToplevelIconImage,
+    ToplevelIconSnapshot, ViewportSource, ViewportState,
 };
 pub use object::{ObjectMetadata, ObjectRegistry, ObjectRegistryError, ProtocolObjectKind};
 pub use output::{OutputDescription, OutputError, OutputMode, OutputState, OutputTransform};

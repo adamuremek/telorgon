@@ -376,7 +376,8 @@ fn mixed_scene_matches_the_software_reference_on_real_vulkan_hardware() {
             },
             color_encoding: ImageColorEncoding::Srgb,
             alpha_mode: ImageAlphaMode::Opaque,
-            pixels_rgba8: Arc::from([
+            pixel_format: telorgon::render::ImagePixelFormat::Rgba8,
+            pixels: Arc::from([
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ]),
         })

@@ -54,7 +54,7 @@ pub(super) fn render_cursor_image(
         ) {
             PointerResolution::ClientSurface => {
                 windows.get(&surface).map(|cursor| RenderedCursor {
-                    rgba: cursor.rgba.to_vec(),
+                    rgba: client_pixels_rgba(cursor),
                     size: cursor.size,
                     hotspot: PointI {
                         x: hotspot_x,
@@ -74,6 +74,21 @@ pub(super) fn render_cursor_image(
         CursorImage::Hidden => None,
     };
     Ok(rendered)
+}
+
+fn client_pixels_rgba(window: &ClientWindow) -> Vec<u8> {
+    let mut rgba = window.pixels.clone();
+    if window.pixel_format == ImagePixelFormat::Bgra8 {
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+    }
+    if window.alpha_mode == ImageAlphaMode::Opaque {
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+    }
+    rgba
 }
 
 #[allow(clippy::too_many_arguments)]
