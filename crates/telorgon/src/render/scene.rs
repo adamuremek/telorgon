@@ -474,11 +474,13 @@ impl RenderScene {
             alpha_mode: resource.alpha_mode,
             pixels_rgba8: Arc::clone(&resource.pixels_rgba8),
         };
-        self.image_resources.insert(resource.image, resource);
+        let image = resource.image;
+        let extent = update.extent;
+        let rect = update.rect;
+        self.image_resources.insert(image, resource);
         self.image_resource_updates
             .push(ImageResourceDelta::Write(update));
-        self.damage.full = true;
-        self.damage.rects.clear();
+        self.damage_image_instance_regions(image, extent, rect);
         Ok(())
     }
 
@@ -513,12 +515,14 @@ impl RenderScene {
             pixels[target..target + copy_bytes]
                 .copy_from_slice(&update.pixels_rgba8[source..source + copy_bytes]);
         }
+        let image = update.image;
+        let extent = update.extent;
+        let rect = update.rect;
         resource.content_version = update.content_version;
         resource.pixels_rgba8 = pixels.into();
         self.image_resource_updates
             .push(ImageResourceDelta::Write(update));
-        self.damage.full = true;
-        self.damage.rects.clear();
+        self.damage_image_instance_regions(image, extent, rect);
         Ok(())
     }
 
@@ -527,10 +531,50 @@ impl RenderScene {
         if removed {
             self.image_resource_updates
                 .push(ImageResourceDelta::Remove(image));
-            self.damage.full = true;
-            self.damage.rects.clear();
+            self.damage_image_instances(image);
         }
         removed
+    }
+
+    fn damage_image_instances(&mut self, image: ImageId) {
+        let bounds = self
+            .images
+            .values()
+            .iter()
+            .filter(|instance| instance.image == image)
+            .map(|instance| instance.view_bounds)
+            .collect::<Vec<_>>();
+        for bounds in bounds {
+            self.damage.add(bounds, self.extent);
+        }
+    }
+
+    fn damage_image_instance_regions(
+        &mut self,
+        image: ImageId,
+        source_extent: SizeI,
+        source_damage: crate::core::RectI,
+    ) {
+        let scale_x = 1.0 / source_extent.width as f32;
+        let scale_y = 1.0 / source_extent.height as f32;
+        let bounds = self
+            .images
+            .values()
+            .iter()
+            .filter(|instance| instance.image == image)
+            .filter_map(|instance| {
+                let damage = crate::core::RectF {
+                    x: instance.rect.x + source_damage.x as f32 * scale_x * instance.rect.width,
+                    y: instance.rect.y + source_damage.y as f32 * scale_y * instance.rect.height,
+                    width: source_damage.width as f32 * scale_x * instance.rect.width,
+                    height: source_damage.height as f32 * scale_y * instance.rect.height,
+                };
+                damage.intersection(instance.view_bounds)
+            })
+            .collect::<Vec<_>>();
+        for bounds in bounds {
+            self.damage.add(bounds, self.extent);
+        }
     }
 
     pub fn set_material_resource(&mut self, resource: MaterialResource) {

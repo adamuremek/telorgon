@@ -63,7 +63,7 @@ pub mod bridge_vulkan_dxgi;
 pub mod compose;
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
 pub mod compositor_render;
-#[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
+#[cfg(any(test, all(feature = "desktop-wayland-linux", target_os = "linux")))]
 pub mod compositor_wayland;
 pub mod core;
 #[cfg(feature = "embedded-vulkan")]

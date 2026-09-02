@@ -7,6 +7,14 @@ mod declaration;
 mod delta_queue;
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
 mod desktop_wayland;
+// Keep the platform-neutral compositor transaction and retained-scene tests executable on the
+// development host even when the native Wayland/KMS owner is compiled only for Linux.
+#[cfg(all(test, not(target_os = "linux")))]
+#[path = "desktop_wayland/scene.rs"]
+mod desktop_wayland_scene_tests;
+#[cfg(all(test, not(target_os = "linux")))]
+#[path = "desktop_wayland/state.rs"]
+mod desktop_wayland_state_tests;
 mod error;
 #[cfg(feature = "application-software")]
 mod headless;

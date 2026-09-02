@@ -1,0 +1,269 @@
+use super::*;
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum WindowInteraction {
+    Move {
+        surface: WaylandSurfaceId,
+        pointer_start: PointF,
+        position_start: PointI,
+    },
+    Resize {
+        surface: WaylandSurfaceId,
+        edge: ResizeEdge,
+        pointer_start: PointF,
+        position_start: PointI,
+        size_start: SizeI,
+    },
+}
+
+impl WindowInteraction {
+    pub(super) fn begin_move(
+        windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+        surface: WaylandSurfaceId,
+        pointer_start: PointF,
+    ) -> Option<Self> {
+        let window = windows.get(&surface)?;
+        Some(Self::Move {
+            surface,
+            pointer_start,
+            position_start: window.position,
+        })
+    }
+
+    pub(super) fn begin_resize(
+        windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+        configure_scheduler: &mut ConfigureScheduler,
+        surface: WaylandSurfaceId,
+        edge: ResizeEdge,
+        pointer_start: PointF,
+    ) -> Option<Self> {
+        let window = windows.get_mut(&surface)?;
+        if window.resize_final_size.is_some() {
+            return None;
+        }
+        window.resize_anchor = Some(ResizeAnchor::new(
+            window.position,
+            window.requested_size,
+            edge,
+        ));
+        window.resize_final_size = None;
+        configure_scheduler.schedule_resize(surface, window.requested_size);
+        Some(Self::Resize {
+            surface,
+            edge,
+            pointer_start,
+            position_start: window.position,
+            size_start: window.requested_size,
+        })
+    }
+}
+
+pub(super) fn apply_window_interaction(
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
+    interaction: WindowInteraction,
+    pointer_position: PointF,
+    output: SizeI,
+    config: &LinuxDesktopConfig,
+) -> AppResult<()> {
+    match interaction {
+        WindowInteraction::Move {
+            surface,
+            pointer_start,
+            position_start,
+        } => {
+            let Some(window) = windows.get_mut(&surface) else {
+                return Ok(());
+            };
+            let delta = rounded_pointer_delta(pointer_start, pointer_position);
+            window.position.x = position_start
+                .x
+                .saturating_add(delta.x)
+                .clamp(32_i32.saturating_sub(window.size.width), output.width - 32);
+            window.position.y = position_start
+                .y
+                .saturating_add(delta.y)
+                .clamp(0, output.height - config.titlebar_height.max(1));
+        }
+        WindowInteraction::Resize {
+            surface,
+            edge,
+            pointer_start,
+            position_start,
+            size_start,
+        } => {
+            let delta = rounded_pointer_delta(pointer_start, pointer_position);
+            let (position, size) =
+                resize_drag_geometry(position_start, size_start, edge, delta, output);
+            let Some(window) = windows.get_mut(&surface) else {
+                return Ok(());
+            };
+            window.position = position;
+            if size != window.requested_size {
+                window.requested_size = size;
+                configure_scheduler.schedule_resize(surface, size);
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn finish_window_interaction(
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
+    interaction: WindowInteraction,
+) {
+    let WindowInteraction::Resize { surface, .. } = interaction else {
+        return;
+    };
+    if let Some(window) = windows.get_mut(&surface) {
+        window.resize_final_size = Some(window.requested_size);
+        configure_scheduler.schedule_final(surface, window.requested_size);
+    }
+}
+
+pub(super) fn flush_resize_configures(
+    display: &Display,
+    wayland: &mut NativeCompositor<'_>,
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
+    resize_budget_available: &mut bool,
+) -> AppResult<()> {
+    let pending = configure_scheduler.drain().collect::<Vec<_>>();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    for PendingResizeConfigure {
+        surface,
+        size,
+        resizing,
+    } in pending
+    {
+        let Some(window) = windows.get(&surface) else {
+            continue;
+        };
+        let waiting_for_ack = wayland
+            .core()
+            .xdg_surface(surface)
+            .is_some_and(|xdg| xdg.has_pending_configure());
+        if waiting_for_ack || (resizing && !*resize_budget_available) {
+            configure_scheduler.defer(PendingResizeConfigure {
+                surface,
+                size,
+                resizing,
+            });
+            continue;
+        }
+        wayland
+            .configure_toplevel(
+                surface,
+                Some(size),
+                window_toplevel_states(window, true, resizing),
+            )
+            .map_err(app_error)?;
+        if resizing {
+            *resize_budget_available = false;
+        }
+    }
+    // Keep xdg configure delivery ahead of expensive scene preparation and presentation.
+    display.flush_clients();
+    Ok(())
+}
+
+pub(super) fn set_window_maximized(
+    wayland: &mut NativeCompositor<'_>,
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    surface: WaylandSurfaceId,
+    maximized: bool,
+    work_area: RectI,
+    config: &LinuxDesktopConfig,
+) -> AppResult<()> {
+    let Some(window) = windows.get_mut(&surface) else {
+        return Ok(());
+    };
+    window.resize_anchor = None;
+    window.resize_final_size = None;
+    if maximized {
+        if !window.maximized && !window.fullscreen {
+            window.restore_geometry = Some((window.position, window.requested_size));
+        }
+        window.maximized = true;
+        window.fullscreen = false;
+        window.minimized = false;
+        window.position = PointI {
+            x: work_area.x,
+            y: work_area.y,
+        };
+        window.requested_size = SizeI {
+            width: (work_area.width - config.window_border * 2).max(1),
+            height: (work_area.height - config.window_border * 2 - config.titlebar_height).max(1),
+        };
+    } else {
+        window.maximized = false;
+        if let Some((position, size)) = window.restore_geometry.take() {
+            window.position = position;
+            window.requested_size = size;
+        }
+    }
+    wayland
+        .configure_toplevel(
+            surface,
+            Some(window.requested_size),
+            window_toplevel_states(window, true, false),
+        )
+        .map_err(app_error)?;
+    Ok(())
+}
+
+pub(super) fn set_window_fullscreen(
+    wayland: &mut NativeCompositor<'_>,
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    surface: WaylandSurfaceId,
+    fullscreen: bool,
+    output: SizeI,
+    _config: &LinuxDesktopConfig,
+) -> AppResult<()> {
+    let Some(window) = windows.get_mut(&surface) else {
+        return Ok(());
+    };
+    window.resize_anchor = None;
+    window.resize_final_size = None;
+    if fullscreen {
+        if !window.maximized && !window.fullscreen {
+            window.restore_geometry = Some((window.position, window.requested_size));
+        }
+        window.maximized = false;
+        window.fullscreen = true;
+        window.minimized = false;
+        window.position = PointI::default();
+        window.requested_size = output;
+    } else {
+        window.fullscreen = false;
+        if let Some((position, size)) = window.restore_geometry.take() {
+            window.position = position;
+            window.requested_size = size;
+        }
+    }
+    wayland
+        .configure_toplevel(
+            surface,
+            Some(window.requested_size),
+            window_toplevel_states(window, true, false),
+        )
+        .map_err(app_error)?;
+    Ok(())
+}
+
+pub(super) fn window_toplevel_states(
+    window: &ClientWindow,
+    activated: bool,
+    resizing: bool,
+) -> ToplevelState {
+    ToplevelState {
+        maximized: window.maximized,
+        fullscreen: window.fullscreen,
+        resizing,
+        activated,
+        ..ToplevelState::default()
+    }
+}

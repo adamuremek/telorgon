@@ -85,14 +85,8 @@ impl XdgSurfaceState {
             .pending
             .iter()
             .any(|pending| pending.serial == configure.serial)
-            || self
-                .last_acked
-                .is_some_and(|acked| acked.serial == configure.serial)
         {
             return Err(XdgError::InvalidSerial);
-        }
-        if self.pending.len() >= 64 {
-            self.pending.pop_front();
         }
         self.pending.push_back(configure);
         Ok(())
@@ -129,6 +123,10 @@ impl XdgSurfaceState {
 
     pub fn last_acked(&self) -> Option<XdgConfigure> {
         self.last_acked
+    }
+
+    pub fn has_pending_configure(&self) -> bool {
+        !self.pending.is_empty()
     }
 
     pub fn window_geometry(&self) -> Option<RectI> {
@@ -308,6 +306,45 @@ mod tests {
         }
         surface.ack_configure(10).unwrap();
         assert_eq!(surface.ack_configure(9), Err(XdgError::UnknownConfigure));
+    }
+
+    #[test]
+    fn unacknowledged_configures_are_never_evicted() {
+        let mut surface = XdgSurfaceState::new(WaylandSurfaceId::from_raw(1).unwrap());
+        for serial in 1..=256 {
+            surface
+                .queue_configure(XdgConfigure {
+                    serial,
+                    size: Some(SizeI {
+                        width: 640 + serial as i32,
+                        height: 480,
+                    }),
+                    bounds: None,
+                    states: ToplevelState::default(),
+                    decoration: DecorationMode::ServerSide,
+                })
+                .unwrap();
+        }
+
+        let acknowledged = surface.ack_configure(1).unwrap();
+        assert_eq!(acknowledged.serial, 1);
+        assert_eq!(surface.ack_configure(256).unwrap().serial, 256);
+    }
+
+    #[test]
+    fn configure_serial_can_be_reused_after_protocol_wrap() {
+        let mut surface = XdgSurfaceState::new(WaylandSurfaceId::from_raw(1).unwrap());
+        let configure = XdgConfigure {
+            serial: 1,
+            size: None,
+            bounds: None,
+            states: ToplevelState::default(),
+            decoration: DecorationMode::ServerSide,
+        };
+        surface.queue_configure(configure).unwrap();
+        surface.ack_configure(1).unwrap();
+        surface.queue_configure(configure).unwrap();
+        assert_eq!(surface.ack_configure(1).unwrap(), configure);
     }
 
     #[test]

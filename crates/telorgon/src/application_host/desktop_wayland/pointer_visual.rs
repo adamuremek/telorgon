@@ -1,0 +1,420 @@
+use super::*;
+
+pub(super) struct RenderedCursor {
+    pub(super) rgba: Vec<u8>,
+    pub(super) size: SizeI,
+    pub(super) hotspot: PointI,
+    pub(super) premultiplied: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_cursor_image(
+    image: CursorImage,
+    pointer: &mut Option<Layer>,
+    icons: &mut [(String, Layer)],
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    extent: SizeI,
+    now: u64,
+    pointer_config: &PointerConfiguration,
+    pointer_theme: Option<&PointerTheme>,
+    pointer_media: &mut AssetMediaCache,
+) -> AppResult<Option<RenderedCursor>> {
+    let rendered = match image {
+        CursorImage::TelorgonDefault => render_semantic_pointer(
+            PointerIcon::Default,
+            None,
+            pointer,
+            icons,
+            extent,
+            now,
+            pointer_config,
+            pointer_theme,
+            pointer_media,
+        )?,
+        CursorImage::Shape(shape) => render_semantic_pointer(
+            cursor_shape_pointer_icon(shape).unwrap_or(PointerIcon::Default),
+            cursor_shape_icon_name(shape),
+            pointer,
+            icons,
+            extent,
+            now,
+            pointer_config,
+            pointer_theme,
+            pointer_media,
+        )?,
+        CursorImage::ClientSurface {
+            surface,
+            hotspot_x,
+            hotspot_y,
+        } => match resolve_pointer(
+            PointerRequest::ClientSurface,
+            pointer_config.client_cursor_mode(),
+            pointer_config.pointer_overrides(),
+            pointer_theme,
+        ) {
+            PointerResolution::ClientSurface => {
+                windows.get(&surface).map(|cursor| RenderedCursor {
+                    rgba: cursor.rgba.to_vec(),
+                    size: cursor.size,
+                    hotspot: PointI {
+                        x: hotspot_x,
+                        y: hotspot_y,
+                    },
+                    premultiplied: true,
+                })
+            }
+            PointerResolution::Graphic(graphic) => {
+                Some(render_asset_pointer(graphic, extent, now, pointer_media)?)
+            }
+            PointerResolution::System(icon) => {
+                render_composed_pointer(icon, None, pointer, icons, extent, now)?
+            }
+            PointerResolution::Hidden => None,
+        },
+        CursorImage::Hidden => None,
+    };
+    Ok(rendered)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_semantic_pointer(
+    icon: PointerIcon,
+    composed_icon_name: Option<&str>,
+    pointer: &mut Option<Layer>,
+    icons: &mut [(String, Layer)],
+    extent: SizeI,
+    now: u64,
+    pointer_config: &PointerConfiguration,
+    pointer_theme: Option<&PointerTheme>,
+    pointer_media: &mut AssetMediaCache,
+) -> AppResult<Option<RenderedCursor>> {
+    match resolve_pointer(
+        PointerRequest::Semantic(icon),
+        pointer_config.client_cursor_mode(),
+        pointer_config.pointer_overrides(),
+        pointer_theme,
+    ) {
+        PointerResolution::Graphic(graphic) => Ok(Some(render_asset_pointer(
+            graphic,
+            extent,
+            now,
+            pointer_media,
+        )?)),
+        PointerResolution::System(icon) => {
+            let rendered =
+                render_composed_pointer(icon, composed_icon_name, pointer, icons, extent, now)?;
+            if rendered.is_some() {
+                return Ok(rendered);
+            }
+            let Some(fallback) = semantic_pointer_fallback(icon) else {
+                return Ok(None);
+            };
+            render_semantic_pointer(
+                fallback,
+                cursor_shape_icon_name(pointer_icon_cursor_shape(fallback)),
+                pointer,
+                icons,
+                extent,
+                now,
+                pointer_config,
+                pointer_theme,
+                pointer_media,
+            )
+        }
+        PointerResolution::Hidden => Ok(None),
+        PointerResolution::ClientSurface => {
+            unreachable!("semantic requests cannot resolve to a client surface")
+        }
+    }
+}
+
+pub(super) fn semantic_pointer_fallback(icon: PointerIcon) -> Option<PointerIcon> {
+    match icon {
+        PointerIcon::EResize
+        | PointerIcon::NResize
+        | PointerIcon::NeResize
+        | PointerIcon::NwResize
+        | PointerIcon::SResize
+        | PointerIcon::SeResize
+        | PointerIcon::SwResize
+        | PointerIcon::WResize
+        | PointerIcon::EwResize
+        | PointerIcon::NsResize
+        | PointerIcon::NeswResize
+        | PointerIcon::NwseResize
+        | PointerIcon::ColResize
+        | PointerIcon::RowResize => Some(PointerIcon::AllResize),
+        PointerIcon::Default => None,
+        _ => Some(PointerIcon::Default),
+    }
+}
+
+fn render_asset_pointer(
+    graphic: &PointerGraphic,
+    fallback_extent: SizeI,
+    now_nanoseconds: u64,
+    media: &mut AssetMediaCache,
+) -> AppResult<RenderedCursor> {
+    let frame = if graphic.frames().len() == 1 {
+        graphic.frames()[0]
+    } else {
+        let cycle_ms = graphic
+            .frames()
+            .iter()
+            .filter_map(|frame| frame.duration_ms)
+            .map(|duration| u64::from(duration.get()))
+            .sum::<u64>();
+        let mut elapsed_ms = (now_nanoseconds / 1_000_000) % cycle_ms.max(1);
+        *graphic
+            .frames()
+            .iter()
+            .find(|frame| {
+                let duration = u64::from(
+                    frame
+                        .duration_ms
+                        .expect("animated frame was validated")
+                        .get(),
+                );
+                if elapsed_ms < duration {
+                    true
+                } else {
+                    elapsed_ms -= duration;
+                    false
+                }
+            })
+            .unwrap_or_else(|| {
+                graphic
+                    .frames()
+                    .last()
+                    .expect("pointer graphic has a frame")
+            })
+    };
+    let requested = if let Some(size) = graphic.physical_size() {
+        AssetRasterSize::new(u32::from(size), u32::from(size))
+    } else {
+        AssetRasterSize::new(
+            fallback_extent.width.max(1) as u32,
+            fallback_extent.height.max(1) as u32,
+        )
+    }
+    .map_err(app_error)?;
+    let decoded = match graphic.tint_color() {
+        Some(tint) => media.tinted_cursor(frame.asset, Some(requested), tint),
+        None => media.cursor(frame.asset, Some(requested)),
+    }
+    .map_err(app_error)?;
+    let hotspot = graphic.pointer_hotspot();
+    if i32::from(hotspot.x) >= decoded.extent.width || i32::from(hotspot.y) >= decoded.extent.height
+    {
+        return Err(AppError::new(
+            "pointer hotspot is outside the decoded cursor image",
+        ));
+    }
+    Ok(RenderedCursor {
+        rgba: decoded.pixels_rgba8.to_vec(),
+        size: decoded.extent,
+        hotspot: PointI {
+            x: i32::from(hotspot.x),
+            y: i32::from(hotspot.y),
+        },
+        premultiplied: decoded.alpha_mode == ImageAlphaMode::Premultiplied,
+    })
+}
+
+fn render_composed_pointer(
+    _icon: PointerIcon,
+    composed_icon_name: Option<&str>,
+    pointer: &mut Option<Layer>,
+    icons: &mut [(String, Layer)],
+    extent: SizeI,
+    now: u64,
+) -> AppResult<Option<RenderedCursor>> {
+    if let Some((_, icon)) = composed_icon_name
+        .and_then(|name| icons.iter_mut().find(|(candidate, _)| candidate == name))
+    {
+        return Ok(Some(RenderedCursor {
+            rgba: icon.render(extent, now, false)?.to_vec(),
+            size: extent,
+            hotspot: PointI::default(),
+            premultiplied: true,
+        }));
+    }
+    pointer
+        .as_mut()
+        .map(|pointer| {
+            pointer
+                .render(extent, now, false)
+                .map(|pixels| RenderedCursor {
+                    rgba: pixels.to_vec(),
+                    size: extent,
+                    hotspot: PointI::default(),
+                    premultiplied: false,
+                })
+        })
+        .transpose()
+}
+
+pub(super) fn cursor_image_signature(cursor: &RenderedCursor) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    cursor.size.width.hash(&mut hasher);
+    cursor.size.height.hash(&mut hasher);
+    cursor.hotspot.x.hash(&mut hasher);
+    cursor.hotspot.y.hash(&mut hasher);
+    cursor.premultiplied.hash(&mut hasher);
+    cursor.rgba.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub(super) fn pointer_request_cursor_image(request: PointerRequest) -> CursorImage {
+    match request {
+        PointerRequest::Hidden => CursorImage::Hidden,
+        PointerRequest::ClientSurface => CursorImage::TelorgonDefault,
+        PointerRequest::Semantic(icon) => CursorImage::Shape(pointer_icon_cursor_shape(icon)),
+    }
+}
+
+pub(super) fn cursor_transition_requires_presentation(
+    previous: CursorImage,
+    current: CursorImage,
+) -> bool {
+    previous != current
+}
+
+pub(super) fn resize_edge_pointer_icon(edge: ResizeEdge) -> PointerIcon {
+    match edge {
+        ResizeEdge::None => PointerIcon::Default,
+        ResizeEdge::Top => PointerIcon::NResize,
+        ResizeEdge::TopRight => PointerIcon::NeResize,
+        ResizeEdge::Right => PointerIcon::EResize,
+        ResizeEdge::BottomRight => PointerIcon::SeResize,
+        ResizeEdge::Bottom => PointerIcon::SResize,
+        ResizeEdge::BottomLeft => PointerIcon::SwResize,
+        ResizeEdge::Left => PointerIcon::WResize,
+        ResizeEdge::TopLeft => PointerIcon::NwResize,
+    }
+}
+
+pub(super) fn cursor_shape_icon_name(shape: u32) -> Option<&'static str> {
+    Some(match shape {
+        1 => "cursor.default",
+        2 => "cursor.context-menu",
+        3 => "cursor.help",
+        4 => "cursor.pointer",
+        5 => "cursor.progress",
+        6 => "cursor.wait",
+        7 => "cursor.cell",
+        8 => "cursor.crosshair",
+        9 => "cursor.text",
+        10 => "cursor.vertical-text",
+        11 => "cursor.alias",
+        12 => "cursor.copy",
+        13 => "cursor.move",
+        14 => "cursor.no-drop",
+        15 => "cursor.not-allowed",
+        16 => "cursor.grab",
+        17 => "cursor.grabbing",
+        18 => "cursor.e-resize",
+        19 => "cursor.n-resize",
+        20 => "cursor.ne-resize",
+        21 => "cursor.nw-resize",
+        22 => "cursor.s-resize",
+        23 => "cursor.se-resize",
+        24 => "cursor.sw-resize",
+        25 => "cursor.w-resize",
+        26 => "cursor.ew-resize",
+        27 => "cursor.ns-resize",
+        28 => "cursor.nesw-resize",
+        29 => "cursor.nwse-resize",
+        30 => "cursor.col-resize",
+        31 => "cursor.row-resize",
+        32 => "cursor.all-scroll",
+        33 => "cursor.zoom-in",
+        34 => "cursor.zoom-out",
+        35 => "cursor.dnd-ask",
+        36 => "cursor.all-resize",
+        _ => return None,
+    })
+}
+
+pub(super) fn cursor_shape_pointer_icon(shape: u32) -> Option<PointerIcon> {
+    Some(match shape {
+        1 => PointerIcon::Default,
+        2 => PointerIcon::ContextMenu,
+        3 => PointerIcon::Help,
+        4 => PointerIcon::Pointer,
+        5 => PointerIcon::Progress,
+        6 => PointerIcon::Wait,
+        7 => PointerIcon::Cell,
+        8 => PointerIcon::Crosshair,
+        9 => PointerIcon::Text,
+        10 => PointerIcon::VerticalText,
+        11 => PointerIcon::Alias,
+        12 => PointerIcon::Copy,
+        13 => PointerIcon::Move,
+        14 => PointerIcon::NoDrop,
+        15 => PointerIcon::NotAllowed,
+        16 => PointerIcon::Grab,
+        17 => PointerIcon::Grabbing,
+        18 => PointerIcon::EResize,
+        19 => PointerIcon::NResize,
+        20 => PointerIcon::NeResize,
+        21 => PointerIcon::NwResize,
+        22 => PointerIcon::SResize,
+        23 => PointerIcon::SeResize,
+        24 => PointerIcon::SwResize,
+        25 => PointerIcon::WResize,
+        26 => PointerIcon::EwResize,
+        27 => PointerIcon::NsResize,
+        28 => PointerIcon::NeswResize,
+        29 => PointerIcon::NwseResize,
+        30 => PointerIcon::ColResize,
+        31 => PointerIcon::RowResize,
+        32 => PointerIcon::AllScroll,
+        33 => PointerIcon::ZoomIn,
+        34 => PointerIcon::ZoomOut,
+        35 => PointerIcon::DndAsk,
+        36 => PointerIcon::AllResize,
+        _ => return None,
+    })
+}
+
+pub(super) fn pointer_icon_cursor_shape(icon: PointerIcon) -> u32 {
+    match icon {
+        PointerIcon::Default => 1,
+        PointerIcon::ContextMenu => 2,
+        PointerIcon::Help => 3,
+        PointerIcon::Pointer => 4,
+        PointerIcon::Progress => 5,
+        PointerIcon::Wait => 6,
+        PointerIcon::Cell => 7,
+        PointerIcon::Crosshair => 8,
+        PointerIcon::Text => 9,
+        PointerIcon::VerticalText => 10,
+        PointerIcon::Alias => 11,
+        PointerIcon::Copy => 12,
+        PointerIcon::Move => 13,
+        PointerIcon::NoDrop => 14,
+        PointerIcon::NotAllowed => 15,
+        PointerIcon::Grab => 16,
+        PointerIcon::Grabbing => 17,
+        PointerIcon::EResize => 18,
+        PointerIcon::NResize => 19,
+        PointerIcon::NeResize => 20,
+        PointerIcon::NwResize => 21,
+        PointerIcon::SResize => 22,
+        PointerIcon::SeResize => 23,
+        PointerIcon::SwResize => 24,
+        PointerIcon::WResize => 25,
+        PointerIcon::EwResize => 26,
+        PointerIcon::NsResize => 27,
+        PointerIcon::NeswResize => 28,
+        PointerIcon::NwseResize => 29,
+        PointerIcon::ColResize => 30,
+        PointerIcon::RowResize => 31,
+        PointerIcon::AllScroll => 32,
+        PointerIcon::ZoomIn => 33,
+        PointerIcon::ZoomOut => 34,
+        PointerIcon::DndAsk => 35,
+        PointerIcon::AllResize => 36,
+    }
+}

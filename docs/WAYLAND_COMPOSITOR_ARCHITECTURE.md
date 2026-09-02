@@ -87,6 +87,13 @@ installed official XML, constructs `wl_interface`/`wl_message` descriptors with 
 and passes decoded requests to Telorgon-owned state. `libwayland-server` remains the mature transport,
 resource, client, socket, and event-loop implementation.
 
+Within the managed host, `desktop_wayland.rs` is the single-owner orchestration loop. Its sibling
+modules isolate cursor-plane/KMS lifetime tracking, event sources and input profiling, geometry and
+damage math, pointer routing and hit testing, resize transactions, composed layer preparation,
+pointer visuals, retained desktop-scene synchronization, and Vulkan/software scanout. These
+boundaries are internal and do not create additional compositor-owner threads; the Vulkan
+completion waiter remains the one explicitly isolated blocking worker.
+
 ## Protocol source and advertisement rules
 
 `ProtocolCatalog::load_desktop` reads `/usr/share/wayland/wayland.xml` and the pinned paths under
@@ -129,8 +136,11 @@ an implementation roadmap, not as a support claim.
 ## Surface and shell behavior
 
 The compositor enforces per-client object limits and ownership, permanent surface roles, xdg
-configure/ack ordering, buffer-before-configure rejection, bounded pending configures, SHM pool
-bounds, DMA-BUF plane/tuple validation, and client-scoped single-use input serials. Surface state is
+configure/ack ordering, buffer-before-configure rejection, lossless retention of every
+unacknowledged configure, SHM pool bounds, DMA-BUF plane/tuple validation, and client-scoped
+single-use input serials. Interactive resize separately coalesces raw pointer motion before it
+enters that protocol queue, permits at most one outstanding resize configure, and budgets resizing
+configures to one per presented frame. Surface state is
 double-buffered. Damage, opaque/input regions, scale, transform, offset, frame callbacks, buffer
 attachments, and subsurface relationships flow through the commit model.
 
@@ -209,11 +219,19 @@ The operational managed path is entirely Telorgon-rendered:
    Telorgon `ImageResource` with explicit alpha/color metadata, then applies the committed
    `wl_surface` transform/scale and viewporter crop/destination using bounded deterministic
    sampling.
-3. Client images, the composed background, composed server frames, and composed shell widgets are rendered
-   through `telorgon-renderer-software` into one RGBA output. The composed pointer is uploaded into
-   three completion-retired ARGB8888 GBM cursor buffers when an atomic cursor plane is available;
-   otherwise it is damage-composited into the primary output.
-4. Three linear GBM scanout buffers receive the primary output. Primary and cursor state are
+3. Client images, the composed background, composed server frames, shell widgets, popups, drag
+   icons, and the software cursor are synchronized into one renderer-neutral retained desktop
+   scene with stable image/node identities. Client damage updates the corresponding retained image
+   region; movement and interactive preview changes damage the union of old and new bounds. A
+   committed buffer that is stale during resize is clipped to the desired content rectangle and is
+   never stretched.
+4. The selected renderer composites that scene. Vulkan applies the scene delta and draws its
+   individual layers directly into the selected imported GBM target, without a full-screen CPU
+   flatten/upload. Software applies the same delta to its retained reference surface and copies
+   only the accumulated damaged region into the mapped GBM target. The composed pointer uses three
+   completion-retired ARGB8888 GBM cursor buffers when an atomic cursor plane is available;
+   otherwise it remains an ordinary retained desktop-scene layer.
+5. Three linear GBM scanout buffers receive the primary output. Primary and cursor state are
    submitted through one serialized libdrm atomic-commit scheduler to a connector-compatible CRTC.
    Cursor-only motion coalesces to the newest position and commits without repainting the primary
    plane; it does not use the legacy cursor ioctls or asynchronous page-flip flag.
@@ -225,15 +243,15 @@ external-image lease, and binds it into `VulkanScene`. The external-image path c
 matching release requirement.
 
 The managed KMS path also has an owned Vulkan scanout route. All three primary GBM buffers are imported with
-their explicit modifier and row layout as Vulkan color targets. Telorgon renders the completed
-desktop image into the selected target, transfers queue ownership back to
+their explicit modifier and row layout as Vulkan color targets. Telorgon renders the retained
+desktop scene's individual image layers into the selected target, transfers queue ownership back to
 `VK_QUEUE_FAMILY_FOREIGN_EXT`, waits for GPU completion, and only then makes that frame eligible for
 the serialized atomic KMS scheduler. `Renderer::Vulkan` requires this route. `Renderer::Auto`
 attempts it on each supported
 adapter and falls back to the mapped software scanout route; `Renderer::Software` selects the
-mapped route directly. Client surfaces and all shell visuals remain Telorgon render resources in both
-cases; the current managed Vulkan route uses one final retained-image upload after reference
-software composition while direct per-surface GPU composition is the next optimization step.
+mapped route directly. Client surfaces and all shell visuals remain Telorgon render resources in
+both cases. SHM content is currently copied into those retained resources; end-to-end managed-KMS
+DMA-BUF binding remains a separate zero-copy integration step.
 
 The GBM/KMS bindings are Telorgon-owned and use the original libgbm/libdrm ABIs. Scanout allocation,
 mapping, modifier-aware framebuffer creation, connector/encoder/CRTC/plane discovery, primary and
@@ -345,5 +363,5 @@ The current path is **operational by integration and compile evidence, but not
 production-qualified**. A Linux TTY/hardware run is still required for socket/client conformance,
 atomic modesetting and page-flip behavior, libseat transitions, input devices, multiple GPUs,
 multiple outputs, failure recovery, and performance. The largest remaining gaps are
-multi-output/hotplug, direct per-surface Vulkan composition, page-flip timestamps,
+multi-output/hotplug, zero-copy managed-KMS DMA-BUF surface binding, page-flip timestamps,
 input-method/text-input integration, and newer DMA-BUF feedback/syncobj protocol generations.

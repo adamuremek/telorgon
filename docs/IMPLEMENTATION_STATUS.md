@@ -71,9 +71,15 @@ production-qualified.
 > presentation, capability-gated DMA-BUF and explicit-sync bridges, libseat/libinput/XKB input, and
 > atomic libdrm/GBM KMS presentation. Compositor backgrounds, default window frames, pointers, semantic
 > icons, and shell widgets are ordinary Telorgon compositions. The managed path now supports mapped
-> software scanout and owned Vulkan rendering into explicit-modifier GBM scanout targets, secure
+> software scanout and owned Vulkan rendering into explicit-modifier GBM scanout targets. Both
+> paths consume the same retained desktop scene: Vulkan composites individual client/chrome/widget
+> image resources directly into GBM instead of uploading a CPU-flattened output, while software
+> copies only accumulated output damage. Interactive resize motion is coalesced before protocol
+> delivery, with at most one unacknowledged resize configure and one resizing configure per
+> presented frame; committed/desired geometry stays separate, and stale buffers are
+> anchor-aligned and clipped during previews. The host also supports secure
 > session lock, interactive window-management policy, activation, constraints, and pointer/touch
-> drag-and-drop. It remains single-output; direct per-surface Vulkan composition, newer DMA-BUF
+> drag-and-drop. It remains single-output; zero-copy managed-KMS DMA-BUF surface binding, newer DMA-BUF
 > feedback/syncobj protocols, input methods, hotplug/session recovery, and Linux hardware/conformance
 > qualification remain incomplete. See
 > [WAYLAND_COMPOSITOR_ARCHITECTURE.md](WAYLAND_COMPOSITOR_ARCHITECTURE.md).

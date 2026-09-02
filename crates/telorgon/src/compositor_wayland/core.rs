@@ -170,6 +170,10 @@ impl CompositorCore {
         self.xdg_surfaces.get_mut(&surface)
     }
 
+    pub fn xdg_surface(&self, surface: WaylandSurfaceId) -> Option<&XdgSurfaceState> {
+        self.xdg_surfaces.get(&surface)
+    }
+
     pub fn queue_action(&mut self, action: CompositorAction) {
         self.actions.push(action);
     }
