@@ -1685,6 +1685,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         #[cfg(feature = "profiler")]
         let mut latest_pointer_event_this_turn = None::<u64>;
         let mut other_work_seen = repaint;
+        let cursor_image_at_turn_start = wayland
+            .core()
+            .seats
+            .get(&1)
+            .expect("seat registered")
+            .cursor;
         let schedule_now = MonotonicInstant::from_nanos(
             start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
         );
@@ -1743,11 +1749,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             pointer_probe.dispatch_completed();
             #[cfg(feature = "profiler")]
             let input_observed_us = crate::platform_linux::monotonic_time_microseconds();
-            let cursor_hidden = wayland
-                .core()
-                .seats
-                .get(&1)
-                .is_some_and(|seat| matches!(seat.cursor, CursorImage::Hidden));
             while let Some(event) = input.next_event() {
                 let time_microseconds = event.time_microseconds;
                 if matches!(
@@ -1970,6 +1971,16 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 &icon_layers,
                             )
                         {
+                            set_decoration_pointer_cursor(
+                                &mut wayland,
+                                &frame_layers,
+                                &windows,
+                                &stacking_order,
+                                pointer_focus,
+                                pointer_position,
+                                &config,
+                                &icon_layers,
+                            );
                             focus_toplevel(&display, &mut wayland, &windows, Some(surface))?;
                             match hit {
                                 DecorationHit::Titlebar => {
@@ -2056,6 +2067,16 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         }
                         if !pressed && let Some(interaction) = window_interaction.take() {
                             finish_window_interaction(&mut wayland, &windows, interaction)?;
+                            set_decoration_pointer_cursor(
+                                &mut wayland,
+                                &frame_layers,
+                                &windows,
+                                &stacking_order,
+                                pointer_focus,
+                                pointer_position,
+                                &config,
+                                &icon_layers,
+                            );
                         }
                     }
                     LinuxInputEventKind::KeyboardKey { keycode, pressed } => {
@@ -2182,6 +2203,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 latest_pointer_event_this_turn = pointer_probe.newest_event_us();
             }
             if cursor_position_dirty {
+                let cursor_hidden = wayland
+                    .core()
+                    .seats
+                    .get(&1)
+                    .is_some_and(|seat| matches!(seat.cursor, CursorImage::Hidden));
                 if cursor_hidden {
                     if let Some(cursor) = &mut hardware_cursor {
                         cursor.hide();
@@ -2620,6 +2646,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             }
         }
 
+        let cursor_image = wayland
+            .core()
+            .seats
+            .get(&1)
+            .expect("seat registered")
+            .cursor;
+        repaint |=
+            cursor_transition_requires_presentation(cursor_image_at_turn_start, cursor_image);
         let pointer_motion_only = repaint && pointer_motion_seen && !other_work_seen;
 
         // One atomic commit per CRTC may be outstanding. Primary frames retain mailbox behavior,
@@ -4092,6 +4126,10 @@ fn pointer_request_cursor_image(request: PointerRequest) -> CursorImage {
     }
 }
 
+fn cursor_transition_requires_presentation(previous: CursorImage, current: CursorImage) -> bool {
+    previous != current
+}
+
 fn resize_edge_pointer_icon(edge: ResizeEdge) -> PointerIcon {
     match edge {
         ResizeEdge::None => PointerIcon::Default,
@@ -4799,5 +4837,21 @@ mod tests {
             assert_eq!(pointer_icon_cursor_shape(icon), shape);
             assert!(cursor_shape_icon_name(shape).is_some());
         }
+    }
+
+    #[test]
+    fn cursor_image_transitions_require_presentation_without_scene_damage() {
+        assert!(cursor_transition_requires_presentation(
+            CursorImage::Hidden,
+            CursorImage::Shape(pointer_icon_cursor_shape(PointerIcon::Move)),
+        ));
+        assert!(cursor_transition_requires_presentation(
+            CursorImage::Shape(pointer_icon_cursor_shape(PointerIcon::Move)),
+            CursorImage::TelorgonDefault,
+        ));
+        assert!(!cursor_transition_requires_presentation(
+            CursorImage::TelorgonDefault,
+            CursorImage::TelorgonDefault,
+        ));
     }
 }

@@ -373,7 +373,9 @@ fn window_icon(model: &WindowChromeModel, style: WindowTitleBarStyle) -> Option<
 
 fn window_controls(model: &WindowChromeModel, design: WindowControlsDesign) -> Option<Element> {
     let mut controls = Vec::with_capacity(3);
+    let mut controls_width = 0.0;
     if model.capabilities.minimize {
+        controls_width += design.minimize.style.width;
         controls.push(control("Minimize", design.minimize, WindowAction::Minimize));
     }
     if model.capabilities.maximize {
@@ -382,12 +384,21 @@ fn window_controls(model: &WindowChromeModel, design: WindowControlsDesign) -> O
         } else {
             ("Maximize", design.maximize)
         };
+        controls_width += control_design.style.width;
         controls.push(control(label, control_design, WindowAction::ToggleMaximize));
     }
     if model.capabilities.close {
+        controls_width += design.close.style.width;
         controls.push(control("Close", design.close, WindowAction::Close));
     }
-    (!controls.is_empty()).then(|| row().gap(design.gap).children(controls).into_element())
+    (!controls.is_empty()).then(|| {
+        let gap_width = design.gap * controls.len().saturating_sub(1) as f32;
+        row()
+            .width(controls_width + gap_width)
+            .gap(design.gap)
+            .children(controls)
+            .into_element()
+    })
 }
 
 fn control(label: &'static str, design: WindowControlDesign, action: WindowAction) -> Element {

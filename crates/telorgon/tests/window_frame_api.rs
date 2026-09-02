@@ -237,6 +237,14 @@ fn easy_frame_publishes_controls_and_all_resize_directions() {
             .count(),
         8
     );
+    let close = snapshot
+        .regions
+        .iter()
+        .find(|region| region.role == WindowChromeRole::Action(WindowAction::Close))
+        .expect("easy frame must publish its close control");
+    let close_right_inset = snapshot.frame.bounds.x + snapshot.frame.bounds.width
+        - (close.bounds.x + close.bounds.width);
+    assert_eq!(close_right_inset, 9.0);
 
     let tiled = easy_window_frame(TEST_CHROME).compose(WindowChromeModel::new(8, "Tiled").tiling(
         WindowTilingState::new(
