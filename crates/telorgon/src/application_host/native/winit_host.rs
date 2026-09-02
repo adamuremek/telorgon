@@ -252,15 +252,15 @@ impl NativeRuntimeSource for CompositionSource {
         };
         let mut media =
             AssetMediaCache::new(self.assets).map_err(|error| AppError::new(error.to_string()))?;
-        let decoded = media
-            .icon(
-                icon.source(),
-                Some(
-                    crate::AssetRasterSize::new(64, 64)
-                        .map_err(|error| AppError::new(error.to_string()))?,
-                ),
-            )
-            .map_err(|error| AppError::new(error.to_string()))?;
+        let size = Some(
+            crate::AssetRasterSize::new(64, 64)
+                .map_err(|error| AppError::new(error.to_string()))?,
+        );
+        let decoded = match icon.tint_color() {
+            Some(tint) => media.tinted_icon(icon.source(), size, tint),
+            None => media.icon(icon.source(), size),
+        }
+        .map_err(|error| AppError::new(error.to_string()))?;
         let rgba = straight_alpha_rgba(&decoded);
         winit::window::Icon::from_rgba(
             rgba,
@@ -295,6 +295,7 @@ struct ManagedCursorKey {
     size: u16,
     hotspot_x: u16,
     hotspot_y: u16,
+    tint: Option<u32>,
 }
 
 #[derive(Clone)]
@@ -413,14 +414,18 @@ impl ManagedPointer {
                 size,
                 hotspot_x: hotspot.x,
                 hotspot_y: hotspot.y,
+                tint: graphic.tint_color().map(crate::ColorRgba8::to_ne_u32),
             };
             let cursor = if let Some(cursor) = self.cursors.get(&key) {
                 cursor.clone()
             } else {
-                let decoded = self
-                    .media
-                    .cursor(frame.asset, Some(raster_size))
-                    .map_err(|error| AppError::new(error.to_string()))?;
+                let decoded = match graphic.tint_color() {
+                    Some(tint) => self
+                        .media
+                        .tinted_cursor(frame.asset, Some(raster_size), tint),
+                    None => self.media.cursor(frame.asset, Some(raster_size)),
+                }
+                .map_err(|error| AppError::new(error.to_string()))?;
                 let source = CustomCursor::from_rgba(
                     straight_alpha_rgba(&decoded),
                     u16::try_from(decoded.extent.width)

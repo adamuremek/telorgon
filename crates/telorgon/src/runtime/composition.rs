@@ -470,9 +470,10 @@ impl CompositionDriver {
                 }
             }
             ElementKind::Image(props) => {
-                let image = writer.dynamic_image(
+                let image = writer.dynamic_image_tinted(
                     props.image,
                     props.content_version,
+                    props.tint,
                     props.style,
                     props.layout,
                 );
@@ -503,9 +504,10 @@ impl CompositionDriver {
                 let control = writer.button_node(props.style, |writer| {
                     icon_node = Some(
                         writer
-                            .dynamic_image(
+                            .dynamic_image_tinted(
                                 props.icon.unwrap_or(crate::ui::ImageId(0)),
                                 1,
+                                props.icon_tint,
                                 button_icon_style(&props),
                                 crate::ui::LayoutStyle::default(),
                             )
@@ -1064,7 +1066,12 @@ impl CompositionDriver {
                 Ok(())
             }
             (MountedKind::Image { node, props }, ElementKind::Image(candidate)) => {
-                ui.set_image_visual(*node, candidate.image, candidate.content_version);
+                ui.set_image_visual_tinted(
+                    *node,
+                    candidate.image,
+                    candidate.content_version,
+                    candidate.tint,
+                );
                 ui.set_box_style(*node, candidate.style);
                 ui.set_layout_style(*node, candidate.layout);
                 match &candidate.accessible_label {
@@ -1096,10 +1103,11 @@ impl CompositionDriver {
                 ElementKind::Button(candidate),
             ) => {
                 ui.set_box_style(*node, candidate.style);
-                ui.set_image_visual(
+                ui.set_image_visual_tinted(
                     *icon_node,
                     candidate.icon.unwrap_or(crate::ui::ImageId(0)),
                     1,
+                    candidate.icon_tint,
                 );
                 ui.set_box_style(*icon_node, button_icon_style(&candidate));
                 ui.set_dynamic_text(*label_node, &candidate.label);

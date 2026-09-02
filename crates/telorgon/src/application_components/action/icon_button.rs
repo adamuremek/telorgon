@@ -18,15 +18,31 @@ use crate::application_components::{
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IconArtwork {
     image: ImageId,
+    tint: Option<ColorRgba8>,
 }
 
 impl IconArtwork {
     pub const fn from_image(image: ImageId) -> Self {
-        Self { image }
+        Self { image, tint: None }
     }
 
     pub const fn image(self) -> ImageId {
         self.image
+    }
+
+    /// Recolors the artwork from its alpha mask while preserving transparency.
+    pub const fn tint(mut self, color: ColorRgba8) -> Self {
+        self.tint = Some(color);
+        self
+    }
+
+    pub const fn without_tint(mut self) -> Self {
+        self.tint = None;
+        self
+    }
+
+    pub const fn tint_color(self) -> Option<ColorRgba8> {
+        self.tint
     }
 }
 
@@ -44,7 +60,11 @@ impl From<IconAsset> for IconArtwork {
 
 impl From<Icon> for IconArtwork {
     fn from(icon: Icon) -> Self {
-        Self::from_image(icon.image_id())
+        let artwork = Self::from_image(icon.image_id());
+        match icon.tint_color() {
+            Some(color) => artwork.tint(color),
+            None => artwork,
+        }
     }
 }
 
@@ -253,18 +273,22 @@ impl IconButton {
             height: SizeRule::Px(minimum.height()),
         };
         let image = self.artwork.image();
+        let tint = self.artwork.tint_color();
         let icon = visual.icon;
         let control = ui
             .foundation()
             .button_node_under(host, visual.container, move |writer| {
-                writer.image(
+                writer.dynamic_image_tinted(
                     image,
+                    1,
+                    tint,
                     BoxStyle {
                         width: SizeRule::Px(icon.logical_size()),
                         height: SizeRule::Px(icon.logical_size()),
                         opacity: icon.opacity(),
                         ..BoxStyle::default()
                     },
+                    Default::default(),
                 );
             })
             .ok_or_else(|| RuntimeError::new("application icon-button host is stale"))?;
@@ -344,6 +368,17 @@ mod tests {
             IconButton::new(artwork, " ").unwrap_err(),
             IconButtonError::MissingAccessibleName
         );
+    }
+
+    #[test]
+    fn icon_artwork_preserves_icon_tint() {
+        const ICON: IconAsset = IconAsset::new(crate::assets::AssetKey::new("icons/test.svg"));
+        let white = ColorRgba8::rgba(255, 255, 255, 255);
+        let artwork = IconArtwork::from(Icon::new(ICON).tint(white));
+
+        assert_eq!(artwork.image(), ICON.image_id());
+        assert_eq!(artwork.tint_color(), Some(white));
+        assert_eq!(artwork.without_tint().tint_color(), None);
     }
 
     #[test]

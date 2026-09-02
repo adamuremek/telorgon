@@ -968,6 +968,24 @@ fn draw_image(
             let sampled =
                 sample_image_linear(&image.pixels, image.extent, image.color_encoding, u, v);
             let opacity = instance.opacity.clamp(0.0, 1.0);
+            if let Some(tint) = instance.tint {
+                let source_alpha = match image.alpha_mode {
+                    ImageAlphaMode::Opaque => 1.0,
+                    ImageAlphaMode::Straight | ImageAlphaMode::Premultiplied => sampled[3],
+                };
+                let alpha = source_alpha * (f32::from(tint.a) / 255.0) * opacity;
+                raster.blend_linear_premultiplied(
+                    x,
+                    y,
+                    [
+                        srgb_decode_byte(tint.r) * alpha,
+                        srgb_decode_byte(tint.g) * alpha,
+                        srgb_decode_byte(tint.b) * alpha,
+                    ],
+                    alpha,
+                );
+                continue;
+            }
             let alpha = match image.alpha_mode {
                 ImageAlphaMode::Opaque => opacity,
                 ImageAlphaMode::Straight | ImageAlphaMode::Premultiplied => sampled[3] * opacity,
@@ -1296,6 +1314,49 @@ mod tests {
     }
 
     #[test]
+    fn image_tint_recolors_the_source_alpha_mask() {
+        let mut pixels = [0_u8; 4];
+        let mut raster = RasterTarget {
+            pixels: &mut pixels,
+            width: 1,
+            height: 1,
+            blend_mode: BlendMode::Alpha,
+            color_space: ColorSpace::Srgb,
+        };
+        let node = NodeId::new(0, 1);
+        let rect = RectF {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+        };
+        let image = SoftwareImage {
+            extent: SizeI {
+                width: 1,
+                height: 1,
+            },
+            color_encoding: ImageColorEncoding::Srgb,
+            alpha_mode: ImageAlphaMode::Straight,
+            pixels: vec![0, 0, 0, 255],
+        };
+        let instance = ImageInstance {
+            node,
+            image: ImageId(1),
+            tint: Some(ColorRgba8::rgba(255, 255, 255, 255)),
+            rect,
+            view_bounds: rect,
+            content_version: 1,
+            opacity: 1.0,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        };
+
+        draw_image(&mut raster, &instance, None, None, rect, &image);
+
+        assert_eq!(pixels, [255, 255, 255, 255]);
+    }
+
+    #[test]
     fn retained_scene_readback_is_explicit() {
         let mut ui = MountedUi::default();
         {
@@ -1557,6 +1618,7 @@ mod tests {
             ImageInstance {
                 node: image_node,
                 image: ImageId(7),
+                tint: None,
                 rect: RectF {
                     x: 0.0,
                     y: 0.0,

@@ -1178,7 +1178,11 @@ fn convert_image(instance: &ImageInstance, alpha: Option<ImageAlphaMode>) -> Gpu
         rect: rect(instance.rect),
         uv_normalized: [0.0, 0.0, 1.0, 1.0],
         tint_spatial_clip_texture: [
-            pack(ColorRgba8::rgba(255, 255, 255, 255)),
+            pack(
+                instance
+                    .tint
+                    .unwrap_or(ColorRgba8::rgba(255, 255, 255, 255)),
+            ),
             instance.spatial.0,
             clip_slot(instance.clip.0),
             instance.image.0,
@@ -1189,7 +1193,7 @@ fn convert_image(instance: &ImageInstance, alpha: Option<ImageAlphaMode>) -> Gpu
             ImageAlphaMode::Straight => 0,
             ImageAlphaMode::Premultiplied => 1,
             ImageAlphaMode::Opaque => 2,
-        },
+        } | if instance.tint.is_some() { 1 << 2 } else { 0 },
         reserved: 0,
     }
 }
@@ -1298,7 +1302,7 @@ pub(crate) fn validate_texture_count(order: &[DrawItem]) -> Result<(), &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layout::ClipId;
+    use crate::layout::{ClipId, SpatialId};
     use crate::render::{BlendMode, PrimitiveKind};
     fn draw(kind: PrimitiveKind, resource: u32) -> DrawItem {
         DrawItem {
@@ -1339,5 +1343,26 @@ mod tests {
         invalid = draw(PrimitiveKind::Box, 0);
         invalid.batch.target = 1;
         assert!(validate_draw_order(&[invalid]).is_err());
+    }
+
+    #[test]
+    fn image_tint_is_packed_with_the_alpha_mask_flag() {
+        let tint = ColorRgba8::rgba(240, 241, 242, 192);
+        let instance = ImageInstance {
+            node: crate::ui::UiNodeId::new(0, 1),
+            image: ImageId(7),
+            tint: Some(tint),
+            rect: Default::default(),
+            view_bounds: Default::default(),
+            content_version: 1,
+            opacity: 1.0,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        };
+
+        let packed = convert_image(&instance, Some(ImageAlphaMode::Premultiplied));
+
+        assert_eq!(packed.tint_spatial_clip_texture[0], pack(tint));
+        assert_eq!(packed.flags, 1 | (1 << 2));
     }
 }

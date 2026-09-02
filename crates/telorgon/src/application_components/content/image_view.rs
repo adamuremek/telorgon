@@ -302,6 +302,7 @@ mod tests {
             runtime.ui().images.get(decorative.node()).unwrap(),
             &crate::ui::ImageVisual {
                 image: ImageId(17),
+                tint: None,
                 content_version: 44,
             }
         );

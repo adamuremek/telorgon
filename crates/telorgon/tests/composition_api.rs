@@ -257,9 +257,11 @@ struct IconControlFixture {}
 
 impl Component for IconControlFixture {
     fn view(&self) -> impl View {
-        button("Close").icon(telorgon::IconAsset::new(telorgon::AssetKey::new(
-            "icons/close.svg",
-        )))
+        button("Close")
+            .icon(telorgon::IconAsset::new(telorgon::AssetKey::new(
+                "icons/close.svg",
+            )))
+            .icon_tint(ColorRgba8::rgba(255, 255, 255, 255))
     }
 }
 
@@ -267,14 +269,9 @@ impl Component for IconControlFixture {
 fn composed_icon_buttons_keep_accessible_text_and_typed_artwork() {
     let runtime = ViewRuntime::from_composed(IconControlFixture::default()).unwrap();
     let expected = telorgon::asset_image_id(telorgon::AssetKey::new("icons/close.svg"));
-    assert!(
-        runtime
-            .ui()
-            .images
-            .values()
-            .iter()
-            .any(|image| image.image == expected)
-    );
+    assert!(runtime.ui().images.values().iter().any(|image| {
+        image.image == expected && image.tint == Some(ColorRgba8::rgba(255, 255, 255, 255))
+    }));
     assert!(runtime.ui().semantics.values().iter().any(|semantic| {
         let telorgon::SemanticName::Text(name) = semantic.name else {
             return false;

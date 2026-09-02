@@ -1,4 +1,5 @@
 use crate::assets::ImageSource;
+use crate::core::ColorRgba8;
 use crate::ui::{BoxStyle, ImageId, LayoutStyle};
 
 use crate::compose::{Dimension, Element, ElementKind, Key, View};
@@ -7,6 +8,7 @@ use crate::compose::{Dimension, Element, ElementKind, Key, View};
 #[derive(Clone, Debug, PartialEq)]
 pub struct ImageElement {
     pub image: ImageId,
+    pub tint: Option<ColorRgba8>,
     pub content_version: u64,
     pub accessible_label: Option<String>,
     pub style: BoxStyle,
@@ -32,6 +34,17 @@ impl Image {
 
     pub fn accessible_label(mut self, label: impl Into<String>) -> Self {
         self.element.accessible_label = Some(label.into());
+        self
+    }
+
+    /// Recolors the image from its alpha mask while preserving transparent edges.
+    pub fn tint(mut self, color: ColorRgba8) -> Self {
+        self.element.tint = Some(color);
+        self
+    }
+
+    pub fn without_tint(mut self) -> Self {
+        self.element.tint = None;
         self
     }
 
@@ -68,11 +81,12 @@ impl View for Image {
 }
 
 pub fn image(image: impl Into<ImageSource>) -> Image {
-    let image = image.into().image_id();
+    let source = image.into();
     Image {
         key: None,
         element: ImageElement {
-            image,
+            image: source.image_id(),
+            tint: source.tint_color(),
             content_version: 1,
             accessible_label: None,
             style: BoxStyle::default(),

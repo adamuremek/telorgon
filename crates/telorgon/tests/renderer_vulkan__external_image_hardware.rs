@@ -388,6 +388,7 @@ fn external_scene(image: ImageId, extent: SizeI) -> telorgon::render::RenderScen
         ImageInstance {
             node,
             image,
+            tint: None,
             rect: RectF {
                 x: 0.0,
                 y: 0.0,

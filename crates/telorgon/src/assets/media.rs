@@ -6,7 +6,7 @@ use crate::assets::{
     AssetBundle, AssetEntry, AssetError, AssetKey, AssetKind, CursorAsset, IconAsset, ImageAsset,
     asset_image_id,
 };
-use crate::core::SizeI;
+use crate::core::{ColorRgba8, SizeI};
 use crate::render::{ImageAlphaMode, ImageColorEncoding, ImageResource};
 
 const MAX_DIMENSION: u32 = 4096;
@@ -34,6 +34,7 @@ pub struct DecodedAssetImage {
     pub extent: SizeI,
     pub alpha_mode: ImageAlphaMode,
     pub pixels_rgba8: Arc<[u8]>,
+    image_id: crate::ui::ImageId,
     content_version: u64,
 }
 
@@ -44,7 +45,7 @@ impl DecodedAssetImage {
 
     pub fn render_resource(&self) -> ImageResource {
         ImageResource {
-            image: asset_image_id(self.key),
+            image: self.image_id,
             content_version: self.content_version,
             extent: self.extent,
             color_encoding: ImageColorEncoding::Srgb,
@@ -58,6 +59,7 @@ impl DecodedAssetImage {
 struct CacheKey {
     asset: AssetKey,
     size: Option<AssetRasterSize>,
+    tint: Option<u32>,
 }
 
 /// Bounded decoder and raster cache shared by GUI, shell, cursor, and native icon adapters.
@@ -83,7 +85,16 @@ impl AssetMediaCache {
         icon: IconAsset,
         size: Option<AssetRasterSize>,
     ) -> Result<Arc<DecodedAssetImage>, AssetMediaError> {
-        self.decode(icon.key(), AssetKind::Icon, size)
+        self.decode(icon.key(), AssetKind::Icon, size, None)
+    }
+
+    pub fn tinted_icon(
+        &mut self,
+        icon: IconAsset,
+        size: Option<AssetRasterSize>,
+        tint: ColorRgba8,
+    ) -> Result<Arc<DecodedAssetImage>, AssetMediaError> {
+        self.decode(icon.key(), AssetKind::Icon, size, Some(tint))
     }
 
     pub fn image(
@@ -91,7 +102,7 @@ impl AssetMediaCache {
         image: ImageAsset,
         size: Option<AssetRasterSize>,
     ) -> Result<Arc<DecodedAssetImage>, AssetMediaError> {
-        self.decode(image.key(), AssetKind::Image, size)
+        self.decode(image.key(), AssetKind::Image, size, None)
     }
 
     pub fn cursor(
@@ -99,7 +110,16 @@ impl AssetMediaCache {
         cursor: CursorAsset,
         size: Option<AssetRasterSize>,
     ) -> Result<Arc<DecodedAssetImage>, AssetMediaError> {
-        self.decode(cursor.key(), AssetKind::Cursor, size)
+        self.decode(cursor.key(), AssetKind::Cursor, size, None)
+    }
+
+    pub fn tinted_cursor(
+        &mut self,
+        cursor: CursorAsset,
+        size: Option<AssetRasterSize>,
+        tint: ColorRgba8,
+    ) -> Result<Arc<DecodedAssetImage>, AssetMediaError> {
+        self.decode(cursor.key(), AssetKind::Cursor, size, Some(tint))
     }
 
     /// Decodes the intrinsic representation for every GUI-renderable catalog entry.
@@ -110,7 +130,7 @@ impl AssetMediaCache {
             if !matches!(entry.kind, AssetKind::Icon | AssetKind::Image) {
                 continue;
             }
-            let decoded = self.decode(entry.key, entry.kind, None)?;
+            let decoded = self.decode(entry.key, entry.kind, None, None)?;
             resources.push(decoded.render_resource());
         }
         Ok(resources)
@@ -121,8 +141,13 @@ impl AssetMediaCache {
         key: AssetKey,
         expected: AssetKind,
         size: Option<AssetRasterSize>,
+        tint: Option<ColorRgba8>,
     ) -> Result<Arc<DecodedAssetImage>, AssetMediaError> {
-        let cache_key = CacheKey { asset: key, size };
+        let cache_key = CacheKey {
+            asset: key,
+            size,
+            tint: tint.map(packed_color),
+        };
         if let Some(image) = self.decoded.get(&cache_key) {
             return Ok(Arc::clone(image));
         }
@@ -135,7 +160,7 @@ impl AssetMediaCache {
             }
             .into());
         }
-        let image = Arc::new(decode_entry(entry, size)?);
+        let image = Arc::new(decode_entry(entry, size, tint)?);
         self.decoded.insert(cache_key, Arc::clone(&image));
         Ok(image)
     }
@@ -144,12 +169,26 @@ impl AssetMediaCache {
 fn decode_entry(
     entry: &AssetEntry,
     requested: Option<AssetRasterSize>,
+    tint: Option<ColorRgba8>,
 ) -> Result<DecodedAssetImage, AssetMediaError> {
-    if entry.media_type == "image/svg+xml" {
+    let mut decoded = if entry.media_type == "image/svg+xml" {
         decode_svg(entry, requested)
     } else {
         decode_raster(entry, requested)
+    }?;
+    if let Some(tint) = tint {
+        colorize_alpha_mask(&mut decoded, tint);
+        decoded.image_id = tinted_asset_image_id(entry.key, tint);
+        decoded.content_version = content_version(
+            entry,
+            AssetRasterSize {
+                width: decoded.extent.width.max(1) as u32,
+                height: decoded.extent.height.max(1) as u32,
+            },
+            Some(tint),
+        );
     }
+    Ok(decoded)
 }
 
 fn decode_svg(
@@ -194,6 +233,7 @@ fn decode_svg(
         size,
         ImageAlphaMode::Premultiplied,
         pixels,
+        None,
     ))
 }
 
@@ -228,6 +268,7 @@ fn decode_raster(
         size,
         ImageAlphaMode::Straight,
         Arc::from(rgba.into_raw()),
+        None,
     ))
 }
 
@@ -236,6 +277,7 @@ fn decoded_image(
     size: AssetRasterSize,
     alpha_mode: ImageAlphaMode,
     pixels_rgba8: Arc<[u8]>,
+    tint: Option<ColorRgba8>,
 ) -> DecodedAssetImage {
     DecodedAssetImage {
         key: entry.key,
@@ -245,11 +287,15 @@ fn decoded_image(
         },
         alpha_mode,
         pixels_rgba8,
-        content_version: content_version(entry, size),
+        image_id: tint.map_or_else(
+            || asset_image_id(entry.key),
+            |tint| tinted_asset_image_id(entry.key, tint),
+        ),
+        content_version: content_version(entry, size, tint),
     }
 }
 
-fn content_version(entry: &AssetEntry, size: AssetRasterSize) -> u64 {
+fn content_version(entry: &AssetEntry, size: AssetRasterSize, tint: Option<ColorRgba8>) -> u64 {
     let mut hash = 14_695_981_039_346_656_037_u64;
     for byte in entry
         .bytes
@@ -257,11 +303,41 @@ fn content_version(entry: &AssetEntry, size: AssetRasterSize) -> u64 {
         .copied()
         .chain(size.width.to_le_bytes())
         .chain(size.height.to_le_bytes())
+        .chain(
+            tint.into_iter()
+                .flat_map(|color| [color.r, color.g, color.b, color.a]),
+        )
     {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(1_099_511_628_211);
     }
     hash.max(1)
+}
+
+fn colorize_alpha_mask(image: &mut DecodedAssetImage, tint: ColorRgba8) {
+    let mut pixels = image.pixels_rgba8.to_vec();
+    for pixel in pixels.chunks_exact_mut(4) {
+        let alpha = u16::from(pixel[3]) * u16::from(tint.a) / 255;
+        pixel[0] = tint.r;
+        pixel[1] = tint.g;
+        pixel[2] = tint.b;
+        pixel[3] = alpha as u8;
+    }
+    image.pixels_rgba8 = Arc::from(pixels);
+    image.alpha_mode = ImageAlphaMode::Straight;
+}
+
+fn packed_color(color: ColorRgba8) -> u32 {
+    u32::from_le_bytes([color.r, color.g, color.b, color.a])
+}
+
+fn tinted_asset_image_id(key: AssetKey, tint: ColorRgba8) -> crate::ui::ImageId {
+    let mut hash = asset_image_id(key).0 ^ 0x6d2b_79f5;
+    for byte in [tint.r, tint.g, tint.b, tint.a] {
+        hash ^= u32::from(byte);
+        hash = hash.wrapping_mul(16_777_619);
+    }
+    crate::ui::ImageId(hash | (1 << 31))
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -317,5 +393,28 @@ mod tests {
         );
         assert_eq!(first.pixels_rgba8.len(), 16 * 16 * 4);
         assert_eq!(first.render_resource().image, SVG.image_id());
+    }
+
+    #[test]
+    fn tint_recolors_svg_alpha_and_uses_a_distinct_cache_entry() {
+        let mut cache = AssetMediaCache::new(AssetBundle::new(&ENTRIES)).unwrap();
+        let original = cache.icon(SVG, None).unwrap();
+        let white = ColorRgba8::rgba(255, 255, 255, 192);
+        let tinted = cache.tinted_icon(SVG, None, white).unwrap();
+        let tinted_again = cache.tinted_icon(SVG, None, white).unwrap();
+
+        assert!(Arc::ptr_eq(&tinted, &tinted_again));
+        assert!(!Arc::ptr_eq(&original, &tinted));
+        assert_ne!(
+            original.render_resource().image,
+            tinted.render_resource().image
+        );
+        assert!(
+            tinted
+                .pixels_rgba8
+                .chunks_exact(4)
+                .all(|pixel| pixel == [255, 255, 255, 192])
+        );
+        assert_eq!(tinted.alpha_mode, ImageAlphaMode::Straight);
     }
 }

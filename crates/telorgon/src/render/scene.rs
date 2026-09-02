@@ -243,6 +243,7 @@ pub enum MaterialResourceDelta {
 pub struct ImageInstance {
     pub node: NodeId,
     pub image: ImageId,
+    pub tint: Option<ColorRgba8>,
     pub rect: RectF,
     pub view_bounds: RectF,
     pub content_version: u64,

@@ -82,11 +82,3 @@ windows-sys = { workspace = true, optional = true }
 
 [dev-dependencies]
 tower.workspace = true
-
-[[bench]]
-name = "retained_runtime"
-harness = false
-
-[[bench]]
-name = "composition_callbacks"
-harness = false

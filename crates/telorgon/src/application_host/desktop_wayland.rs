@@ -817,6 +817,7 @@ impl VulkanScanout {
                 ImageInstance {
                     node,
                     image: ImageId(1),
+                    tint: None,
                     rect: rectangle,
                     view_bounds: rectangle,
                     content_version: 1,
@@ -3427,9 +3428,11 @@ fn render_asset_pointer(
         )
     }
     .map_err(app_error)?;
-    let decoded = media
-        .cursor(frame.asset, Some(requested))
-        .map_err(app_error)?;
+    let decoded = match graphic.tint_color() {
+        Some(tint) => media.tinted_cursor(frame.asset, Some(requested), tint),
+        None => media.cursor(frame.asset, Some(requested)),
+    }
+    .map_err(app_error)?;
     let hotspot = graphic.pointer_hotspot();
     if i32::from(hotspot.x) >= decoded.extent.width || i32::from(hotspot.y) >= decoded.extent.height
     {

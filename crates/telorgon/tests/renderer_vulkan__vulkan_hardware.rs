@@ -386,6 +386,7 @@ fn mixed_scene_matches_the_software_reference_on_real_vulkan_hardware() {
         ImageInstance {
             node: image_node,
             image: ImageId(9),
+            tint: None,
             rect: RectF {
                 x: 1.0,
                 y: 1.0,

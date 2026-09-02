@@ -118,27 +118,7 @@ cargo test -p telorgon-presenter-vulkan-wsi --test windows_managed_vulkan -- --i
 
 The final command opens the short-lived managed qualification window; it must remain user-run.
 
-## Retained-runtime benchmark
-
-`crates/telorgon/benches/retained_runtime.rs` currently measures optimized CPU scenarios:
-
-- mounting 10,000 static nodes;
-- changing one control among 10,000;
-- updating 1,000 properties;
-- querying visible ranges in a 100,000-item virtual collection;
-- preparing cached editor text; and
-- updating logical damage for a 4K compositor surface.
-
-`crates/telorgon/benches/composition_callbacks.rs` covers the high-level component path:
-
-- mounting 1,000 controls with owner-independent callback descriptions;
-- dispatching one callback and reconciling a 1,000-control component; and
-- evaluating and subscribing a component that watches 16 signals through its scoped context.
-
-The benchmark is a small `Instant`-based harness. Results are useful for local regression detection,
-but they are not statistically rigorous, end-to-end application timings, renderer comparisons, or
-GPU measurements. Iteration counts, warm-up behavior, optimizer effects, and machine configuration
-must be considered when interpreting them.
+## Portable verification
 
 Verification commands that do not start a GUI application are:
 
@@ -147,14 +127,6 @@ cargo fmt --all --check
 cargo check --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-cargo bench --workspace --no-run
-```
-
-Run the benchmark executable only when intentionally collecting machine-specific timings:
-
-```powershell
-cargo bench -p telorgon --bench retained_runtime
-cargo bench -p telorgon --bench composition_callbacks
 ```
 
 ## Required diagnostics

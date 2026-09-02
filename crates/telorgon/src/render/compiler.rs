@@ -212,6 +212,7 @@ impl SceneCompiler {
                 let image = ImageInstance {
                     node: *node,
                     image: visual.image,
+                    tint: visual.tint,
                     rect: computed.local_content_rect,
                     view_bounds: computed.content_rect,
                     content_version: visual.content_version,

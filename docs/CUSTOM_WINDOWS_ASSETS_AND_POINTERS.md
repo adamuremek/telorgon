@@ -34,12 +34,14 @@ use telorgon::{
 
 asset_catalog! { pub mod assets = "assets"; }
 
+const WHITE: ColorRgba8 = ColorRgba8::rgba(255, 255, 255, 255);
+
 fn app_icons() -> AppIconProfile {
     AppIconProfile::new()
         // Desktop icon-theme name used when the environment can resolve one.
         .named("com.example.studio")
-        // A scalable project-owned fallback.
-        .icon(assets::icons::APP)
+        // A scalable project-owned fallback recolored from its alpha mask.
+        .icon(Icon::new(assets::icons::APP).tint(WHITE))
         // Exact raster variants win for their declared size.
         .icon_at(32, assets::icons::APP_32)
 }
@@ -50,7 +52,8 @@ fn pointers() -> PointerThemeOverrides {
         PointerIcon::EwResize,
         PointerGraphic::new(assets::cursors::RESIZE_EW)
             .size(32)
-            .hotspot(16, 16),
+            .hotspot(16, 16)
+            .tint(WHITE),
     )
 }
 
@@ -84,6 +87,7 @@ impl Component for ManagedFrame {
         let control = |label, icon, action| {
             button(label)
                 .icon(icon)
+                .icon_tint(WHITE)
                 .icon_size(16.0)
                 .width(38.0)
                 .height(30.0)
@@ -102,7 +106,13 @@ impl Component for ManagedFrame {
                     .height(46.0)
                     .padding((8.0, 8.0))
                     .gap(6.0)
-                    .child(image(assets::icons::APP).width(20.0).height(20.0).window_app_icon())
+                    .child(
+                        image(assets::icons::APP)
+                            .tint(WHITE)
+                            .width(20.0)
+                            .height(20.0)
+                            .window_app_icon(),
+                    )
                     .child(text("Studio").window_title())
                     .child(spacer())
                     .child(control(
@@ -255,6 +265,30 @@ composable `.icon(...)` button slot, legacy `IconButton`, `AppIconProfile`, mana
 metadata, and compositor-owned chrome. `AppIconProfile` prefers an exact-sized source, then a
 scalable source, then the nearest raster size.
 
+Tinting treats the source as an alpha mask: opaque SVG artwork becomes the requested color while
+transparent and antialiased edges retain their alpha. This makes a black SVG turn truly white,
+rather than multiplying its existing RGB channels. The same contract works through software and
+Vulkan rendering, native window icons, and compositor cursors. Tinting is available at the level
+that owns the artwork:
+
+```rust,ignore
+const WHITE: ColorRgba8 = ColorRgba8::rgba(255, 255, 255, 255);
+
+let standalone = image(assets::icons::APP).tint(WHITE);
+let close = button("Close")
+    .icon(assets::icons::CLOSE)
+    .icon_tint(WHITE);
+let native_icon = Icon::new(assets::icons::APP).tint(WHITE);
+let arrow = PointerGraphic::new(assets::cursors::ARROW)
+    .size(32)
+    .hotspot(2, 2)
+    .tint(WHITE);
+```
+
+Use `.without_tint()` (or `.without_icon_tint()` for a button) to return to the source colors.
+Although the operation works for any decoded image, it is intended primarily for monochrome SVG
+icons and cursors.
+
 On Wayland, `xdg_toplevel_icon_v1` is commit-synchronized and follows the protocol's lifetime rules:
 
 - only square `wl_shm` buffers with a positive scale are accepted;
@@ -274,6 +308,21 @@ closest submitted image for its frame, otherwise using the desktop environment's
 no pointer over that region. Window drag, resize, and action regions select `Move`, the matching
 eight-direction resize shape, or `Pointer` automatically. `PointerThemeOverrides` handles concise
 code-local exceptions; a registered TOML cursor theme supplies the full mapping.
+
+Every `PointerGraphic` can be tinted independently in code. For example, all of the cursor SVGs in
+one catalog can share the same white color while retaining their individual sizes and hotspots:
+
+```rust,ignore
+const WHITE: ColorRgba8 = ColorRgba8::rgba(255, 255, 255, 255);
+
+PointerThemeOverrides::new()
+    .set(PointerIcon::Default, PointerGraphic::new(assets::cursors::ARROW).size(32).hotspot(2, 2).tint(WHITE))
+    .set(PointerIcon::Move, PointerGraphic::new(assets::cursors::MOVE).size(32).hotspot(16, 16).tint(WHITE))
+    .set(PointerIcon::Pointer, PointerGraphic::new(assets::cursors::POINTER).size(32).hotspot(6, 2).tint(WHITE))
+    .set(PointerIcon::EwResize, PointerGraphic::new(assets::cursors::RESIZE_EW).size(32).hotspot(16, 16).tint(WHITE))
+    .set(PointerIcon::NsResize, PointerGraphic::new(assets::cursors::RESIZE_NS).size(32).hotspot(16, 16).tint(WHITE))
+    .set(PointerIcon::Text, PointerGraphic::new(assets::cursors::TEXT).size(32).hotspot(16, 16).tint(WHITE));
+```
 
 ```toml
 fallback = "system"

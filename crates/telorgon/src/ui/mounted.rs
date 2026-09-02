@@ -602,6 +602,7 @@ pub struct TextVisual {
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct ImageVisual {
     pub image: ImageId,
+    pub tint: Option<ColorRgba8>,
     pub content_version: u64,
 }
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -1048,15 +1049,29 @@ impl MountedUi {
 
     /// Rebinds an image node to a retained image resource revision.
     pub fn set_image_visual(&mut self, node: NodeId, image: ImageId, content_version: u64) -> bool {
+        let tint = self.images.get(node).and_then(|visual| visual.tint);
+        self.set_image_visual_tinted(node, image, content_version, tint)
+    }
+
+    /// Rebinds an image and its optional alpha-mask tint as one paint update.
+    pub fn set_image_visual_tinted(
+        &mut self,
+        node: NodeId,
+        image: ImageId,
+        content_version: u64,
+        tint: Option<ColorRgba8>,
+    ) -> bool {
         let Some(visual) = self.images.get_mut(node) else {
             return false;
         };
         let content_version = content_version.max(1);
-        if visual.image == image && visual.content_version == content_version {
+        if visual.image == image && visual.content_version == content_version && visual.tint == tint
+        {
             return false;
         }
         visual.image = image;
         visual.content_version = content_version;
+        visual.tint = tint;
         if let Some(core) = self.nodes.core_mut(node) {
             core.content_revision = core.content_revision.wrapping_add(1).max(1);
         }
@@ -2824,6 +2839,7 @@ impl<'a, A> MountWriter<'a, A> {
             node,
             ImageVisual {
                 image,
+                tint: None,
                 content_version: 1,
             },
         );
@@ -2838,6 +2854,19 @@ impl<'a, A> MountWriter<'a, A> {
         style: BoxStyle,
         layout: LayoutStyle,
     ) -> ControlHandle {
+        self.dynamic_image_tinted(image, content_version, None, style, layout)
+    }
+
+    /// Creates a revisioned image node with an optional alpha-mask tint.
+    #[doc(hidden)]
+    pub fn dynamic_image_tinted(
+        &mut self,
+        image: ImageId,
+        content_version: u64,
+        tint: Option<ColorRgba8>,
+        style: BoxStyle,
+        layout: LayoutStyle,
+    ) -> ControlHandle {
         let node = self.mount(
             NodeKind::Image,
             style,
@@ -2848,6 +2877,7 @@ impl<'a, A> MountWriter<'a, A> {
             node,
             ImageVisual {
                 image,
+                tint,
                 content_version: content_version.max(1),
             },
         );
@@ -2879,6 +2909,7 @@ impl<'a, A> MountWriter<'a, A> {
             node,
             ImageVisual {
                 image,
+                tint: None,
                 content_version,
             },
         );

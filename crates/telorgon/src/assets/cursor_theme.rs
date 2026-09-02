@@ -3,6 +3,7 @@ use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use crate::assets::{AssetBundle, AssetError, AssetKey, AssetKind, CursorAsset, CursorThemeAsset};
+use crate::core::ColorRgba8;
 use crate::platform::{
     MAX_CUSTOM_CURSOR_ANIMATION_DURATION_MS, MAX_CUSTOM_CURSOR_FRAME_DURATION_MS,
     MAX_CUSTOM_CURSOR_FRAMES, PointerIcon,
@@ -48,6 +49,7 @@ pub struct PointerGraphic {
     frames: Arc<[PointerFrame]>,
     hotspot: PointerHotspot,
     size: Option<u16>,
+    tint: Option<ColorRgba8>,
 }
 
 impl PointerGraphic {
@@ -56,6 +58,7 @@ impl PointerGraphic {
             frames: Arc::from([PointerFrame::still(asset)]),
             hotspot: PointerHotspot::default(),
             size: None,
+            tint: None,
         }
     }
 
@@ -85,6 +88,7 @@ impl PointerGraphic {
             frames: frames.into(),
             hotspot: PointerHotspot::default(),
             size: None,
+            tint: None,
         })
     }
 
@@ -98,6 +102,17 @@ impl PointerGraphic {
         self
     }
 
+    /// Recolors every frame from its decoded alpha mask while preserving transparency.
+    pub const fn tint(mut self, color: ColorRgba8) -> Self {
+        self.tint = Some(color);
+        self
+    }
+
+    pub const fn without_tint(mut self) -> Self {
+        self.tint = None;
+        self
+    }
+
     pub fn frames(&self) -> &[PointerFrame] {
         &self.frames
     }
@@ -108,6 +123,10 @@ impl PointerGraphic {
 
     pub const fn physical_size(&self) -> Option<u16> {
         self.size
+    }
+
+    pub const fn tint_color(&self) -> Option<ColorRgba8> {
+        self.tint
     }
 }
 
@@ -484,6 +503,18 @@ mod tests {
             b"<svg/>",
         ),
     ];
+
+    #[test]
+    fn pointer_graphics_retain_code_defined_tint() {
+        let white = ColorRgba8::rgba(255, 255, 255, 255);
+        let graphic = PointerGraphic::new(POINTER)
+            .size(32)
+            .hotspot(3, 2)
+            .tint(white);
+
+        assert_eq!(graphic.tint_color(), Some(white));
+        assert_eq!(graphic.without_tint().tint_color(), None);
+    }
 
     #[test]
     fn manifest_and_override_use_fixed_precedence() {

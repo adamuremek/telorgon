@@ -2,6 +2,7 @@
 
 use std::{fmt, slice};
 
+use crate::core::ColorRgba8;
 use crate::ui::ImageId;
 
 mod cursor_theme;
@@ -185,15 +186,31 @@ impl ImageAsset {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Icon {
     source: IconAsset,
+    tint: Option<ColorRgba8>,
 }
 
 impl Icon {
     pub const fn new(source: IconAsset) -> Self {
-        Self { source }
+        Self { source, tint: None }
     }
 
     pub const fn source(self) -> IconAsset {
         self.source
+    }
+
+    /// Recolors the decoded artwork from its alpha mask while preserving transparency.
+    pub const fn tint(mut self, color: ColorRgba8) -> Self {
+        self.tint = Some(color);
+        self
+    }
+
+    pub const fn without_tint(mut self) -> Self {
+        self.tint = None;
+        self
+    }
+
+    pub const fn tint_color(self) -> Option<ColorRgba8> {
+        self.tint
     }
 
     pub const fn image_id(self) -> ImageId {
@@ -317,6 +334,7 @@ pub enum AppIconProfileError {
 pub enum ImageSource {
     Registered(ImageId),
     Asset(ImageAsset),
+    Tinted { image: ImageId, color: ColorRgba8 },
 }
 
 impl ImageSource {
@@ -324,6 +342,27 @@ impl ImageSource {
         match self {
             Self::Registered(image) => image,
             Self::Asset(asset) => asset.image_id(),
+            Self::Tinted { image, .. } => image,
+        }
+    }
+
+    /// Recolors sampled artwork from its alpha mask. This is especially useful for monochrome SVG
+    /// icons, while remaining deterministic for any registered image resource.
+    pub const fn tint(self, color: ColorRgba8) -> Self {
+        Self::Tinted {
+            image: self.image_id(),
+            color,
+        }
+    }
+
+    pub const fn without_tint(self) -> Self {
+        Self::Registered(self.image_id())
+    }
+
+    pub const fn tint_color(self) -> Option<ColorRgba8> {
+        match self {
+            Self::Tinted { color, .. } => Some(color),
+            Self::Registered(_) | Self::Asset(_) => None,
         }
     }
 }
@@ -348,7 +387,11 @@ impl From<IconAsset> for ImageSource {
 
 impl From<Icon> for ImageSource {
     fn from(value: Icon) -> Self {
-        Self::Registered(value.image_id())
+        let source = Self::Registered(value.image_id());
+        match value.tint_color() {
+            Some(color) => source.tint(color),
+            None => source,
+        }
     }
 }
 
@@ -507,5 +550,10 @@ mod tests {
             ImageSource::from(Icon::new(ICON)).image_id(),
             ICON.image_id()
         );
+
+        let white = ColorRgba8::rgba(255, 255, 255, 255);
+        let tinted = Icon::new(ICON).tint(white);
+        assert_eq!(tinted.tint_color(), Some(white));
+        assert_eq!(ImageSource::from(tinted).tint_color(), Some(white));
     }
 }

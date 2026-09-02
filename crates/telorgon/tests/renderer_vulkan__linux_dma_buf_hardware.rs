@@ -733,6 +733,7 @@ fn external_image_scene(extent: vk::Extent2D) -> telorgon::render::RenderSceneDe
         ImageInstance {
             node,
             image: ImageId(41),
+            tint: None,
             rect: RectF {
                 x: 0.0,
                 y: 0.0,

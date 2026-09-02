@@ -18,6 +18,7 @@ pub struct ButtonElement {
     pub style_id: ComponentStyleId,
     pub style_override: StylePropertyPatch,
     pub icon: Option<ImageId>,
+    pub icon_tint: Option<ColorRgba8>,
     pub icon_size: f32,
     pub on_press: Option<ComponentCallback>,
 }
@@ -67,7 +68,20 @@ impl Button {
     /// Replaces the visible text with registered icon artwork while retaining `label` as the
     /// button's accessible name.
     pub fn icon(mut self, icon: impl Into<ImageSource>) -> Self {
-        self.element.icon = Some(icon.into().image_id());
+        let source = icon.into();
+        self.element.icon = Some(source.image_id());
+        self.element.icon_tint = source.tint_color();
+        self
+    }
+
+    /// Recolors icon artwork from its alpha mask without affecting the accessible label.
+    pub fn icon_tint(mut self, color: ColorRgba8) -> Self {
+        self.element.icon_tint = Some(color);
+        self
+    }
+
+    pub fn without_icon_tint(mut self) -> Self {
+        self.element.icon_tint = None;
         self
     }
 
@@ -175,6 +189,7 @@ pub fn button(label: impl Into<String>) -> Button {
             style_id: ComponentStyleId::named(ThemeDomainId::APPLICATION, "button", "default"),
             style_override: StylePropertyPatch::default(),
             icon: None,
+            icon_tint: None,
             icon_size: 18.0,
             on_press: None,
         },
