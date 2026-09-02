@@ -3533,8 +3533,9 @@ hosts derive title, app-icon, drag, resize, content, and action regions from com
 `WindowFrameTemplate` accepts named templates while preserving closure compatibility.
 `EasyWindowFrame` resolves active/inactive palettes, normal/maximized/tiled/fullscreen geometry,
 client/fallback icons, capability-filtered controls, maximize/restore artwork, all eight resize
-directions, hit slop, and resting/hovered/pressed/focus-visible/disabled control visuals from one
-code-defined `WindowChromeDesign`. The low-level type-state frame retains unrestricted normal
+directions, border-confined L-shaped corner targets, outward-only hit slop, and
+resting/hovered/pressed/focus-visible/disabled control visuals from one code-defined
+`WindowChromeDesign`. The low-level type-state frame retains unrestricted normal
 composition, explicit hit priority/cursor requests, tiled-edge control, and declaration-authorized
 custom shell actions. `Compositor::background` is the normalized visual name; `.policy` is a
 deprecated compatibility alias.

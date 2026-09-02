@@ -235,8 +235,42 @@ fn easy_frame_publishes_controls_and_all_resize_directions() {
                 WindowChromeRole::Action(WindowAction::BeginResize(_))
             ))
             .count(),
-        8
+        12
     );
+    assert_eq!(snapshot.hit_test(320.0, 240.0), None);
+    assert_eq!(
+        snapshot.hit_test(320.0, 24.0),
+        Some(WindowChromeRole::DragRegion)
+    );
+    assert_eq!(
+        snapshot.hit_test(636.0, 4.0),
+        Some(WindowChromeRole::Action(WindowAction::BeginResize(
+            WindowResizeEdge::TopRight,
+        )))
+    );
+    assert_eq!(snapshot.hit_test(630.0, 470.0), None);
+    for region in snapshot.regions.iter().filter(|region| {
+        matches!(
+            region.role,
+            WindowChromeRole::Action(WindowAction::BeginResize(_))
+        )
+    }) {
+        match region.role {
+            WindowChromeRole::Action(WindowAction::BeginResize(
+                WindowResizeEdge::Top | WindowResizeEdge::Bottom,
+            )) => assert_eq!(region.bounds.height, 6.0),
+            WindowChromeRole::Action(WindowAction::BeginResize(
+                WindowResizeEdge::Left | WindowResizeEdge::Right,
+            )) => assert_eq!(region.bounds.width, 6.0),
+            WindowChromeRole::Action(WindowAction::BeginResize(_)) => {
+                assert!(
+                    (region.bounds.width, region.bounds.height) == (12.0, 6.0)
+                        || (region.bounds.width, region.bounds.height) == (6.0, 12.0)
+                );
+            }
+            _ => unreachable!("filtered to resize regions"),
+        }
+    }
     let close = snapshot
         .regions
         .iter()
@@ -271,8 +305,220 @@ fn easy_frame_publishes_controls_and_all_resize_directions() {
                 WindowChromeRole::Action(WindowAction::BeginResize(_))
             ))
             .count(),
-        3
+        4
     );
+}
+
+#[test]
+fn easy_frame_resize_hitboxes_track_the_border_without_spilling_inward() {
+    for (frame_border_width, side) in [(1.0, 2.0), (4.0, 10.0)] {
+        let state = WindowChromeStateStyle {
+            resize_edge: side,
+            content_margin: Insets::new(44.0, side, side, side),
+            ..NORMAL
+        };
+        let design = WindowChromeDesign {
+            active: WindowChromePalette {
+                frame_border_width,
+                ..TEST_CHROME.active
+            },
+            inactive: WindowChromePalette {
+                frame_border_width,
+                ..TEST_CHROME.inactive
+            },
+            normal: state,
+            tiled: state,
+            ..TEST_CHROME
+        };
+        let capabilities = WindowChromeCapabilities {
+            close: false,
+            minimize: false,
+            maximize: false,
+            system_menu: false,
+            ..WindowChromeCapabilities::MANAGED_TOPLEVEL
+        };
+        let component = easy_window_frame(design)
+            .compose(WindowChromeModel::new(10, "Border").capabilities(capabilities));
+        let mut runtime = AppRuntimeCore::from_composed_with_extent(
+            component,
+            SizeI {
+                width: 640,
+                height: 480,
+            },
+        )
+        .unwrap();
+        runtime.prepare_frame(MonotonicInstant::ZERO, true).unwrap();
+        let snapshot =
+            telorgon::WindowChromeSnapshot::derive(runtime.ui(), runtime.layout()).unwrap();
+
+        let resize_region = |edge| {
+            snapshot
+                .regions
+                .iter()
+                .find(|region| {
+                    region.role == WindowChromeRole::Action(WindowAction::BeginResize(edge))
+                })
+                .expect("configured resize edge must publish a hit region")
+        };
+        let top = resize_region(WindowResizeEdge::Top);
+        let right = resize_region(WindowResizeEdge::Right);
+        let bottom = resize_region(WindowResizeEdge::Bottom);
+        let left = resize_region(WindowResizeEdge::Left);
+        let frame = snapshot.frame.bounds;
+
+        assert_eq!(top.bounds.y, frame.y + frame_border_width);
+        assert_eq!(right.bounds.right(), frame.right() - frame_border_width);
+        assert_eq!(bottom.bounds.bottom(), frame.bottom() - frame_border_width);
+        assert_eq!(left.bounds.x, frame.x + frame_border_width);
+        assert_eq!(
+            top.hit_bounds.intersection(frame).unwrap().height,
+            frame_border_width + side
+        );
+        assert_eq!(
+            right.hit_bounds.intersection(frame).unwrap().width,
+            frame_border_width + side
+        );
+        assert_eq!(
+            bottom.hit_bounds.intersection(frame).unwrap().height,
+            frame_border_width + side
+        );
+        assert_eq!(
+            left.hit_bounds.intersection(frame).unwrap().width,
+            frame_border_width + side
+        );
+
+        assert_eq!(
+            snapshot.hit_test(320.0, top.bounds.bottom() - 0.5),
+            Some(WindowChromeRole::Action(WindowAction::BeginResize(
+                WindowResizeEdge::Top,
+            )))
+        );
+        assert_eq!(
+            snapshot.hit_test(320.0, top.bounds.bottom() + 0.5),
+            Some(WindowChromeRole::DragRegion)
+        );
+        assert_eq!(
+            snapshot.hit_test(right.bounds.x + 0.5, 240.0),
+            Some(WindowChromeRole::Action(WindowAction::BeginResize(
+                WindowResizeEdge::Right,
+            )))
+        );
+        assert_eq!(snapshot.hit_test(right.bounds.x - 0.5, 240.0), None);
+
+        let top_right_regions = snapshot
+            .regions
+            .iter()
+            .filter(|region| {
+                region.role
+                    == WindowChromeRole::Action(WindowAction::BeginResize(
+                        WindowResizeEdge::TopRight,
+                    ))
+            })
+            .collect::<Vec<_>>();
+        let horizontal_corner = top_right_regions
+            .iter()
+            .copied()
+            .find(|region| region.bounds.height == side)
+            .unwrap();
+        let vertical_corner = top_right_regions
+            .iter()
+            .copied()
+            .find(|region| region.bounds.width == side)
+            .unwrap();
+        assert_eq!(
+            snapshot.hit_test(
+                vertical_corner.bounds.x + 0.5,
+                vertical_corner.bounds.y + side * 1.5,
+            ),
+            Some(WindowChromeRole::Action(WindowAction::BeginResize(
+                WindowResizeEdge::TopRight,
+            )))
+        );
+        assert_eq!(
+            snapshot.hit_test(
+                vertical_corner.bounds.x - side / 2.0,
+                horizontal_corner.bounds.bottom() + side / 2.0,
+            ),
+            Some(WindowChromeRole::DragRegion)
+        );
+
+        for (edge, expected_x, expected_y) in [
+            (
+                WindowResizeEdge::TopRight,
+                frame.right() - frame_border_width,
+                frame.y + frame_border_width,
+            ),
+            (
+                WindowResizeEdge::BottomRight,
+                frame.right() - frame_border_width,
+                frame.bottom() - frame_border_width,
+            ),
+            (
+                WindowResizeEdge::BottomLeft,
+                frame.x + frame_border_width,
+                frame.bottom() - frame_border_width,
+            ),
+            (
+                WindowResizeEdge::TopLeft,
+                frame.x + frame_border_width,
+                frame.y + frame_border_width,
+            ),
+        ] {
+            for region in snapshot.regions.iter().filter(|region| {
+                region.role == WindowChromeRole::Action(WindowAction::BeginResize(edge))
+            }) {
+                if matches!(
+                    edge,
+                    WindowResizeEdge::TopRight | WindowResizeEdge::BottomRight
+                ) {
+                    assert_eq!(region.bounds.right(), expected_x);
+                } else {
+                    assert_eq!(region.bounds.x, expected_x);
+                }
+                if matches!(
+                    edge,
+                    WindowResizeEdge::BottomRight | WindowResizeEdge::BottomLeft
+                ) {
+                    assert_eq!(region.bounds.bottom(), expected_y);
+                } else {
+                    assert_eq!(region.bounds.y, expected_y);
+                }
+            }
+        }
+
+        for region in snapshot.regions.iter().filter(|region| {
+            matches!(
+                region.role,
+                WindowChromeRole::Action(WindowAction::BeginResize(_))
+            )
+        }) {
+            match region.role {
+                WindowChromeRole::Action(WindowAction::BeginResize(WindowResizeEdge::Top)) => {
+                    assert_eq!(region.bounds.height, side);
+                    assert_eq!(region.hit_bounds.bottom(), region.bounds.bottom());
+                }
+                WindowChromeRole::Action(WindowAction::BeginResize(WindowResizeEdge::Right)) => {
+                    assert_eq!(region.bounds.width, side);
+                    assert_eq!(region.hit_bounds.x, region.bounds.x);
+                }
+                WindowChromeRole::Action(WindowAction::BeginResize(WindowResizeEdge::Bottom)) => {
+                    assert_eq!(region.bounds.height, side);
+                    assert_eq!(region.hit_bounds.y, region.bounds.y);
+                }
+                WindowChromeRole::Action(WindowAction::BeginResize(WindowResizeEdge::Left)) => {
+                    assert_eq!(region.bounds.width, side);
+                    assert_eq!(region.hit_bounds.right(), region.bounds.right());
+                }
+                WindowChromeRole::Action(WindowAction::BeginResize(_)) => {
+                    assert!(
+                        (region.bounds.width, region.bounds.height) == (side * 2.0, side)
+                            || (region.bounds.width, region.bounds.height) == (side, side * 2.0)
+                    );
+                }
+                _ => unreachable!("filtered to resize regions"),
+            }
+        }
+    }
 }
 
 #[component(no_default)]

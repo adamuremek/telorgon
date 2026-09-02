@@ -3438,12 +3438,51 @@ fn render_semantic_pointer(
             pointer_media,
         )?)),
         PointerResolution::System(icon) => {
-            render_composed_pointer(icon, composed_icon_name, pointer, icons, extent, now)
+            let rendered =
+                render_composed_pointer(icon, composed_icon_name, pointer, icons, extent, now)?;
+            if rendered.is_some() {
+                return Ok(rendered);
+            }
+            let Some(fallback) = semantic_pointer_fallback(icon) else {
+                return Ok(None);
+            };
+            render_semantic_pointer(
+                fallback,
+                cursor_shape_icon_name(pointer_icon_cursor_shape(fallback)),
+                pointer,
+                icons,
+                extent,
+                now,
+                pointer_config,
+                pointer_theme,
+                pointer_media,
+            )
         }
         PointerResolution::Hidden => Ok(None),
         PointerResolution::ClientSurface => {
             unreachable!("semantic requests cannot resolve to a client surface")
         }
+    }
+}
+
+fn semantic_pointer_fallback(icon: PointerIcon) -> Option<PointerIcon> {
+    match icon {
+        PointerIcon::EResize
+        | PointerIcon::NResize
+        | PointerIcon::NeResize
+        | PointerIcon::NwResize
+        | PointerIcon::SResize
+        | PointerIcon::SeResize
+        | PointerIcon::SwResize
+        | PointerIcon::WResize
+        | PointerIcon::EwResize
+        | PointerIcon::NsResize
+        | PointerIcon::NeswResize
+        | PointerIcon::NwseResize
+        | PointerIcon::ColResize
+        | PointerIcon::RowResize => Some(PointerIcon::AllResize),
+        PointerIcon::Default => None,
+        _ => Some(PointerIcon::Default),
     }
 }
 
@@ -4853,5 +4892,35 @@ mod tests {
             CursorImage::TelorgonDefault,
             CursorImage::TelorgonDefault,
         ));
+    }
+
+    #[test]
+    fn unavailable_directional_resize_cursors_fall_back_without_recursing() {
+        for icon in [
+            PointerIcon::EResize,
+            PointerIcon::NResize,
+            PointerIcon::NeResize,
+            PointerIcon::NwResize,
+            PointerIcon::SResize,
+            PointerIcon::SeResize,
+            PointerIcon::SwResize,
+            PointerIcon::WResize,
+            PointerIcon::EwResize,
+            PointerIcon::NsResize,
+            PointerIcon::NeswResize,
+            PointerIcon::NwseResize,
+            PointerIcon::ColResize,
+            PointerIcon::RowResize,
+        ] {
+            assert_eq!(
+                semantic_pointer_fallback(icon),
+                Some(PointerIcon::AllResize)
+            );
+        }
+        assert_eq!(
+            semantic_pointer_fallback(PointerIcon::AllResize),
+            Some(PointerIcon::Default)
+        );
+        assert_eq!(semantic_pointer_fallback(PointerIcon::Default), None);
     }
 }

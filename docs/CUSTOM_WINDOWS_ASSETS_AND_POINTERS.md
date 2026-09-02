@@ -370,6 +370,12 @@ until exactly one `WindowContentSlot` has been supplied. All visuals remain ordi
 - `WindowEdgeMask` and `WindowTilingState` describe tiled adjacency and the subset of edges that
   remain resizable.
 
+`EasyWindowFrame` confines resize input to the painted outer frame and the state style's
+`content_margin`. `resize_edge` is the maximum inward thickness, the painted
+`frame_border_width` is included automatically, and `resize_hit_slop` extends only toward the
+outside of the window. Diagonal targets are L-shaped unions of the two adjoining border strips, so
+their larger corner reach does not claim the titlebar or client-area square inside the corner.
+
 `window_system_menu()` is the semantic hook for a project-defined menu. Telorgon's managed host
 does not inject a stock menu, so the component's normal callback owns the menu content and behavior.
 
@@ -491,7 +497,9 @@ closest submitted image for its frame, otherwise using the desktop environment's
 `PointerViewExt::pointer_icon` assigns a semantic shape to any view, while `hide_pointer` requests
 no pointer over that region. Window drag, resize, and action regions select `Move`, the matching
 eight-direction resize shape, or `Pointer` automatically. `PointerThemeOverrides` handles concise
-code-local exceptions; a registered TOML cursor theme supplies the full mapping.
+code-local exceptions; a registered TOML cursor theme supplies the full mapping. When the Linux
+desktop compositor has no exact system or registered directional-resize graphic, it tries
+`AllResize` and then `Default`, preventing a partial cursor table from making the pointer vanish.
 
 Every `PointerGraphic` can be tinted independently in code. For example, all of the cursor SVGs in
 one catalog can share the same white color while retaining their individual sizes and hotspots:

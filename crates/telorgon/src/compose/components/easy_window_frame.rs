@@ -37,7 +37,9 @@ pub struct WindowChromeStateStyle {
     pub content_radius: f32,
     pub shadow: Option<Shadow>,
     pub resize_regions: bool,
+    /// Thickness of the compositor-owned resize border on each enabled window edge.
     pub resize_edge: f32,
+    /// Extra tolerance outside the resize border; the easy frame never expands it inward.
     pub resize_hit_slop: Insets,
     pub content_margin: Insets,
 }
@@ -280,7 +282,7 @@ impl Component for EasyWindowFrameComponent {
         }
 
         let title_bar = build_title_bar(&self.model, design, palette, state);
-        let resize = build_resize_regions(&self.model, state);
+        let resize = build_resize_regions(&self.model, state, palette.frame_border_width);
 
         window_frame()
             .decoration(frame_decoration)
@@ -510,89 +512,224 @@ fn visual_icon_patch(visual: WindowControlVisual) -> StylePropertyPatch {
     }
 }
 
-fn build_resize_regions(model: &WindowChromeModel, style: WindowChromeStateStyle) -> Vec<Element> {
+fn build_resize_regions(
+    model: &WindowChromeModel,
+    style: WindowChromeStateStyle,
+    frame_border_width: f32,
+) -> Vec<Element> {
     if !model.capabilities.resize || !style.resize_regions || style.resize_edge <= 0.0 {
         return Vec::new();
     }
     let edges = model
         .tiling
         .map_or(WindowEdgeMask::ALL, |tiling| tiling.resizable_edges);
-    let side = style.resize_edge;
-    let corner = side * 2.0;
-    let mut regions = Vec::with_capacity(8);
+    let margins = style.content_margin.0;
+    let top = style.resize_edge.min(margins.top);
+    let right = style.resize_edge.min(margins.right);
+    let bottom = style.resize_edge.min(margins.bottom);
+    let left = style.resize_edge.min(margins.left);
+    let corner = style.resize_edge * 2.0;
+    let mut regions = Vec::with_capacity(12);
     if edges.contains(WindowEdgeMask::TOP) {
         regions.push(resize_region(
-            stack().height(side),
+            stack().height(top),
             WindowResizeEdge::Top,
             style.resize_hit_slop,
+            frame_border_width,
         ));
     }
     if edges.contains(WindowEdgeMask::RIGHT) {
-        regions.push(resize_region(
-            row().child(spacer()).child(stack().width(side)),
-            WindowResizeEdge::Right,
-            style.resize_hit_slop,
-        ));
+        regions.push(
+            row()
+                .child(spacer())
+                .child(resize_region(
+                    stack().width(right),
+                    WindowResizeEdge::Right,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                ))
+                .into_element(),
+        );
     }
     if edges.contains(WindowEdgeMask::BOTTOM) {
-        regions.push(resize_region(
-            column().child(spacer()).child(stack().height(side)),
-            WindowResizeEdge::Bottom,
-            style.resize_hit_slop,
-        ));
+        regions.push(
+            column()
+                .child(spacer())
+                .child(resize_region(
+                    stack().height(bottom),
+                    WindowResizeEdge::Bottom,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                ))
+                .into_element(),
+        );
     }
     if edges.contains(WindowEdgeMask::LEFT) {
         regions.push(resize_region(
-            stack().width(side),
+            stack().width(left),
             WindowResizeEdge::Left,
             style.resize_hit_slop,
+            frame_border_width,
         ));
     }
     if edges.contains(WindowEdgeMask::TOP | WindowEdgeMask::RIGHT) {
-        regions.push(resize_region(
+        regions.push(
             row()
                 .child(spacer())
-                .child(stack().width(corner).height(corner)),
-            WindowResizeEdge::TopRight,
-            style.resize_hit_slop,
-        ));
+                .child(resize_region(
+                    stack().width(corner).height(top),
+                    WindowResizeEdge::TopRight,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                ))
+                .into_element(),
+        );
+        regions.push(
+            row()
+                .child(spacer())
+                .child(resize_region(
+                    stack().width(right).height(corner),
+                    WindowResizeEdge::TopRight,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                ))
+                .into_element(),
+        );
     }
     if edges.contains(WindowEdgeMask::BOTTOM | WindowEdgeMask::RIGHT) {
-        regions.push(resize_region(
-            column().child(spacer()).child(
-                row()
-                    .child(spacer())
-                    .child(stack().width(corner).height(corner)),
-            ),
-            WindowResizeEdge::BottomRight,
-            style.resize_hit_slop,
-        ));
+        regions.push(
+            column()
+                .child(spacer())
+                .child(row().height(bottom).child(spacer()).child(resize_region(
+                    stack().width(corner).height(bottom),
+                    WindowResizeEdge::BottomRight,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                )))
+                .into_element(),
+        );
+        regions.push(
+            column()
+                .child(spacer())
+                .child(row().height(corner).child(spacer()).child(resize_region(
+                    stack().width(right).height(corner),
+                    WindowResizeEdge::BottomRight,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                )))
+                .into_element(),
+        );
     }
     if edges.contains(WindowEdgeMask::BOTTOM | WindowEdgeMask::LEFT) {
-        regions.push(resize_region(
-            column().child(spacer()).child(
-                row()
-                    .child(stack().width(corner).height(corner))
-                    .child(spacer()),
-            ),
-            WindowResizeEdge::BottomLeft,
-            style.resize_hit_slop,
-        ));
+        regions.push(
+            column()
+                .child(spacer())
+                .child(
+                    row()
+                        .height(bottom)
+                        .child(resize_region(
+                            stack().width(corner).height(bottom),
+                            WindowResizeEdge::BottomLeft,
+                            style.resize_hit_slop,
+                            frame_border_width,
+                        ))
+                        .child(spacer()),
+                )
+                .into_element(),
+        );
+        regions.push(
+            column()
+                .child(spacer())
+                .child(
+                    row()
+                        .height(corner)
+                        .child(resize_region(
+                            stack().width(left).height(corner),
+                            WindowResizeEdge::BottomLeft,
+                            style.resize_hit_slop,
+                            frame_border_width,
+                        ))
+                        .child(spacer()),
+                )
+                .into_element(),
+        );
     }
     if edges.contains(WindowEdgeMask::TOP | WindowEdgeMask::LEFT) {
-        regions.push(resize_region(
+        regions.push(
             row()
-                .child(stack().width(corner).height(corner))
-                .child(spacer()),
-            WindowResizeEdge::TopLeft,
-            style.resize_hit_slop,
-        ));
+                .child(resize_region(
+                    stack().width(corner).height(top),
+                    WindowResizeEdge::TopLeft,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                ))
+                .child(spacer())
+                .into_element(),
+        );
+        regions.push(
+            row()
+                .child(resize_region(
+                    stack().width(left).height(corner),
+                    WindowResizeEdge::TopLeft,
+                    style.resize_hit_slop,
+                    frame_border_width,
+                ))
+                .child(spacer())
+                .into_element(),
+        );
     }
     regions
 }
 
-fn resize_region(region: impl View, edge: WindowResizeEdge, hit_slop: Insets) -> Element {
-    region.window_resize(edge).window_hit_slop(hit_slop)
+fn resize_region(
+    region: impl View,
+    edge: WindowResizeEdge,
+    hit_slop: Insets,
+    frame_border_width: f32,
+) -> Element {
+    region
+        .window_resize(edge)
+        .window_hit_slop(outward_resize_hit_slop(edge, hit_slop, frame_border_width))
+}
+
+fn outward_resize_hit_slop(
+    edge: WindowResizeEdge,
+    hit_slop: Insets,
+    frame_border_width: f32,
+) -> Insets {
+    let hit_slop = hit_slop.0;
+    match edge {
+        WindowResizeEdge::Top => Insets::new(hit_slop.top + frame_border_width, 0.0, 0.0, 0.0),
+        WindowResizeEdge::TopRight => Insets::new(
+            hit_slop.top + frame_border_width,
+            hit_slop.right + frame_border_width,
+            0.0,
+            0.0,
+        ),
+        WindowResizeEdge::Right => Insets::new(0.0, hit_slop.right + frame_border_width, 0.0, 0.0),
+        WindowResizeEdge::BottomRight => Insets::new(
+            0.0,
+            hit_slop.right + frame_border_width,
+            hit_slop.bottom + frame_border_width,
+            0.0,
+        ),
+        WindowResizeEdge::Bottom => {
+            Insets::new(0.0, 0.0, hit_slop.bottom + frame_border_width, 0.0)
+        }
+        WindowResizeEdge::BottomLeft => Insets::new(
+            0.0,
+            0.0,
+            hit_slop.bottom + frame_border_width,
+            hit_slop.left + frame_border_width,
+        ),
+        WindowResizeEdge::Left => Insets::new(0.0, 0.0, 0.0, hit_slop.left + frame_border_width),
+        WindowResizeEdge::TopLeft => Insets::new(
+            hit_slop.top + frame_border_width,
+            0.0,
+            0.0,
+            hit_slop.left + frame_border_width,
+        ),
+    }
 }
 
 #[cfg(test)]
