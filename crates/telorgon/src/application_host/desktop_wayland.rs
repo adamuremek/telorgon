@@ -46,6 +46,7 @@ use crate::{
     WindowChromeSnapshot, WindowChromeState, WindowResizeEdge, resolve_pointer,
 };
 
+use crate::application_host::declaration::ShellActionHandler;
 use crate::application_host::{
     AppError, AppResult, ComposedAppRuntime, LinuxDesktopConfig, ReadyDesktopEnvironment, Renderer,
     ShellWidgetAnchor, ShellWidgetExtent, WindowFrameFactory,
@@ -1274,14 +1275,14 @@ struct WindowFrameLayer {
 }
 
 fn desktop_runtime_schedule(
-    policy: &Layer,
+    background: &Layer,
     frames: &BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
     pointer: Option<&Layer>,
     icons: &[(String, Layer)],
     widgets: &[WidgetLayer],
     now: MonotonicInstant,
 ) -> (bool, Option<MonotonicInstant>, bool) {
-    let layers = std::iter::once(policy)
+    let layers = std::iter::once(background)
         .chain(frames.values().map(|frame| &frame.layer))
         .chain(pointer)
         .chain(icons.iter().map(|(_, layer)| layer))
@@ -1338,6 +1339,7 @@ enum DecorationHit {
     Maximize,
     Minimize,
     SystemMenu,
+    ShellAction(crate::ShellActionId),
 }
 
 pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
@@ -1354,7 +1356,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         application.into_parts()?;
     let pointer_theme = pointer_config.load_theme(assets).map_err(app_error)?;
     let mut pointer_media = AssetMediaCache::new(assets).map_err(app_error)?;
-    let (mut policy, window_frame, mut pointer, mut icons) = compositor.into_runtime_parts();
+    let (mut background, window_frame, mut pointer, mut icons, shell_actions) =
+        compositor.into_runtime_parts();
 
     let seat = LinuxSeat::open().map_err(app_error)?;
     seat.dispatch(0).map_err(app_error)?;
@@ -1497,7 +1500,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     // source with it so input, seat changes, DRM flips, and GPU completions wake the same owner
     // thread without a fixed Wayland-only sleep.
     let runtime_wake = EventNotifier::new("desktop runtime wake")?;
-    policy.set_wake({
+    background.set_wake({
         let wake = runtime_wake.clone();
         move || wake.notify()
     });
@@ -1581,7 +1584,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .keyboard_keymap(1, keymap.fd(), keymap.size())
         .map_err(app_error)?;
 
-    let mut policy = Layer::new(policy, extent, assets)?;
+    let mut background = Layer::new(background, extent, assets)?;
     let mut frame_layers = BTreeMap::<WaylandSurfaceId, WindowFrameLayer>::new();
     let mut pointer = pointer
         .map(|driver| Layer::new(driver, config.pointer_extent, assets))
@@ -1686,7 +1689,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
         );
         let (runtime_immediate, runtime_deadline, runtime_animation) = desktop_runtime_schedule(
-            &policy,
+            &background,
             &frame_layers,
             pointer.as_ref(),
             &icon_layers,
@@ -1834,6 +1837,18 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                         time_microseconds.saturating_mul(1_000),
                                     ),
                                 );
+                                if window_interaction.is_none() {
+                                    set_decoration_pointer_cursor(
+                                        &mut wayland,
+                                        &frame_layers,
+                                        &windows,
+                                        &stacking_order,
+                                        pointer_focus,
+                                        pointer_position,
+                                        &config,
+                                        &icon_layers,
+                                    );
+                                }
                                 cursor_position_dirty = true;
                                 pointer_primary_dirty |= scene_follows_pointer;
                             }
@@ -1917,6 +1932,18 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                         time_microseconds.saturating_mul(1_000),
                                     ),
                                 );
+                                if window_interaction.is_none() {
+                                    set_decoration_pointer_cursor(
+                                        &mut wayland,
+                                        &frame_layers,
+                                        &windows,
+                                        &stacking_order,
+                                        pointer_focus,
+                                        pointer_position,
+                                        &config,
+                                        &icon_layers,
+                                    );
+                                }
                                 cursor_position_dirty = true;
                                 pointer_primary_dirty |= scene_follows_pointer;
                             }
@@ -1973,6 +2000,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                         window.minimized = true;
                                         stacking_order.retain(|candidate| *candidate != surface);
                                     }
+                                }
+                                DecorationHit::ShellAction(action) => {
+                                    invoke_shell_action(
+                                        &shell_actions,
+                                        action,
+                                        surface,
+                                        &frame_layers,
+                                    );
                                 }
                                 DecorationHit::Frame | DecorationHit::SystemMenu => {}
                             }
@@ -2214,7 +2249,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
         );
         let (runtime_turn_ready, _, _) = desktop_runtime_schedule(
-            &policy,
+            &background,
             &frame_layers,
             pointer.as_ref(),
             &icon_layers,
@@ -2777,7 +2812,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
             );
             let (_, _, animation_active) = desktop_runtime_schedule(
-                &policy,
+                &background,
                 &frame_layers,
                 pointer.as_ref(),
                 &icon_layers,
@@ -2903,7 +2938,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     }
                     pixels
                 } else {
-                    policy.render(extent, now, first_modeset)?.to_vec()
+                    background.render(extent, now, first_modeset)?.to_vec()
                 };
                 let placements = windows
                     .iter()
@@ -3873,10 +3908,11 @@ fn hit_test_decoration(
                 x: local.x as f32,
                 y: local.y as f32,
             };
-            if chrome.content.bounds.contains(point) {
+            let role = chrome.hit_test(point.x, point.y);
+            if role.is_none() && chrome.content.bounds.contains(point) {
                 continue;
             }
-            let hit = match chrome.hit_test(point.x, point.y) {
+            let hit = match role {
                 Some(crate::WindowChromeRole::DragRegion)
                 | Some(crate::WindowChromeRole::Action(WindowAction::BeginMove)) => {
                     DecorationHit::Titlebar
@@ -3893,6 +3929,9 @@ fn hit_test_decoration(
                 }
                 Some(crate::WindowChromeRole::Action(WindowAction::ShowSystemMenu)) => {
                     DecorationHit::SystemMenu
+                }
+                Some(crate::WindowChromeRole::ShellAction(action)) => {
+                    DecorationHit::ShellAction(action)
                 }
                 Some(
                     crate::WindowChromeRole::Frame
@@ -3950,6 +3989,136 @@ fn hit_test_decoration(
         }
     }
     None
+}
+
+#[allow(clippy::too_many_arguments)]
+fn set_decoration_pointer_cursor(
+    wayland: &mut NativeCompositor<'_>,
+    frames: &BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    stacking_order: &[WaylandSurfaceId],
+    client_focus: Option<WaylandSurfaceId>,
+    position: PointF,
+    config: &LinuxDesktopConfig,
+    icons: &[(String, Layer)],
+) {
+    let next = decoration_pointer_request(frames, windows, stacking_order, position, config, icons)
+        .map(pointer_request_cursor_image)
+        .or_else(|| {
+            client_focus
+                .is_none()
+                .then_some(CursorImage::TelorgonDefault)
+        });
+    let Some(next) = next else {
+        return;
+    };
+    let Some(seat) = wayland.core_mut().seats.get_mut(&1) else {
+        return;
+    };
+    if seat.cursor != next {
+        seat.cursor = next;
+    }
+}
+
+fn decoration_pointer_request(
+    frames: &BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    stacking_order: &[WaylandSurfaceId],
+    position: PointF,
+    config: &LinuxDesktopConfig,
+    icons: &[(String, Layer)],
+) -> Option<PointerRequest> {
+    let (surface, hit) = hit_test_decoration(windows, stacking_order, position, config, icons)?;
+    if let (Some(frame), Some(window)) = (frames.get(&surface), windows.get(&surface)) {
+        let local = PointF {
+            x: position.x - window.position.x as f32,
+            y: position.y - window.position.y as f32,
+        };
+        if let Some(region) = window
+            .chrome
+            .as_ref()
+            .and_then(|chrome| chrome.hit_test_region(local.x, local.y))
+            && let Some(request) = frame
+                .layer
+                .runtime
+                .ui()
+                .pointer_requests
+                .get(region.node)
+                .copied()
+        {
+            return Some(request);
+        }
+        if let Some(request) = frame
+            .layer
+            .runtime
+            .ui()
+            .pointer_requests
+            .iter()
+            .filter_map(|(node, request)| {
+                frame
+                    .layer
+                    .runtime
+                    .layout()
+                    .computed(node)
+                    .and_then(|computed| {
+                        (computed.visible_rect.contains(local)
+                            && computed.border_rect.contains(local))
+                        .then_some((*request, computed.border_rect.area()))
+                    })
+            })
+            .min_by(|left, right| left.1.total_cmp(&right.1))
+            .map(|(request, _)| request)
+        {
+            return Some(request);
+        }
+    }
+    Some(match hit {
+        DecorationHit::Titlebar => PointerRequest::Semantic(PointerIcon::Move),
+        DecorationHit::Resize(edge) => PointerRequest::Semantic(resize_edge_pointer_icon(edge)),
+        DecorationHit::Close
+        | DecorationHit::Maximize
+        | DecorationHit::Minimize
+        | DecorationHit::SystemMenu
+        | DecorationHit::ShellAction(_) => PointerRequest::Semantic(PointerIcon::Pointer),
+        DecorationHit::Frame => PointerRequest::Semantic(PointerIcon::Default),
+    })
+}
+
+fn pointer_request_cursor_image(request: PointerRequest) -> CursorImage {
+    match request {
+        PointerRequest::Hidden => CursorImage::Hidden,
+        PointerRequest::ClientSurface => CursorImage::TelorgonDefault,
+        PointerRequest::Semantic(icon) => CursorImage::Shape(pointer_icon_cursor_shape(icon)),
+    }
+}
+
+fn resize_edge_pointer_icon(edge: ResizeEdge) -> PointerIcon {
+    match edge {
+        ResizeEdge::None => PointerIcon::Default,
+        ResizeEdge::Top => PointerIcon::NResize,
+        ResizeEdge::TopRight => PointerIcon::NeResize,
+        ResizeEdge::Right => PointerIcon::EResize,
+        ResizeEdge::BottomRight => PointerIcon::SeResize,
+        ResizeEdge::Bottom => PointerIcon::SResize,
+        ResizeEdge::BottomLeft => PointerIcon::SwResize,
+        ResizeEdge::Left => PointerIcon::WResize,
+        ResizeEdge::TopLeft => PointerIcon::NwResize,
+    }
+}
+
+fn invoke_shell_action(
+    handlers: &[ShellActionHandler],
+    action: crate::ShellActionId,
+    surface: WaylandSurfaceId,
+    frames: &BTreeMap<WaylandSurfaceId, WindowFrameLayer>,
+) {
+    let Some(handler) = handlers.iter().find(|handler| handler.id() == action) else {
+        return;
+    };
+    let Some(frame) = frames.get(&surface) else {
+        return;
+    };
+    handler.invoke(frame.model.clone());
 }
 
 fn hit_test_surface(
@@ -4019,6 +4188,8 @@ fn cursor_shape_icon_name(shape: u32) -> Option<&'static str> {
         32 => "cursor.all-scroll",
         33 => "cursor.zoom-in",
         34 => "cursor.zoom-out",
+        35 => "cursor.dnd-ask",
+        36 => "cursor.all-resize",
         _ => return None,
     })
 }
@@ -4059,8 +4230,51 @@ fn cursor_shape_pointer_icon(shape: u32) -> Option<PointerIcon> {
         32 => PointerIcon::AllScroll,
         33 => PointerIcon::ZoomIn,
         34 => PointerIcon::ZoomOut,
+        35 => PointerIcon::DndAsk,
+        36 => PointerIcon::AllResize,
         _ => return None,
     })
+}
+
+fn pointer_icon_cursor_shape(icon: PointerIcon) -> u32 {
+    match icon {
+        PointerIcon::Default => 1,
+        PointerIcon::ContextMenu => 2,
+        PointerIcon::Help => 3,
+        PointerIcon::Pointer => 4,
+        PointerIcon::Progress => 5,
+        PointerIcon::Wait => 6,
+        PointerIcon::Cell => 7,
+        PointerIcon::Crosshair => 8,
+        PointerIcon::Text => 9,
+        PointerIcon::VerticalText => 10,
+        PointerIcon::Alias => 11,
+        PointerIcon::Copy => 12,
+        PointerIcon::Move => 13,
+        PointerIcon::NoDrop => 14,
+        PointerIcon::NotAllowed => 15,
+        PointerIcon::Grab => 16,
+        PointerIcon::Grabbing => 17,
+        PointerIcon::EResize => 18,
+        PointerIcon::NResize => 19,
+        PointerIcon::NeResize => 20,
+        PointerIcon::NwResize => 21,
+        PointerIcon::SResize => 22,
+        PointerIcon::SeResize => 23,
+        PointerIcon::SwResize => 24,
+        PointerIcon::WResize => 25,
+        PointerIcon::EwResize => 26,
+        PointerIcon::NsResize => 27,
+        PointerIcon::NeswResize => 28,
+        PointerIcon::NwseResize => 29,
+        PointerIcon::ColResize => 30,
+        PointerIcon::RowResize => 31,
+        PointerIcon::AllScroll => 32,
+        PointerIcon::ZoomIn => 33,
+        PointerIcon::ZoomOut => 34,
+        PointerIcon::DndAsk => 35,
+        PointerIcon::AllResize => 36,
+    }
 }
 
 fn window_content_origin(window: &ClientWindow, config: &LinuxDesktopConfig) -> PointI {
@@ -4576,5 +4790,14 @@ mod tests {
         assert_eq!(accumulated_damage(1, 3, &full_change, extent), None);
         assert_eq!(accumulated_damage(1, 4, &history_gap, extent), None);
         assert_eq!(accumulated_damage(0, 4, &history_gap, extent), None);
+    }
+
+    #[test]
+    fn every_wayland_cursor_shape_round_trips_through_pointer_icons() {
+        for shape in 1..=36 {
+            let icon = cursor_shape_pointer_icon(shape).expect("shape must be supported");
+            assert_eq!(pointer_icon_cursor_shape(icon), shape);
+            assert!(cursor_shape_icon_name(shape).is_some());
+        }
     }
 }

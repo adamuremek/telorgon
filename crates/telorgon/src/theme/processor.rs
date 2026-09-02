@@ -59,9 +59,10 @@ impl StyleProcessor {
         let mut bindings = ui.take_style_bindings_for_processing();
         if !runtime.pending_changed_styles.is_empty() {
             for (index, binding) in bindings.iter().enumerate() {
-                if runtime
-                    .pending_changed_styles
-                    .contains(&binding.component_style)
+                if binding.local_style.is_none()
+                    && runtime
+                        .pending_changed_styles
+                        .contains(&binding.component_style)
                     && !self.binding_scratch.contains(&index)
                 {
                     self.binding_scratch.push(index);
@@ -81,12 +82,18 @@ impl StyleProcessor {
                 .get(binding.state_root)
                 .copied()
                 .unwrap_or_default();
-            let Some((compiled_style, style_revision)) =
-                runtime.resolve_binding_style(binding.scope, binding.component_style)
-            else {
-                self.diagnostics.stale_scopes_rejected += 1;
-                continue;
-            };
+            let (compiled_style, style_revision) =
+                if let Some(style) = binding.local_style.as_deref() {
+                    (style, 1)
+                } else {
+                    let Some(resolved) =
+                        runtime.resolve_binding_style(binding.scope, binding.component_style)
+                    else {
+                        self.diagnostics.stale_scopes_rejected += 1;
+                        continue;
+                    };
+                    resolved
+                };
             if binding.theme_revision == style_revision
                 && binding.interaction_revision == interaction.revision
             {
@@ -261,6 +268,9 @@ fn snapshot(ui: &MountedUi, node: NodeId) -> StylePropertyPatch {
         patch.text_family = Some(text.style.family);
         patch.text_weight = Some(text.style.weight);
     }
+    if let Some(image) = ui.images.get(node) {
+        patch.image_tint = Some(image.tint);
+    }
     patch
 }
 
@@ -293,6 +303,7 @@ fn select_owned_properties(
         text_line_height,
         text_family,
         text_weight,
+        image_tint,
     );
     if ownership.border.is_some()
         || ownership.border_width.is_some()
@@ -435,6 +446,7 @@ fn snapped_properties(mut patch: StylePropertyPatch) -> StylePropertyPatch {
     patch.origin_x = None;
     patch.origin_y = None;
     patch.text_color = None;
+    patch.image_tint = None;
     patch
 }
 
@@ -456,6 +468,7 @@ fn has_animatable_difference(
         || from.shadows != target.shadows
         || from.opacity != target.opacity
         || from.text_color != target.text_color
+        || from.image_tint != target.image_tint
         || (preference == MotionPreference::Full
             && (from.transform != target.transform
                 || from.translation_x != target.translation_x
@@ -560,6 +573,12 @@ fn interpolate_patch(
     }
     if let (Some(from), Some(target)) = (from.text_color, target.text_color) {
         result.text_color = Some(interpolate_color(from, target, paint_t));
+    }
+    if let Some(target_tint) = target.image_tint {
+        result.image_tint = Some(match (from.image_tint.flatten(), target_tint) {
+            (Some(from), Some(target)) => Some(interpolate_color(from, target, paint_t)),
+            (_, target) => target,
+        });
     }
     // Canonical full fields above supersede source-level partial fields during sampling.
     result.border_width = None;

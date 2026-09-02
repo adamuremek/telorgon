@@ -3,7 +3,7 @@
 //! Declarations execute once during mount. Runtime changes flow through typed properties and
 //! coalesced transactions; no recursive widget tree exists in the active UI.
 
-use std::{fmt, marker::PhantomData};
+use std::{fmt, marker::PhantomData, sync::Arc};
 
 use crate::core::{ColorRgba8, EdgeInsets, PointF, Transform2D};
 pub use crate::input::EventPhase;
@@ -712,6 +712,7 @@ pub struct StylePropertyPatch {
     pub text_line_height: Option<f32>,
     pub text_family: Option<StringId>,
     pub text_weight: Option<u16>,
+    pub image_tint: Option<Option<ColorRgba8>>,
 }
 
 impl StylePropertyPatch {
@@ -758,6 +759,7 @@ impl StylePropertyPatch {
             text_line_height,
             text_family,
             text_weight,
+            image_tint,
         );
     }
 }
@@ -783,6 +785,7 @@ pub struct StyleBinding {
     pub slots: Vec<StyleSlotBinding>,
     pub variants: Vec<StyleVariantSelection>,
     pub local_overrides: Vec<(StyleSlotId, StylePropertyPatch)>,
+    pub local_style: Option<Arc<crate::theme::CompiledComponentStyle>>,
     pub theme_revision: u64,
     pub interaction_revision: u64,
 }
@@ -796,6 +799,7 @@ impl StyleBinding {
             slots: Vec::new(),
             variants: Vec::new(),
             local_overrides: Vec::new(),
+            local_style: None,
             theme_revision: 0,
             interaction_revision: 0,
         }
@@ -815,6 +819,11 @@ impl StyleBinding {
         self.local_overrides.push((slot, patch));
         self
     }
+
+    pub fn local_style(mut self, style: Arc<crate::theme::CompiledComponentStyle>) -> Self {
+        self.local_style = Some(style);
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -828,6 +837,7 @@ pub struct MountedUi {
     pub images: SparseSet<ImageVisual>,
     pub semantics: SparseSet<SemanticNode>,
     pub window_chrome_roles: SparseSet<crate::window_chrome::WindowChromeRole>,
+    pub window_chrome_hit_specs: SparseSet<crate::window_chrome::WindowChromeHitSpec>,
     pub pointer_requests: SparseSet<crate::assets::PointerRequest>,
     style_bindings: Vec<StyleBinding>,
     style_binding_head_by_state: SparseSet<usize>,
@@ -870,6 +880,7 @@ impl Default for MountedUi {
             images: SparseSet::default(),
             semantics: SparseSet::default(),
             window_chrome_roles: SparseSet::default(),
+            window_chrome_hit_specs: SparseSet::default(),
             pointer_requests: SparseSet::default(),
             style_bindings: Vec::new(),
             style_binding_head_by_state: SparseSet::default(),
@@ -904,6 +915,7 @@ impl MountedUi {
                 + self.images.allocated_bytes()
                 + self.semantics.allocated_bytes()
                 + self.window_chrome_roles.allocated_bytes()
+                + self.window_chrome_hit_specs.allocated_bytes()
                 + self.pointer_requests.allocated_bytes()
                 + self
                     .semantics
@@ -970,6 +982,7 @@ impl MountedUi {
             self.images.remove(*id);
             self.semantics.remove(*id);
             self.window_chrome_roles.remove(*id);
+            self.window_chrome_hit_specs.remove(*id);
             self.pointer_requests.remove(*id);
             self.keys.remove(*id);
         }
@@ -1241,6 +1254,36 @@ impl MountedUi {
         true
     }
 
+    /// Replaces an optional code-defined component style on an existing binding.
+    #[doc(hidden)]
+    pub fn set_local_component_style(
+        &mut self,
+        node: NodeId,
+        style: Option<Arc<crate::theme::CompiledComponentStyle>>,
+    ) -> bool {
+        let Some(index) = self.style_bindings.iter().position(|binding| {
+            binding.state_root == node
+                && binding
+                    .slots
+                    .iter()
+                    .any(|slot| slot.node == node && slot.slot == StyleSlotId::named("root"))
+        }) else {
+            return false;
+        };
+        if self.style_bindings[index].local_style == style {
+            return false;
+        }
+        self.style_bindings[index].local_style = style;
+        self.style_bindings[index].theme_revision = 0;
+        self.enqueue_style_binding(index);
+        if let Some(core) = self.nodes.core_mut(node) {
+            core.style_revision = core.style_revision.wrapping_add(1).max(1);
+        }
+        self.nodes
+            .mark_dirty(node, DirtyFlags::STYLE | DirtyFlags::PAINT);
+        true
+    }
+
     /// Requalifies automatically mounted foundation bindings for an application or shell view.
     pub fn set_theme_domain(&mut self, domain: ThemeDomainId, scope: ThemeScopeId) {
         for (index, binding) in self.style_bindings.iter_mut().enumerate() {
@@ -1444,6 +1487,13 @@ impl MountedUi {
                     dirty |= DirtyFlags::LAYOUT;
                 }
             }
+        }
+        if let Some(image) = self.images.get_mut(node)
+            && let Some(tint) = patch.image_tint
+            && image.tint != tint
+        {
+            image.tint = tint;
+            dirty |= DirtyFlags::STYLE | DirtyFlags::PAINT;
         }
         if dirty == DirtyFlags::NONE {
             return false;
@@ -1729,6 +1779,29 @@ impl MountedUi {
                 }
             }
             None => self.window_chrome_roles.remove(node).is_some(),
+        }
+    }
+
+    /// Associates hit-test tuning with a semantic window-chrome node.
+    #[doc(hidden)]
+    pub fn set_window_chrome_hit_spec(
+        &mut self,
+        node: NodeId,
+        spec: Option<crate::window_chrome::WindowChromeHitSpec>,
+    ) -> bool {
+        if !self.nodes.contains(node) {
+            return false;
+        }
+        match spec {
+            Some(spec) => {
+                if self.window_chrome_hit_specs.get(node).copied() == Some(spec) {
+                    false
+                } else {
+                    self.window_chrome_hit_specs.insert(node, spec);
+                    true
+                }
+            }
+            None => self.window_chrome_hit_specs.remove(node).is_some(),
         }
     }
 
@@ -2941,6 +3014,15 @@ impl<'a, A> MountWriter<'a, A> {
         role: Option<crate::window_chrome::WindowChromeRole>,
     ) -> bool {
         self.ui.set_window_chrome_role(node, role)
+    }
+    /// Attaches hit-test tuning to a shell-understood chrome region during mount.
+    #[doc(hidden)]
+    pub fn window_chrome_hit_spec(
+        &mut self,
+        node: NodeId,
+        spec: Option<crate::window_chrome::WindowChromeHitSpec>,
+    ) -> bool {
+        self.ui.set_window_chrome_hit_spec(node, spec)
     }
     /// Attaches a semantic pointer request during mount.
     #[doc(hidden)]

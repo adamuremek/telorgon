@@ -428,7 +428,8 @@ impl CompositionDriver {
         element: Element,
         owner: ComponentInstanceId,
     ) -> Result<MountedElement, ViewError> {
-        let (key, kind, window_chrome_role, pointer_request) = element.into_parts();
+        let (key, kind, window_chrome_role, window_chrome_hit_spec, pointer_request) =
+            element.into_parts();
         let mut mounted = match kind {
             ElementKind::Container(ContainerElement {
                 style,
@@ -527,12 +528,15 @@ impl CompositionDriver {
                 writer.style_id(control.node, props.style_id);
                 let icon_node = icon_node.expect("button always mounts its icon slot");
                 let label_node = label_node.expect("button always mounts its label");
-                writer.style_binding(
+                let mut binding =
                     StyleBinding::new(control.node, ThemeScopeId::new(0, 1), props.style_id)
                         .slot(StyleSlotId::named("root"), control.node)
                         .slot(StyleSlotId::named("icon"), icon_node)
-                        .slot(StyleSlotId::named("label"), label_node),
-                );
+                        .slot(StyleSlotId::named("label"), label_node);
+                if let Some(style) = props.inline_style.clone() {
+                    binding = binding.local_style(style);
+                }
+                writer.style_binding(binding);
                 if props.style_override != StylePropertyPatch::default() {
                     writer.style_override(
                         control.node,
@@ -569,6 +573,7 @@ impl CompositionDriver {
             .root_node(&mounted)
             .expect("every mounted composition element has a root node");
         writer.window_chrome_role(root, window_chrome_role);
+        writer.window_chrome_hit_spec(root, window_chrome_hit_spec);
         writer.pointer_request(root, pointer_request);
         self.diagnostics.elements_mounted += 1;
         Ok(mounted)
@@ -1031,7 +1036,8 @@ impl CompositionDriver {
             return Ok(mounted);
         }
 
-        let (key, kind, window_chrome_role, pointer_request) = candidate.into_parts();
+        let (key, kind, window_chrome_role, window_chrome_hit_spec, pointer_request) =
+            candidate.into_parts();
         let result = match (&mut old.kind, kind) {
             (
                 MountedKind::Container {
@@ -1117,6 +1123,7 @@ impl CompositionDriver {
                 ui.set_busy(*node, candidate.busy);
                 ui.set_style_id(*node, candidate.style_id);
                 ui.set_style_override(*node, StyleSlotId::named("root"), candidate.style_override);
+                ui.set_local_component_style(*node, candidate.inline_style.clone());
                 let name = ui.intern(&candidate.label);
                 let _ = ui.set_semantics(*node, button_semantics(name, &candidate));
                 match &candidate.on_press {
@@ -1261,6 +1268,7 @@ impl CompositionDriver {
             .root_node(&old)
             .expect("every reconciled composition element has a root node");
         ui.set_window_chrome_role(root, window_chrome_role);
+        ui.set_window_chrome_hit_spec(root, window_chrome_hit_spec);
         ui.set_pointer_request(root, pointer_request);
         old.key = key;
         self.diagnostics.elements_reused += 1;

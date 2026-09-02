@@ -3,6 +3,7 @@
 mod button;
 mod checkbox;
 mod container;
+mod easy_window_frame;
 mod image;
 mod slider;
 mod switch;
@@ -13,6 +14,11 @@ mod window_frame;
 pub use button::{Button, ButtonElement, button};
 pub use checkbox::{Checkbox, checkbox};
 pub use container::{Container, ContainerElement, card, column, row, spacer, stack};
+pub use easy_window_frame::{
+    EasyWindowFrame, EasyWindowFrameComponent, WindowChromeDesign, WindowChromeDesignError,
+    WindowChromePalette, WindowChromeStateStyle, WindowControlButtonStyle, WindowControlDesign,
+    WindowControlVisual, WindowControlsDesign, WindowTitleBarStyle, easy_window_frame,
+};
 pub use image::{Image, ImageElement, image};
 pub use slider::{Slider, SliderElement, slider};
 pub use switch::{Switch, switch};

@@ -1,10 +1,68 @@
 //! Protocol-neutral window metadata, chrome roles, actions, and layout-derived hit regions.
 
 use crate::assets::Icon;
-use crate::core::RectF;
+use crate::core::{EdgeInsets, RectF};
 use crate::layout::LayoutEngine;
 use crate::render::ImageId;
 use crate::ui::{MountedUi, UiNodeId};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct WindowEdgeMask(u8);
+
+impl WindowEdgeMask {
+    pub const NONE: Self = Self(0);
+    pub const TOP: Self = Self(1 << 0);
+    pub const RIGHT: Self = Self(1 << 1);
+    pub const BOTTOM: Self = Self(1 << 2);
+    pub const LEFT: Self = Self(1 << 3);
+    pub const ALL: Self = Self(Self::TOP.0 | Self::RIGHT.0 | Self::BOTTOM.0 | Self::LEFT.0);
+
+    pub const fn contains(self, edges: Self) -> bool {
+        self.0 & edges.0 == edges.0
+    }
+
+    pub const fn union(self, edges: Self) -> Self {
+        Self(self.0 | edges.0)
+    }
+
+    pub const fn intersection(self, edges: Self) -> Self {
+        Self(self.0 & edges.0)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
+
+impl std::ops::BitOr for WindowEdgeMask {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        self.union(rhs)
+    }
+}
+
+impl std::ops::BitOrAssign for WindowEdgeMask {
+    fn bitor_assign(&mut self, rhs: Self) {
+        *self = self.union(rhs);
+    }
+}
+
+/// Output/tile adjacency and resize authority for one tiled toplevel.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct WindowTilingState {
+    pub edges: WindowEdgeMask,
+    pub resizable_edges: WindowEdgeMask,
+}
+
+impl WindowTilingState {
+    pub const fn new(edges: WindowEdgeMask, resizable_edges: WindowEdgeMask) -> Self {
+        Self {
+            edges,
+            resizable_edges,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum WindowChromeState {
@@ -45,6 +103,7 @@ pub struct WindowChromeModel {
     pub app_icon_name: Option<String>,
     pub app_icon_image: Option<ImageId>,
     pub state: WindowChromeState,
+    pub tiling: Option<WindowTilingState>,
     pub active: bool,
     pub capabilities: WindowChromeCapabilities,
 }
@@ -58,6 +117,7 @@ impl WindowChromeModel {
             app_icon_name: None,
             app_icon_image: None,
             state: WindowChromeState::Normal,
+            tiling: None,
             active: false,
             capabilities: WindowChromeCapabilities::MANAGED_TOPLEVEL,
         }
@@ -80,6 +140,15 @@ impl WindowChromeModel {
 
     pub const fn state(mut self, state: WindowChromeState) -> Self {
         self.state = state;
+        if !matches!(state, WindowChromeState::Tiled) {
+            self.tiling = None;
+        }
+        self
+    }
+
+    pub const fn tiling(mut self, tiling: WindowTilingState) -> Self {
+        self.state = WindowChromeState::Tiled;
+        self.tiling = Some(tiling);
         self
     }
 
@@ -116,6 +185,28 @@ pub enum WindowAction {
     ShowSystemMenu,
 }
 
+/// Stable identity for a frame-local shell action explicitly registered by the compositor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ShellActionId(u64);
+
+impl ShellActionId {
+    pub const fn named(name: &str) -> Self {
+        let bytes = name.as_bytes();
+        let mut hash = 0xcbf29ce484222325_u64;
+        let mut index = 0;
+        while index < bytes.len() {
+            hash ^= bytes[index] as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+            index += 1;
+        }
+        Self(hash)
+    }
+
+    pub const fn raw(self) -> u64 {
+        self.0
+    }
+}
+
 /// Semantic role attached to a composed frame node; geometry remains owned by normal layout.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum WindowChromeRole {
@@ -125,6 +216,44 @@ pub enum WindowChromeRole {
     AppIcon,
     DragRegion,
     Action(WindowAction),
+    ShellAction(ShellActionId),
+}
+
+/// Hit-test tuning attached to one semantic chrome region.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct WindowChromeHitSpec {
+    pub hit_slop: EdgeInsets,
+    pub priority: u16,
+}
+
+impl WindowChromeHitSpec {
+    pub const fn new(hit_slop: EdgeInsets, priority: u16) -> Self {
+        Self { hit_slop, priority }
+    }
+
+    pub const fn for_role(role: WindowChromeRole) -> Self {
+        let priority = match role {
+            WindowChromeRole::Action(WindowAction::BeginResize(_)) => 200,
+            WindowChromeRole::Action(WindowAction::BeginMove) | WindowChromeRole::DragRegion => 100,
+            WindowChromeRole::Action(_) | WindowChromeRole::ShellAction(_) => 300,
+            WindowChromeRole::Title | WindowChromeRole::AppIcon => 10,
+            WindowChromeRole::Frame | WindowChromeRole::Content => 0,
+        };
+        Self {
+            hit_slop: EdgeInsets::ZERO,
+            priority,
+        }
+    }
+
+    pub const fn hit_slop(mut self, hit_slop: EdgeInsets) -> Self {
+        self.hit_slop = hit_slop;
+        self
+    }
+
+    pub const fn priority(mut self, priority: u16) -> Self {
+        self.priority = priority;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,6 +261,8 @@ pub struct WindowChromeRegion {
     pub node: UiNodeId,
     pub role: WindowChromeRole,
     pub bounds: RectF,
+    pub hit_bounds: RectF,
+    pub priority: u16,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -150,10 +281,17 @@ impl WindowChromeSnapshot {
             let Some(computed) = layout.computed(node) else {
                 continue;
             };
+            let hit = ui
+                .window_chrome_hit_specs
+                .get(node)
+                .copied()
+                .unwrap_or_else(|| WindowChromeHitSpec::for_role(*role));
             let region = WindowChromeRegion {
                 node,
                 role: *role,
                 bounds: computed.border_rect,
+                hit_bounds: outset(computed.border_rect, hit.hit_slop),
+                priority: hit.priority,
             };
             match role {
                 WindowChromeRole::Frame => {
@@ -178,18 +316,27 @@ impl WindowChromeSnapshot {
 
     /// Returns the top-most action/drag region containing a frame-local point.
     pub fn hit_test(&self, x: f32, y: f32) -> Option<WindowChromeRole> {
+        self.hit_test_region(x, y).map(|region| region.role)
+    }
+
+    /// Returns the highest-priority, top-most region containing a frame-local point.
+    pub fn hit_test_region(&self, x: f32, y: f32) -> Option<&WindowChromeRegion> {
         let point = crate::core::PointF { x, y };
-        let containing = || {
-            self.regions
-                .iter()
-                .rev()
-                .filter(|region| region.bounds.contains(point))
-        };
-        containing()
-            .find(|region| matches!(region.role, WindowChromeRole::Action(_)))
-            .or_else(|| containing().find(|region| region.role == WindowChromeRole::DragRegion))
-            .or_else(|| containing().next())
-            .map(|region| region.role)
+        self.regions
+            .iter()
+            .enumerate()
+            .filter(|(_, region)| region.hit_bounds.contains(point))
+            .max_by_key(|(paint_order, region)| (region.priority, *paint_order))
+            .map(|(_, region)| region)
+    }
+}
+
+fn outset(bounds: RectF, insets: EdgeInsets) -> RectF {
+    RectF {
+        x: bounds.x - insets.left.max(0.0),
+        y: bounds.y - insets.top.max(0.0),
+        width: bounds.width + insets.left.max(0.0) + insets.right.max(0.0),
+        height: bounds.height + insets.top.max(0.0) + insets.bottom.max(0.0),
     }
 }
 
@@ -215,6 +362,8 @@ mod tests {
             node: NodeId::new(index, 1),
             role,
             bounds,
+            hit_bounds: bounds,
+            priority: WindowChromeHitSpec::for_role(role).priority,
         }
     }
 
@@ -265,6 +414,59 @@ mod tests {
         assert_eq!(
             snapshot.hit_test(100.0, 20.0),
             Some(WindowChromeRole::DragRegion)
+        );
+    }
+
+    #[test]
+    fn hit_slop_and_explicit_priority_do_not_change_paint_bounds() {
+        let frame = region(
+            0,
+            WindowChromeRole::Frame,
+            RectF {
+                x: 0.0,
+                y: 0.0,
+                width: 320.0,
+                height: 240.0,
+            },
+        );
+        let content = region(1, WindowChromeRole::Content, frame.bounds);
+        let mut resize = region(
+            2,
+            WindowChromeRole::Action(WindowAction::BeginResize(WindowResizeEdge::TopRight)),
+            RectF {
+                x: 300.0,
+                y: 0.0,
+                width: 20.0,
+                height: 20.0,
+            },
+        );
+        resize.hit_bounds = outset(resize.bounds, EdgeInsets::all(6.0));
+        resize.priority = 500;
+        let snapshot = WindowChromeSnapshot {
+            frame,
+            content,
+            regions: vec![
+                region(
+                    3,
+                    WindowChromeRole::Action(WindowAction::Close),
+                    RectF {
+                        x: 294.0,
+                        y: 0.0,
+                        width: 26.0,
+                        height: 26.0,
+                    },
+                ),
+                resize,
+            ],
+        };
+
+        assert_eq!(resize.bounds.x, 300.0);
+        assert_eq!(resize.hit_bounds.x, 294.0);
+        assert_eq!(
+            snapshot.hit_test(296.0, 10.0),
+            Some(WindowChromeRole::Action(WindowAction::BeginResize(
+                WindowResizeEdge::TopRight
+            )))
         );
     }
 }

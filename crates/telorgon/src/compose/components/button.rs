@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::assets::ImageSource;
 use crate::core::{ColorRgba8, EdgeInsets};
 use crate::ui::{
@@ -17,6 +19,7 @@ pub struct ButtonElement {
     pub label_style: RetainedTextStyle,
     pub style_id: ComponentStyleId,
     pub style_override: StylePropertyPatch,
+    pub inline_style: Option<Arc<crate::theme::CompiledComponentStyle>>,
     pub icon: Option<ImageId>,
     pub icon_tint: Option<ColorRgba8>,
     pub icon_size: f32,
@@ -144,6 +147,13 @@ impl Button {
         self.element.style_override = style;
         self
     }
+
+    /// Installs one code-defined state style without registering it in the application theme.
+    #[doc(hidden)]
+    pub fn inline_style(mut self, style: Arc<crate::theme::CompiledComponentStyle>) -> Self {
+        self.element.inline_style = Some(style);
+        self
+    }
 }
 
 impl View for Button {
@@ -188,6 +198,7 @@ pub fn button(label: impl Into<String>) -> Button {
             },
             style_id: ComponentStyleId::named(ThemeDomainId::APPLICATION, "button", "default"),
             style_override: StylePropertyPatch::default(),
+            inline_style: None,
             icon: None,
             icon_tint: None,
             icon_size: 18.0,

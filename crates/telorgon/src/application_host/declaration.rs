@@ -10,7 +10,7 @@ use crate::assets::{
 use crate::compose::{Component, ErasedComponent, RuntimeTarget};
 use crate::core::SizeI;
 use crate::runtime::CompositionDriver;
-use crate::window_chrome::WindowChromeModel;
+use crate::window_chrome::{ShellActionId, WindowChromeModel};
 
 use crate::application_host::{AppError, AppResult, WindowDecorationMode, WindowOptions};
 
@@ -518,7 +518,60 @@ pub struct CompositorVisual {
     content: CompositionDriver,
 }
 
+/// One frame action authorized by the compositor declaration.
+pub(crate) struct ShellActionHandler {
+    id: ShellActionId,
+    #[cfg_attr(
+        not(all(feature = "desktop-wayland-linux", target_os = "linux")),
+        allow(dead_code)
+    )]
+    invoke: Box<dyn Fn(WindowChromeModel)>,
+}
+
+impl ShellActionHandler {
+    pub(crate) const fn id(&self) -> ShellActionId {
+        self.id
+    }
+
+    #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
+    pub(crate) fn invoke(&self, model: WindowChromeModel) {
+        (self.invoke)(model);
+    }
+}
+
+impl fmt::Debug for ShellActionHandler {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ShellActionHandler")
+            .field("id", &self.id)
+            .finish()
+    }
+}
+
 /// Creates a fresh compositor-owned frame composition for one Wayland toplevel.
+///
+/// Implementations are reusable templates. The host supplies one immutable
+/// [`WindowChromeModel`] for each frame instance, while the template owns any shared visual
+/// configuration needed to construct that instance.
+pub trait WindowFrameTemplate: 'static {
+    type Component: Component;
+
+    fn compose(&self, model: WindowChromeModel) -> Self::Component;
+}
+
+impl<F, C> WindowFrameTemplate for F
+where
+    F: Fn(WindowChromeModel) -> C + 'static,
+    C: Component,
+{
+    type Component = C;
+
+    fn compose(&self, model: WindowChromeModel) -> Self::Component {
+        self(model)
+    }
+}
+
+/// Type-erased storage for one reusable [`WindowFrameTemplate`].
 ///
 /// The model is the only shell-owned input. Everything visual and interactive is authored with
 /// normal composition primitives plus the explicit frame/content/action roles.
@@ -531,13 +584,12 @@ pub struct WindowFrameFactory {
 }
 
 impl WindowFrameFactory {
-    fn new<F, C>(factory: F) -> Self
+    fn new<T>(template: T) -> Self
     where
-        F: Fn(WindowChromeModel) -> C + 'static,
-        C: Component,
+        T: WindowFrameTemplate,
     {
         Self {
-            compose: Box::new(move |model| Box::new(factory(model))),
+            compose: Box::new(move |model| Box::new(template.compose(model))),
         }
     }
 
@@ -581,6 +633,7 @@ pub struct Compositor {
     window_frame: Option<WindowFrameFactory>,
     pointer: Option<CompositorVisual>,
     icons: Vec<CompositorVisual>,
+    shell_actions: Vec<ShellActionHandler>,
 }
 
 impl Default for Compositor {
@@ -595,16 +648,16 @@ impl Compositor {
             window_frame: None,
             pointer: None,
             icons: Vec::new(),
+            shell_actions: Vec::new(),
         }
     }
 
     /// Supplies the composed server-side frame for each window and each relevant model change.
-    pub fn window_frame<F, C>(mut self, factory: F) -> Self
+    pub fn window_frame<T>(mut self, template: T) -> Self
     where
-        F: Fn(WindowChromeModel) -> C + 'static,
-        C: Component,
+        T: WindowFrameTemplate,
     {
-        self.window_frame = Some(WindowFrameFactory::new(factory));
+        self.window_frame = Some(WindowFrameFactory::new(template));
         self
     }
 
@@ -614,20 +667,42 @@ impl Compositor {
         self
     }
 
-    /// Adds a semantic shell icon. Names are stable policy keys such as `window.close`.
+    /// Adds a semantic shell icon. Names are stable compositor keys such as `window.close`.
     pub fn icon<C: Component>(mut self, name: impl Into<String>, component: C) -> Self {
         self.icons.push(CompositorVisual::new(name, component));
         self
     }
 
-    /// Completes the compositor with its policy component.
-    pub fn policy<C: Component>(self, policy: C) -> ReadyCompositor {
+    /// Authorizes one custom frame action and supplies its host-side handler.
+    pub fn shell_action<F>(mut self, id: ShellActionId, handler: F) -> Self
+    where
+        F: Fn(WindowChromeModel) + 'static,
+    {
+        self.shell_actions.push(ShellActionHandler {
+            id,
+            invoke: Box::new(handler),
+        });
+        self
+    }
+
+    /// Completes the compositor with its full-output visual rendered behind client windows.
+    pub fn background<C: Component>(self, background: C) -> ReadyCompositor {
         ReadyCompositor {
-            policy: CompositionDriver::for_target(policy, RuntimeTarget::Compositor),
+            background: CompositionDriver::for_target(background, RuntimeTarget::Compositor),
             window_frame: self.window_frame,
             pointer: self.pointer,
             icons: self.icons,
+            shell_actions: self.shell_actions,
         }
+    }
+
+    /// Compatibility alias for [`Compositor::background`].
+    #[deprecated(
+        since = "0.1.15",
+        note = "the component is a compositor background visual; use `background`"
+    )]
+    pub fn policy<C: Component>(self, background: C) -> ReadyCompositor {
+        self.background(background)
     }
 }
 
@@ -635,20 +710,22 @@ impl fmt::Debug for Compositor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Compositor")
-            .field("has_policy", &false)
+            .field("has_background", &false)
             .field("has_window_frame", &self.window_frame.is_some())
             .field("has_pointer", &self.pointer.is_some())
             .field("icons", &self.icons.len())
+            .field("shell_actions", &self.shell_actions.len())
             .finish()
     }
 }
 
 /// Complete compositor declaration.
 pub struct ReadyCompositor {
-    policy: CompositionDriver,
+    background: CompositionDriver,
     window_frame: Option<WindowFrameFactory>,
     pointer: Option<CompositorVisual>,
     icons: Vec<CompositorVisual>,
+    shell_actions: Vec<ShellActionHandler>,
 }
 
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
@@ -657,11 +734,12 @@ type CompositorRuntimeParts = (
     Option<WindowFrameFactory>,
     Option<CompositionDriver>,
     Vec<(String, CompositionDriver)>,
+    Vec<ShellActionHandler>,
 );
 
 impl ReadyCompositor {
     fn validate(&self) -> AppResult<()> {
-        debug_assert_eq!(self.policy.target(), RuntimeTarget::Compositor);
+        debug_assert_eq!(self.background.target(), RuntimeTarget::Compositor);
         for visual in self.pointer.iter().chain(self.icons.iter()) {
             debug_assert_eq!(visual.content.target(), RuntimeTarget::Compositor);
         }
@@ -675,6 +753,14 @@ impl ReadyCompositor {
             .any(|icon| !names.insert(icon.name.as_str()))
         {
             return Err(AppError::new("Compositor icon names must be unique"));
+        }
+        let mut actions = std::collections::HashSet::new();
+        if self
+            .shell_actions
+            .iter()
+            .any(|handler| !actions.insert(handler.id()))
+        {
+            return Err(AppError::new("Compositor shell action IDs must be unique"));
         }
         Ok(())
     }
@@ -691,16 +777,21 @@ impl ReadyCompositor {
         &self.icons
     }
 
+    pub fn authorizes_shell_action(&self, id: ShellActionId) -> bool {
+        self.shell_actions.iter().any(|handler| handler.id == id)
+    }
+
     #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
     pub(crate) fn into_runtime_parts(self) -> CompositorRuntimeParts {
         (
-            self.policy,
+            self.background,
             self.window_frame,
             self.pointer.map(|visual| visual.content),
             self.icons
                 .into_iter()
                 .map(|visual| (visual.name, visual.content))
                 .collect(),
+            self.shell_actions,
         )
     }
 }
@@ -709,10 +800,11 @@ impl fmt::Debug for ReadyCompositor {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Compositor")
-            .field("has_policy", &true)
+            .field("has_background", &true)
             .field("has_window_frame", &self.window_frame.is_some())
             .field("has_pointer", &self.pointer.is_some())
             .field("icons", &self.icons.len())
+            .field("shell_actions", &self.shell_actions.len())
             .finish()
     }
 }
@@ -1028,14 +1120,42 @@ mod tests {
         let widget = ShellWidget::new("Panel").content(Root);
         assert_eq!(widget.content.target(), RuntimeTarget::ShellWidget);
 
+        let compositor = Compositor::new().background(Root);
+        assert_eq!(compositor.background.target(), RuntimeTarget::Compositor);
+    }
+
+    #[test]
+    fn deprecated_policy_alias_still_completes_the_background_visual() {
+        #[allow(deprecated)]
         let compositor = Compositor::new().policy(Root);
-        assert_eq!(compositor.policy.target(), RuntimeTarget::Compositor);
+        assert_eq!(compositor.background.target(), RuntimeTarget::Compositor);
+    }
+
+    #[test]
+    fn named_frame_functions_implement_the_template_contract() {
+        fn compose(_model: WindowChromeModel) -> Root {
+            Root
+        }
+
+        let compositor = Compositor::new().window_frame(compose).background(Root);
+        assert!(compositor.window_frame().is_some());
+    }
+
+    #[test]
+    fn custom_shell_actions_require_unique_declaration_authorization() {
+        let action = ShellActionId::named("window.pin");
+        let compositor = Compositor::new()
+            .shell_action(action, |_| {})
+            .shell_action(action, |_| {})
+            .background(Root);
+
+        assert!(compositor.validate().is_err());
     }
 
     #[test]
     fn shell_widget_validation_happens_before_host_selection() {
         let result = Application::desktop_environment("Telorgon")
-            .compositor(Compositor::new().policy(Root))
+            .compositor(Compositor::new().background(Root))
             .shell_widget(ShellWidget::new("").reserve_space(-1.0).content(Root))
             .into_parts();
         assert!(result.is_err());
@@ -1050,7 +1170,7 @@ mod tests {
 
         let desktop = Application::desktop_environment("Telorgon")
             .renderer(Renderer::Vulkan)
-            .compositor(Compositor::new().policy(Root))
+            .compositor(Compositor::new().background(Root))
             .shell_widget(ShellWidget::new("Panel").content(Root));
         assert_eq!(desktop.renderer, Renderer::Vulkan);
     }

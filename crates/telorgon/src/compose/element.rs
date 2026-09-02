@@ -32,6 +32,7 @@ pub struct Element {
     key: Option<Key>,
     kind: ElementKind,
     window_chrome_role: Option<crate::window_chrome::WindowChromeRole>,
+    window_chrome_hit_spec: Option<crate::window_chrome::WindowChromeHitSpec>,
     pointer_request: Option<crate::assets::PointerRequest>,
 }
 
@@ -42,6 +43,7 @@ impl fmt::Debug for Element {
             .field("key", &self.key)
             .field("kind", &self.kind)
             .field("window_chrome_role", &self.window_chrome_role)
+            .field("window_chrome_hit_spec", &self.window_chrome_hit_spec)
             .field("pointer_request", &self.pointer_request)
             .finish()
     }
@@ -53,6 +55,7 @@ impl Element {
             key,
             kind,
             window_chrome_role: None,
+            window_chrome_hit_spec: None,
             pointer_request: None,
         }
     }
@@ -73,12 +76,14 @@ impl Element {
         Option<Key>,
         ElementKind,
         Option<crate::window_chrome::WindowChromeRole>,
+        Option<crate::window_chrome::WindowChromeHitSpec>,
         Option<crate::assets::PointerRequest>,
     ) {
         (
             self.key,
             self.kind,
             self.window_chrome_role,
+            self.window_chrome_hit_spec,
             self.pointer_request,
         )
     }
@@ -86,6 +91,34 @@ impl Element {
     #[doc(hidden)]
     pub fn with_window_chrome_role(mut self, role: crate::window_chrome::WindowChromeRole) -> Self {
         self.window_chrome_role = Some(role);
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_window_chrome_hit_slop(mut self, hit_slop: crate::core::EdgeInsets) -> Self {
+        let default = self
+            .window_chrome_role
+            .map(crate::window_chrome::WindowChromeHitSpec::for_role)
+            .unwrap_or_default();
+        self.window_chrome_hit_spec = Some(
+            self.window_chrome_hit_spec
+                .unwrap_or(default)
+                .hit_slop(hit_slop),
+        );
+        self
+    }
+
+    #[doc(hidden)]
+    pub fn with_window_chrome_hit_priority(mut self, priority: u16) -> Self {
+        let default = self
+            .window_chrome_role
+            .map(crate::window_chrome::WindowChromeHitSpec::for_role)
+            .unwrap_or_default();
+        self.window_chrome_hit_spec = Some(
+            self.window_chrome_hit_spec
+                .unwrap_or(default)
+                .priority(priority),
+        );
         self
     }
 

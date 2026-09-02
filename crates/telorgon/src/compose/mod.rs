@@ -16,10 +16,14 @@ pub use component::{
     Component, ComponentFields, ComponentInstanceId, ErasedComponent, RenderedView,
 };
 pub use components::{
-    Button, ButtonElement, Checkbox, Container, ContainerElement, HasContent, Image, ImageElement,
-    MissingContent, Slider, SliderElement, Switch, Text, TextElement, ToggleElement, ToggleKind,
-    WindowChromeViewExt, WindowContentSlot, WindowFrame, button, card, checkbox, column, image,
-    row, slider, spacer, stack, switch, text, window_content_slot, window_frame,
+    Button, ButtonElement, Checkbox, Container, ContainerElement, EasyWindowFrame,
+    EasyWindowFrameComponent, HasContent, Image, ImageElement, MissingContent, Slider,
+    SliderElement, Switch, Text, TextElement, ToggleElement, ToggleKind, WindowChromeDesign,
+    WindowChromeDesignError, WindowChromePalette, WindowChromeStateStyle, WindowChromeViewExt,
+    WindowContentSlot, WindowControlButtonStyle, WindowControlDesign, WindowControlVisual,
+    WindowControlsDesign, WindowFrame, WindowTitleBarStyle, button, card, checkbox, column,
+    easy_window_frame, image, row, slider, spacer, stack, switch, text, window_content_slot,
+    window_frame,
 };
 pub use context::{InputsChangedContext, MountContext, RuntimeTarget, UnmountContext};
 pub use element::{Element, ElementKind, ElementType, View, ViewError};

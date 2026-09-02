@@ -893,9 +893,13 @@ impl<S: NativeRuntimeSource, P: NativePresentation> NativeHost<S, P> {
         if self.options.decorations == crate::application_host::WindowDecorationMode::Hidden
             && let Ok(snapshot) =
                 crate::WindowChromeSnapshot::derive(runtime.ui(), runtime.layout())
-            && let Some(role) = snapshot.hit_test(self.cursor_position.x, self.cursor_position.y)
+            && let Some(region) =
+                snapshot.hit_test_region(self.cursor_position.x, self.cursor_position.y)
         {
-            match role {
+            if let Some(request) = runtime.ui().pointer_requests.get(region.node).copied() {
+                return request;
+            }
+            match region.role {
                 crate::WindowChromeRole::DragRegion => {
                     return crate::PointerRequest::Semantic(crate::PointerIcon::Move);
                 }

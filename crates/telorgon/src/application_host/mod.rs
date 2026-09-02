@@ -50,6 +50,7 @@ pub use declaration::{
     DesktopEnvironmentWithCompositor, GuiApplication, LinuxDesktopConfig, ReadyCompositor,
     ReadyDesktopEnvironment, ReadyGuiApplication, ReadyShellWidget, ReadyWindow, Renderer,
     ShellWidget, ShellWidgetAnchor, ShellWidgetExtent, Window, WindowFrameFactory,
+    WindowFrameTemplate,
 };
 pub use delta_queue::SceneDeltaQueue;
 pub use error::{AppError, AppResult};

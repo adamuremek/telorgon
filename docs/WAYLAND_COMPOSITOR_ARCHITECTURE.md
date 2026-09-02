@@ -23,18 +23,21 @@ Application::desktop_environment("Telorgon")
     .cursor_theme(assets::cursors::DEFAULT)
     .compositor(
         Compositor::new()
-            .window_frame(|model| MyWindowFrame { model })
-            .policy(MyCompositorPolicy),
+            .window_frame(easy_window_frame(MY_CHROME))
+            .background(MyDesktopBackground),
     )
     .shell_widget(ShellWidget::new("panel").content(MyPanel))
     .run()?;
 ```
 
-The frame factory receives a fresh `WindowChromeModel` for each server-decorated toplevel and is
+The frame template receives a fresh `WindowChromeModel` for each server-decorated toplevel and is
 rendered at that window's outer extent. The model carries title, activation, state, capabilities,
-and application-icon metadata. Visuals are normal Telorgon composition using `BoxDecoration` plus
+tiling metadata, and application-icon metadata. `EasyWindowFrame` resolves a complete
+`WindowChromeDesign` without a factory closure. A named `WindowFrameTemplate` implementation or a
+legacy closure can instead compose a fully custom frame. Visuals are normal Telorgon composition using `BoxDecoration` plus
 explicit title, icon, drag, resize, content-slot, and action roles. Final retained layout defines
 the client-content offset and hit regions; no fixed control placement is imposed by the host.
+`Compositor::background` is likewise a visual component behind clients, not a policy object.
 
 The typed project asset bundle is shared by frames, normal shell composition, pointer themes, and
 the desktop fallback `AppIconProfile`. Client-provided `xdg_toplevel_icon_v1` name/buffer snapshots
@@ -206,7 +209,7 @@ The operational managed path is entirely Telorgon-rendered:
    Telorgon `ImageResource` with explicit alpha/color metadata, then applies the committed
    `wl_surface` transform/scale and viewporter crop/destination using bounded deterministic
    sampling.
-3. Client images, composed policy, composed server frames, and composed shell widgets are rendered
+3. Client images, the composed background, composed server frames, and composed shell widgets are rendered
    through `telorgon-renderer-software` into one RGBA output. The composed pointer is uploaded into
    three completion-retired ARGB8888 GBM cursor buffers when an atomic cursor plane is available;
    otherwise it is damage-composited into the primary output.

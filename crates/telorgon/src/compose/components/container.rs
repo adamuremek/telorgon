@@ -52,6 +52,12 @@ impl Container {
         self
     }
 
+    /// Replaces the complete layout contract while retaining this container's children and style.
+    pub fn layout_style(mut self, layout: LayoutStyle) -> Self {
+        self.element.layout = layout;
+        self
+    }
+
     /// Positions children along this container's flow direction.
     ///
     /// For a row this is the horizontal axis; for a column this is the vertical axis.
@@ -157,6 +163,11 @@ impl Container {
 
     pub fn opacity(mut self, opacity: f32) -> Self {
         self.element.style.opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn overflow(mut self, overflow: crate::ui::Overflow) -> Self {
+        self.element.style.overflow = overflow;
         self
     }
 

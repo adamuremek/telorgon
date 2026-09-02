@@ -19,6 +19,7 @@ assets/
   icons/close.svg
   icons/minimize.svg
   icons/maximize.svg
+  icons/restore.svg
   cursors/default.toml
   cursors/arrow.svg
   cursors/link.svg
@@ -164,55 +165,165 @@ the window host consumes only the semantic `WindowAction` after hit testing.
 
 ## Complete Wayland desktop example
 
-The compositor receives one immutable `WindowChromeModel` per toplevel. Its closure creates a fresh
-component for that toplevel, so title, activation, capabilities, state, and client/fallback icon
-metadata never live in a global singleton frame.
+The convenience path is a reusable value, not a closure. `EasyWindowFrame` receives one immutable
+`WindowChromeModel` per toplevel and resolves it against a complete `WindowChromeDesign`. Control
+icons live beside their control visuals in that design; they do not need separate compositor icon
+declarations.
 
 ```rust,ignore
-#[component(no_default)]
-struct ServerFrame {
-    #[input]
-    model: WindowChromeModel,
-}
+use telorgon::app::*;
+use telorgon::{Easing, TransitionSpec};
 
-impl Component for ServerFrame {
+const RESTING: WindowControlVisual = WindowControlVisual {
+    decoration: BoxDecoration::new()
+        .background(Background::Color(ColorRgba8::rgba(35, 40, 52, 255)))
+        .corner_radius(7.0),
+    icon_tint: ColorRgba8::rgba(225, 230, 242, 255),
+};
+
+const HOVERED: WindowControlVisual = WindowControlVisual {
+    decoration: BoxDecoration::new()
+        .background(Background::Color(ColorRgba8::rgba(60, 70, 96, 255)))
+        .corner_radius(7.0),
+    icon_tint: ColorRgba8::rgba(255, 255, 255, 255),
+};
+
+const PRESSED: WindowControlVisual = WindowControlVisual {
+    decoration: BoxDecoration::new()
+        .background(Background::Color(ColorRgba8::rgba(82, 96, 132, 255)))
+        .corner_radius(7.0),
+    icon_tint: ColorRgba8::rgba(255, 255, 255, 255),
+};
+
+const FOCUSED: WindowControlVisual = WindowControlVisual {
+    decoration: BoxDecoration::new()
+        .uniform_border(2.0, ColorRgba8::rgba(130, 155, 255, 255))
+        .corner_radius(7.0),
+    icon_tint: ColorRgba8::rgba(255, 255, 255, 255),
+};
+
+const DISABLED: WindowControlVisual = WindowControlVisual {
+    decoration: BoxDecoration::new().corner_radius(7.0),
+    icon_tint: ColorRgba8::rgba(120, 126, 142, 255),
+};
+
+const BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
+    width: 38.0,
+    height: 30.0,
+    icon_size: 15.0,
+    resting: RESTING,
+    hovered: Some(HOVERED),
+    pressed: Some(PRESSED),
+    focused: Some(FOCUSED),
+    disabled: Some(DISABLED),
+    transition: Some(TransitionSpec {
+        duration_ms: 90,
+        easing: Easing::EaseOut,
+        repeat: false,
+    }),
+};
+
+const CLOSE_BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
+    resting: WindowControlVisual {
+        decoration: BoxDecoration::new()
+            .background(Background::Color(ColorRgba8::rgba(77, 35, 45, 255)))
+            .corner_radius(7.0),
+        icon_tint: ColorRgba8::rgba(255, 220, 225, 255),
+    },
+    hovered: Some(WindowControlVisual {
+        decoration: BoxDecoration::new()
+            .background(Background::Color(ColorRgba8::rgba(196, 52, 72, 255)))
+            .corner_radius(7.0),
+        icon_tint: ColorRgba8::rgba(255, 255, 255, 255),
+    }),
+    ..BUTTON
+};
+
+const NORMAL: WindowChromeStateStyle = WindowChromeStateStyle {
+    title_bar_visible: true,
+    frame_radius: 14.0,
+    content_radius: 9.0,
+    shadow: Some(Shadow {
+        offset: PointF { x: 0.0, y: 12.0 },
+        blur: 30.0,
+        spread: 0.0,
+        color: ColorRgba8::rgba(0, 0, 0, 128),
+    }),
+    resize_regions: true,
+    resize_edge: 6.0,
+    resize_hit_slop: Insets::all(3.0),
+    content_margin: Insets::new(44.0, 6.0, 6.0, 6.0),
+};
+
+const TEST_CHROME: WindowChromeDesign = WindowChromeDesign {
+    active: WindowChromePalette {
+        frame_background: ColorRgba8::rgba(23, 27, 38, 255),
+        frame_border: ColorRgba8::rgba(101, 119, 184, 255),
+        frame_border_width: 1.0,
+        title_color: ColorRgba8::rgba(245, 247, 255, 255),
+        title_weight: 650,
+    },
+    inactive: WindowChromePalette {
+        frame_background: ColorRgba8::rgba(31, 34, 43, 255),
+        frame_border: ColorRgba8::rgba(65, 70, 85, 255),
+        frame_border_width: 1.0,
+        title_color: ColorRgba8::rgba(174, 179, 193, 255),
+        title_weight: 450,
+    },
+    normal: NORMAL,
+    maximized: WindowChromeStateStyle {
+        frame_radius: 0.0,
+        content_radius: 0.0,
+        shadow: None,
+        resize_regions: false,
+        resize_edge: 0.0,
+        resize_hit_slop: Insets::ZERO,
+        content_margin: Insets::new(44.0, 0.0, 0.0, 0.0),
+        ..NORMAL
+    },
+    tiled: WindowChromeStateStyle {
+        frame_radius: 0.0,
+        content_radius: 0.0,
+        shadow: None,
+        ..NORMAL
+    },
+    fullscreen: WindowChromeStateStyle {
+        title_bar_visible: false,
+        frame_radius: 0.0,
+        content_radius: 0.0,
+        shadow: None,
+        resize_regions: false,
+        resize_edge: 0.0,
+        resize_hit_slop: Insets::ZERO,
+        content_margin: Insets::ZERO,
+    },
+    title_bar: WindowTitleBarStyle {
+        height: 44.0,
+        padding: Insets::symmetric(7.0, 8.0),
+        gap: 8.0,
+        title_size: 14.0,
+        app_icon_region_size: 30.0,
+        app_icon_size: 20.0,
+        show_client_icon: true,
+        fallback_app_icon: Some(assets::icons::APP),
+        app_icon_opens_system_menu: true,
+    },
+    controls: WindowControlsDesign {
+        minimize: WindowControlDesign { icon: assets::icons::MINIMIZE, style: BUTTON },
+        maximize: WindowControlDesign { icon: assets::icons::MAXIMIZE, style: BUTTON },
+        restore: WindowControlDesign { icon: assets::icons::RESTORE, style: BUTTON },
+        close: WindowControlDesign { icon: assets::icons::CLOSE, style: CLOSE_BUTTON },
+        gap: 6.0,
+    },
+    content_background: ColorRgba8::rgba(15, 18, 26, 255),
+};
+
+#[component]
+struct DesktopBackground {}
+
+impl Component for DesktopBackground {
     fn view(&self) -> impl View {
-        let title = if self.model.active {
-            text(&self.model.title).weight(600)
-        } else {
-            text(&self.model.title).weight(400)
-        };
-        let icon = self
-            .model
-            .app_icon_image
-            .map(ImageSource::from)
-            .or_else(|| self.model.app_icon.map(ImageSource::from))
-            .unwrap_or_else(|| ImageSource::from(assets::icons::APP));
-
-        window_frame()
-            .decoration(
-                BoxDecoration::new()
-                    .uniform_border(1.0, ColorRgba8::rgba(64, 70, 84, 255))
-                    .corner_radius(if self.model.state == WindowChromeState::Maximized {
-                        0.0
-                    } else {
-                        12.0
-                    }),
-            )
-            .child(
-                row()
-                    .height(42.0)
-                    .child(image(icon).width(20.0).height(20.0).window_app_icon())
-                    .child(title.window_title())
-                    .child(spacer())
-                    .child(
-                        button("Close")
-                            .icon(assets::icons::CLOSE)
-                            .window_action(WindowAction::Close),
-                    )
-                    .window_drag_region(),
-            )
-            .content_slot(window_content_slot().margin((42.0, 5.0, 5.0, 5.0)))
+        stack().background(ColorRgba8::rgba(10, 12, 18, 255))
     }
 }
 
@@ -224,12 +335,23 @@ Application::desktop_environment("Telorgon")
     .client_cursor_mode(ClientCursorMode::Allow)
     .compositor(
         Compositor::new()
-            .window_frame(|model| ServerFrame { model })
-            .policy(MyCompositorPolicy::default()),
+            .window_frame(easy_window_frame(TEST_CHROME))
+            .background(DesktopBackground::default()),
     )
     .shell_widget(ShellWidget::new("panel").content(MyPanel::default()))
     .run()?;
 ```
+
+`WindowChromeDesign::validate()` can be called before assembling the declaration to report invalid
+nonfinite or negative metrics early. At runtime the easy frame selects active/inactive palettes,
+normal/maximized/tiled/fullscreen geometry, client/fallback app icons, capability-filtered controls,
+maximize versus restore artwork, resizable tiled edges, and every declared control state. The state
+styles are code-local bindings, so no theme-catalog entry is required.
+
+`Compositor::icon(name, component)` remains a separate semantic icon registry for compositor-wide
+artwork such as cursor or legacy fallback names. It is not where `EasyWindowFrame` receives its
+button icons. Likewise, `.background(...)` takes a widget because it describes pixels behind client
+windows; focus, placement, security, workspace, and activation decisions remain host policy.
 
 ## The window-frame contract
 
@@ -241,9 +363,12 @@ until exactly one `WindowContentSlot` has been supplied. All visuals remain ordi
 - Normal layout owns title-bar height, control size, gaps, padding, title placement, icon placement,
   and resize-region placement.
 - `WindowChromeViewExt` adds only meaning: frame title, app icon, drag region, resize edge, system
-  menu, or a `WindowAction`.
-- Action regions take precedence over an overlapping drag parent, which allows buttons to be
-  nested directly inside a draggable title bar.
+  menu, built-in `WindowAction`, or declaration-authorized `ShellActionId`.
+- Default precedence is control/action over resize over drag. `window_hit_priority(...)` can
+  override it, while `window_hit_slop(...)` enlarges input geometry without changing layout or
+  paint. `PointerViewExt::pointer_icon(...)` can override the semantic cursor.
+- `WindowEdgeMask` and `WindowTilingState` describe tiled adjacency and the subset of edges that
+  remain resizable.
 
 `window_system_menu()` is the semantic hook for a project-defined menu. Telorgon's managed host
 does not inject a stock menu, so the component's normal callback owns the menu content and behavior.
@@ -252,6 +377,65 @@ Corner radius, border, outline, and shadow are paint properties; they are not ad
 clients. Wayland receives protocol globals, configure state, and icon-size preferences. The host
 derives semantic hit regions from the final computed layout and performs the corresponding native or
 xdg-toplevel operation.
+
+For expert frames, implement `WindowFrameTemplate` as an ordinary named value. Closures still
+implement the trait for compatibility, but are not required:
+
+```rust,ignore
+const PIN: ShellActionId = ShellActionId::named("window.pin");
+
+#[component(no_default)]
+struct StudioFrame {
+    #[input]
+    model: WindowChromeModel,
+}
+
+impl Component for StudioFrame {
+    fn view(&self) -> impl View {
+        window_frame()
+            .gap(4.0)
+            .child(
+                row()
+                    .height(42.0)
+                    .child(text(&self.model.title).window_title())
+                    .child(spacer())
+                    .child(button("Pin").window_shell_action(PIN))
+                    .child(button("Close").window_action(WindowAction::Close))
+                    .window_drag_region(),
+            )
+            .child(
+                stack()
+                    .height(5.0)
+                    .window_resize(WindowResizeEdge::Top)
+                    .window_hit_slop(Insets::all(4.0))
+                    .window_hit_priority(500),
+            )
+            .content_slot(window_content_slot().margin((42.0, 5.0, 5.0, 5.0)))
+    }
+}
+
+struct StudioFrameTemplate;
+
+impl WindowFrameTemplate for StudioFrameTemplate {
+    type Component = StudioFrame;
+
+    fn compose(&self, model: WindowChromeModel) -> StudioFrame {
+        StudioFrame { model }
+    }
+}
+
+fn pin_window(model: WindowChromeModel) {
+    // The handler exists only because this action ID was authorized by the declaration.
+}
+
+Compositor::new()
+    .window_frame(StudioFrameTemplate)
+    .shell_action(PIN, pin_window)
+    .background(DesktopBackground::default());
+```
+
+An unregistered shell action is inert. This keeps arbitrary frame regions from becoming an
+unrestricted host-command channel while still permitting project-specific controls.
 
 ## Assets and icons
 
@@ -355,18 +539,20 @@ forces compositor artwork. It does not affect managed GUI applications.
 ## Vocabulary and compatibility
 
 The normalized vocabulary is `BoxDecoration`, `box_style`, `corner_radius`, `uniform_border`,
-`WindowFrame`, `WindowContentSlot`, `WindowChromeModel`, `WindowAction`, `PointerIcon`, and
-`AppIconProfile`. Earlier `style`, `radius`, and `border` composition builders remain deprecated
-forwarders. `TitleBar` aliases are available alongside the earlier `Titlebar` spellings in the
-imperative shell API. `ShadowFrame` remains a compatibility adapter only; new frames and ordinary
-containers use `BoxDecoration::shadow` or `BoxDecoration::shadows`.
+`WindowFrame`, `WindowContentSlot`, `WindowFrameTemplate`, `EasyWindowFrame`,
+`WindowChromeDesign`, `WindowChromeModel`, `WindowAction`, `PointerIcon`, `AppIconProfile`, and
+`Compositor::background`. `Compositor::policy` remains a deprecated compatibility alias. Earlier
+`style`, `radius`, and `border` composition builders remain deprecated forwarders. `TitleBar`
+aliases are available alongside the earlier `Titlebar` spellings in the imperative shell API.
+`ShadowFrame` remains a compatibility adapter only; new frames and ordinary containers use
+`BoxDecoration::shadow` or `BoxDecoration::shadows`.
 
 ## Rejected alternatives and verification
 
 - A single global frame component was rejected because title, activation, state, capability, and
   icon data are per toplevel.
-- A fixed `WindowControls` composer was rejected because it would own visuals and placement that
-  belong to application composition.
+- A mandatory fixed `WindowControls` composer was rejected. `EasyWindowFrame` is now an optional
+  convenience layer with a complete design value; the low-level frame keeps normal composition.
 - Window-only `Border` and `WindowShadow` values were rejected in favor of reusable box paint
   primitives.
 - Raw string asset lookup at call sites was rejected in favor of typed generated handles.

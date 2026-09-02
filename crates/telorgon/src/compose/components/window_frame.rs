@@ -1,8 +1,12 @@
 use std::marker::PhantomData;
 
-use crate::compose::{Container, Dimension, Element, Insets, Key, View, stack};
-use crate::ui::{BoxDecoration, BoxStyle};
-use crate::window_chrome::{WindowAction, WindowChromeRole, WindowResizeEdge};
+use crate::compose::{Alignment, Container, Dimension, Element, Insets, Key, View, stack};
+use crate::core::ColorRgba8;
+use crate::ui::{
+    Background, Border, BoxDecoration, BoxStyle, CornerRadii, LayoutStyle, Outline, Overflow,
+    Shadow, ShadowList,
+};
+use crate::window_chrome::{ShellActionId, WindowAction, WindowChromeRole, WindowResizeEdge};
 
 pub struct MissingContent;
 pub struct HasContent;
@@ -19,6 +23,45 @@ impl<State> WindowFrame<State> {
         self
     }
 
+    pub fn children<I, V>(mut self, children: I) -> Self
+    where
+        I: IntoIterator<Item = V>,
+        V: View,
+    {
+        self.root = self.root.children(children);
+        self
+    }
+
+    pub fn maybe(mut self, condition: bool, child: impl View) -> Self {
+        self.root = self.root.maybe(condition, child);
+        self
+    }
+
+    pub fn key(mut self, key: impl Into<Key>) -> Self {
+        self.root = self.root.key(key);
+        self
+    }
+
+    pub fn layout_style(mut self, layout: LayoutStyle) -> Self {
+        self.root = self.root.layout_style(layout);
+        self
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.root = self.root.gap(gap);
+        self
+    }
+
+    pub fn justify_content(mut self, alignment: Alignment) -> Self {
+        self.root = self.root.justify_content(alignment);
+        self
+    }
+
+    pub fn align_items(mut self, alignment: Alignment) -> Self {
+        self.root = self.root.align_items(alignment);
+        self
+    }
+
     pub fn decoration(mut self, decoration: BoxDecoration) -> Self {
         self.root = self.root.decoration(decoration);
         self
@@ -31,6 +74,61 @@ impl<State> WindowFrame<State> {
 
     pub fn padding(mut self, padding: impl Into<Insets>) -> Self {
         self.root = self.root.padding(padding);
+        self
+    }
+
+    pub fn margin(mut self, margin: impl Into<Insets>) -> Self {
+        self.root = self.root.margin(margin);
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.root = self.root.background(background);
+        self
+    }
+
+    pub fn corner_radius(mut self, radius: f32) -> Self {
+        self.root = self.root.corner_radius(radius);
+        self
+    }
+
+    pub fn corner_radii(mut self, radii: CornerRadii) -> Self {
+        self.root = self.root.corner_radii(radii);
+        self
+    }
+
+    pub fn border_sides(mut self, border: Border) -> Self {
+        self.root = self.root.border_sides(border);
+        self
+    }
+
+    pub fn uniform_border(mut self, width: f32, color: ColorRgba8) -> Self {
+        self.root = self.root.uniform_border(width, color);
+        self
+    }
+
+    pub fn outline(mut self, outline: Outline) -> Self {
+        self.root = self.root.outline(outline);
+        self
+    }
+
+    pub fn shadow(mut self, shadow: Shadow) -> Self {
+        self.root = self.root.shadow(shadow);
+        self
+    }
+
+    pub fn shadows(mut self, shadows: ShadowList) -> Self {
+        self.root = self.root.shadows(shadows);
+        self
+    }
+
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.root = self.root.opacity(opacity);
+        self
+    }
+
+    pub fn overflow(mut self, overflow: Overflow) -> Self {
+        self.root = self.root.overflow(overflow);
         self
     }
 
@@ -88,6 +186,11 @@ impl WindowContentSlot {
         self
     }
 
+    pub fn layout_style(mut self, layout: LayoutStyle) -> Self {
+        self.content = self.content.layout_style(layout);
+        self
+    }
+
     pub fn decoration(mut self, decoration: BoxDecoration) -> Self {
         self.content = self.content.decoration(decoration);
         self
@@ -100,6 +203,56 @@ impl WindowContentSlot {
 
     pub fn margin(mut self, margin: impl Into<Insets>) -> Self {
         self.content = self.content.margin(margin);
+        self
+    }
+
+    pub fn background(mut self, background: impl Into<Background>) -> Self {
+        self.content = self.content.background(background);
+        self
+    }
+
+    pub fn corner_radius(mut self, radius: f32) -> Self {
+        self.content = self.content.corner_radius(radius);
+        self
+    }
+
+    pub fn corner_radii(mut self, radii: CornerRadii) -> Self {
+        self.content = self.content.corner_radii(radii);
+        self
+    }
+
+    pub fn border_sides(mut self, border: Border) -> Self {
+        self.content = self.content.border_sides(border);
+        self
+    }
+
+    pub fn uniform_border(mut self, width: f32, color: ColorRgba8) -> Self {
+        self.content = self.content.uniform_border(width, color);
+        self
+    }
+
+    pub fn outline(mut self, outline: Outline) -> Self {
+        self.content = self.content.outline(outline);
+        self
+    }
+
+    pub fn shadow(mut self, shadow: Shadow) -> Self {
+        self.content = self.content.shadow(shadow);
+        self
+    }
+
+    pub fn shadows(mut self, shadows: ShadowList) -> Self {
+        self.content = self.content.shadows(shadows);
+        self
+    }
+
+    pub fn opacity(mut self, opacity: f32) -> Self {
+        self.content = self.content.opacity(opacity);
+        self
+    }
+
+    pub fn overflow(mut self, overflow: Overflow) -> Self {
+        self.content = self.content.overflow(overflow);
         self
     }
 
@@ -151,6 +304,24 @@ pub trait WindowChromeViewExt: View + Sized {
     fn window_action(self, action: WindowAction) -> Element {
         self.into_element()
             .with_window_chrome_role(WindowChromeRole::Action(action))
+    }
+
+    /// Marks a region as an action that runs only when the compositor registered the same ID.
+    fn window_shell_action(self, action: ShellActionId) -> Element {
+        self.into_element()
+            .with_window_chrome_role(WindowChromeRole::ShellAction(action))
+    }
+
+    /// Expands this chrome region's hit target without changing its layout or paint bounds.
+    fn window_hit_slop(self, hit_slop: impl Into<Insets>) -> Element {
+        self.into_element()
+            .with_window_chrome_hit_slop(hit_slop.into().0)
+    }
+
+    /// Overrides the default action > resize > drag hit precedence for this region.
+    fn window_hit_priority(self, priority: u16) -> Element {
+        self.into_element()
+            .with_window_chrome_hit_priority(priority)
     }
 
     fn window_resize(self, edge: WindowResizeEdge) -> Element {

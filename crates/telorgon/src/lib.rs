@@ -142,9 +142,9 @@ pub use assets::{
 pub use profiler as embedded_profiler_events;
 pub use telorgon_macros::{asset_catalog, component};
 pub use window_chrome::{
-    WindowAction, WindowChromeCapabilities, WindowChromeError, WindowChromeModel,
-    WindowChromeRegion, WindowChromeRole, WindowChromeSnapshot, WindowChromeState,
-    WindowResizeEdge,
+    ShellActionId, WindowAction, WindowChromeCapabilities, WindowChromeError, WindowChromeHitSpec,
+    WindowChromeModel, WindowChromeRegion, WindowChromeRole, WindowChromeSnapshot,
+    WindowChromeState, WindowEdgeMask, WindowResizeEdge, WindowTilingState,
 };
 
 /// Imports shared by Telorgon's high-level application facade.
@@ -153,8 +153,10 @@ pub use window_chrome::{
 /// modules instead, such as `use telorgon::app::*`.
 mod authoring {
     pub use crate::compose::{
-        Button, Checkbox, Container, Image, PointerViewExt, Slider, Switch, Text,
-        WindowChromeViewExt, WindowContentSlot, WindowFrame,
+        Button, Checkbox, Container, EasyWindowFrame, Image, PointerViewExt, Slider, Switch, Text,
+        WindowChromeDesign, WindowChromeDesignError, WindowChromePalette, WindowChromeStateStyle,
+        WindowChromeViewExt, WindowContentSlot, WindowControlButtonStyle, WindowControlDesign,
+        WindowControlVisual, WindowControlsDesign, WindowFrame, WindowTitleBarStyle,
     };
     pub use crate::{
         Alignment, AppIconProfile, AssetBundle, AssetCatalog, AssetKey, Background, Border,
@@ -163,11 +165,12 @@ mod authoring {
         EdgeInsets, Element, EventContext, EventHandler, Flow, Icon, IconAsset, ImageAsset,
         ImageSource, InputsChangedContext, Insets, Key, LayoutStyle, MainAxisAlignment,
         MountContext, Outline, Overflow, PointF, RectF, Result, RuntimeTarget, SemanticCheckState,
-        Shadow, ShadowList, Signal, SignalSnapshot, SignalWriter, SizeF, SizeI, SizeRule,
-        SizeRule2D, StyleOverride, TextStyle, Transform2D, View, ViewError, WindowAction,
-        WindowChromeCapabilities, WindowChromeModel, WindowChromeRole, WindowChromeState,
-        WindowResizeEdge, asset_catalog, button, card, checkbox, column, component, hashed_key,
-        image, row, slider, spacer, stack, switch, text, window_content_slot, window_frame,
+        Shadow, ShadowList, ShellActionId, Signal, SignalSnapshot, SignalWriter, SizeF, SizeI,
+        SizeRule, SizeRule2D, StyleOverride, TextStyle, Transform2D, View, ViewError, WindowAction,
+        WindowChromeCapabilities, WindowChromeHitSpec, WindowChromeModel, WindowChromeRole,
+        WindowChromeState, WindowEdgeMask, WindowResizeEdge, WindowTilingState, asset_catalog,
+        button, card, checkbox, column, component, easy_window_frame, hashed_key, image, row,
+        slider, spacer, stack, switch, text, window_content_slot, window_frame,
     };
 }
 
@@ -179,7 +182,7 @@ pub mod app {
     pub use super::authoring::*;
     pub use crate::application_host::{
         Application, Compositor, LinuxDesktopConfig, Renderer, ShellWidget, ShellWidgetAnchor,
-        ShellWidgetExtent, Window, WindowDecorationMode, WindowFrameFactory,
+        ShellWidgetExtent, Window, WindowDecorationMode, WindowFrameFactory, WindowFrameTemplate,
     };
 }
 #[cfg(feature = "application-software")]
@@ -196,7 +199,7 @@ pub use application_host::{
     ManagedTaskDiagnostics, ManagedTaskExecutor, ManagedTaskHost, ManagedTaskPoll, PlatformInput,
     PreparedFrame, ReadyCompositor, ReadyDesktopEnvironment, ReadyGuiApplication, ReadyShellWidget,
     ReadyWindow, Renderer, SceneDeltaQueue, ShellWidget, ShellWidgetAnchor, ShellWidgetExtent,
-    Window, WindowDecorationMode, WindowFrameFactory, WindowOptions,
+    Window, WindowDecorationMode, WindowFrameFactory, WindowFrameTemplate, WindowOptions,
 };
 pub type Result<T> = application_host::AppResult<T>;
 pub use application_components::{
@@ -339,10 +342,13 @@ pub use application_primitives::{
     WorldAnchorRef, WorldAnchorStyle, WorldAnchorVisibility,
 };
 pub use compose::{
-    Alignment, Component, ComponentFields, ComponentInstanceId, Dimension, Element, EventContext,
-    EventHandler, InputsChangedContext, Insets, Key, MountContext, PointerViewExt, RuntimeTarget,
-    Signal, SignalSnapshot, SignalWriter, TextStyle, UnmountContext as CompositionUnmountContext,
-    View, ViewError, button, card, checkbox, column, hashed_key, image, row, slider, spacer, stack,
+    Alignment, Component, ComponentFields, ComponentInstanceId, Dimension, EasyWindowFrame,
+    Element, EventContext, EventHandler, InputsChangedContext, Insets, Key, MountContext,
+    PointerViewExt, RuntimeTarget, Signal, SignalSnapshot, SignalWriter, TextStyle,
+    UnmountContext as CompositionUnmountContext, View, ViewError, WindowChromeDesign,
+    WindowChromeDesignError, WindowChromePalette, WindowChromeStateStyle, WindowControlButtonStyle,
+    WindowControlDesign, WindowControlVisual, WindowControlsDesign, WindowTitleBarStyle, button,
+    card, checkbox, column, easy_window_frame, hashed_key, image, row, slider, spacer, stack,
     switch, text, window_content_slot, window_frame,
 };
 pub use core::{ColorRgba8, EdgeInsets, PointF, PointI, RectF, RectI, SizeF, SizeI, Transform2D};

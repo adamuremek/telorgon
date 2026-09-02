@@ -213,19 +213,21 @@ retired.
 - `Application::gui(name)` builds an ordinary managed GUI application and requires one `Window`
   with content before `.run()` is available.
 - `Application::desktop_environment(name)` builds a Linux desktop environment and requires a
-  `Compositor` policy plus at least one composed `ShellWidget` before `.run()` is available.
+  compositor background plus at least one composed `ShellWidget` before `.run()` is available.
 
 Both modes select their renderer directly on the application builder. `Window`, `Compositor`, and
 `ShellWidget` use constructors to gather their own mode-specific configuration, and `.content(...)`
-or `.policy(...)` completes them before the parent builder accepts them. There is no generic
+or `.background(...)` completes them before the parent builder accepts them. The deprecated
+`.policy(...)` spelling remains a compatibility forwarder. There is no generic
 `Application::new`, free `run` function, or separately runnable desktop/widget/compositor facade.
 
 `self.runtime_target()` reports `Application`, `ShellWidget`, or `Compositor` according to the
-composition's role. The GUI native host is operational. The Linux desktop-environment declaration,
-validation, renderer selection, compositor policy, and shell-widget composition are modeled, but
-its bare-metal runtime is not present in this repository; `.run()` returns a clear unsupported-host
-error. It does not fall back to an ordinary application window because doing so would falsely grant
-shell/compositor capabilities.
+composition's role. The GUI native host is operational. With the Linux-only
+`desktop-wayland-linux` feature, the desktop-environment declaration, validation, renderer
+selection, background/frame composition, shell widgets, and bare-metal Wayland/KMS runtime are
+operational but not production-qualified. Other targets return a clear unsupported-host error; the
+declaration never falls back to an ordinary application window because doing so would falsely
+grant shell/compositor capabilities.
 
 ## Theme and renderer path
 
