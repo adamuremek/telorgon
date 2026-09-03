@@ -1,10 +1,23 @@
 #![allow(non_camel_case_types)]
 
-use std::ffi::{c_char, c_double, c_int, c_long, c_uint, c_void};
+use std::ffi::{c_char, c_double, c_int, c_long, c_uint, c_ulong, c_void};
 
 pub const CLOCK_MONOTONIC: c_int = 1;
 pub const EFD_CLOEXEC: c_int = 0x80000;
 pub const EFD_NONBLOCK: c_int = 0x800;
+pub const DMA_BUF_SYNC_READ: u32 = 1 << 0;
+
+/// Linux's `_IOWR(DMA_BUF_BASE, 2, struct dma_buf_export_sync_file)` on the supported
+/// asm-generic ioctl ABI used by x86_64 and aarch64.
+pub const DMA_BUF_IOCTL_EXPORT_SYNC_FILE: c_ulong = 0xC008_6202;
+
+#[repr(C)]
+pub struct dma_buf_export_sync_file {
+    pub flags: u32,
+    pub fd: c_int,
+}
+
+const _: () = assert!(std::mem::size_of::<dma_buf_export_sync_file>() == 8);
 
 #[repr(C)]
 pub struct timespec {
@@ -158,6 +171,7 @@ unsafe extern "C" {
     pub fn eventfd(initial_value: c_uint, flags: c_int) -> c_int;
     pub fn read(fd: c_int, buffer: *mut c_void, count: usize) -> isize;
     pub fn write(fd: c_int, buffer: *const c_void, count: usize) -> isize;
+    pub fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
     pub fn free(pointer: *mut c_void);
     pub fn memfd_create(name: *const c_char, flags: c_uint) -> c_int;
     pub fn ftruncate(fd: c_int, length: i64) -> c_int;

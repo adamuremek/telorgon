@@ -272,7 +272,7 @@ The operational managed path is entirely Telorgon-rendered:
 
 `telorgon-compositor-render::DmaBufImporter` is the Vulkan client-buffer import bridge. It exposes
 only exact single-plane format/modifier tuples queried from the selected `VulkanDevice`, validates
-allocation bounds, consumes an optional acquire sync FD, creates a generation-scoped
+allocation bounds, consumes an acquire sync FD, creates a generation-scoped
 external-image lease, and binds it into `VulkanScene`. The external-image path can export the
 matching release requirement.
 
@@ -280,8 +280,11 @@ The managed KMS host advertises those tuples only when the owned Vulkan device a
 complete sync-FD contract. A committed client DMA-BUF is sampled once into a compositor-owned
 retained Vulkan texture in the same submission as desktop composition. That submission waits on
 the acquire fence, signals and exports the per-commit release fence, and keeps `wl_buffer` busy until
-GPU completion. Subsequent scanout-buffer updates sample only the retained texture, so the linear
-client lease is never reused and no client pixels cross the CPU.
+GPU completion. If the commit supplies a protocol explicit-sync fence, the host consumes it. Because
+`linux-dmabuf` otherwise uses implicit synchronization, the host snapshots the DMA-BUF reservation
+object's writer fences with `DMA_BUF_IOCTL_EXPORT_SYNC_FILE(DMA_BUF_SYNC_READ)` and imports that sync
+file into the same Vulkan wait path. Subsequent scanout-buffer updates sample only the retained
+texture, so the linear client lease is never reused and no client pixels cross the CPU.
 
 The managed KMS path also has an owned Vulkan scanout route. All three primary GBM buffers are
 imported with their explicit modifier and row layout as Vulkan color targets. Telorgon renders the
@@ -320,6 +323,8 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
 - A DMA-BUF buffer owns all plane FDs until duplicated into a generation-scoped renderer lease.
   The owned renderer consumes that lease exactly once to populate a retained texture, exports its
   release sync FD after submission, and delays core buffer release until completion.
+- Absence of a protocol explicit-sync fence is not proof that a DMA-BUF is ready. The default
+  implicit writer fences are exported as a read sync file before Vulkan samples the buffer.
 - Explicit acquire/release state is keyed by `(surface, commit revision)`, not merely by surface.
 - Vulkan explicit modifier imports use `VkSubresourceLayout::size == 0`, as required by the Vulkan
   specification, while allocation size is retained separately for bounds checking.
@@ -339,9 +344,29 @@ The implementation is based on the following primary specifications and source a
 
 - [Wayland server API](https://wayland.freedesktop.org/docs/html/apc.html), [wire/XML rules](https://wayland.freedesktop.org/docs/book/Message_XML.html), and [core protocol](https://wayland.freedesktop.org/docs/html/apa.html) define transport/resource and core object behavior.
 - [xdg-shell](https://wayland.app/protocols/xdg-shell), [xdg-decoration](https://wayland.app/protocols/xdg-decoration-unstable-v1), [xdg-toplevel-icon](https://wayland.app/protocols/xdg-toplevel-icon-v1), [xdg-activation](https://wayland.app/protocols/xdg-activation-v1), [session-lock](https://wayland.app/protocols/ext-session-lock-v1), [cursor-shape](https://wayland.app/protocols/cursor-shape-v1), [linux-dmabuf](https://wayland.app/protocols/linux-dmabuf-v1), and [explicit synchronization](https://wayland.app/protocols/linux-explicit-synchronization-unstable-v1) define the implemented extension contracts.
+- The Linux kernel [DMA-BUF synchronization documentation](https://docs.kernel.org/driver-api/dma-buf.html) defines reservation-fence export as a sync file for explicit APIs such as Vulkan.
 - [DRM KMS documentation](https://docs.kernel.org/gpu/drm-kms.html) and the official libdrm [`xf86drmMode.h`](https://cgit.freedesktop.org/drm/libdrm/tree/xf86drmMode.h) define atomic presentation and exact ABI layouts. The source audit caught the legacy coordinate fields that precede `possible_crtcs` in `drmModePlane`.
 - The [Vulkan explicit DRM modifier structure](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageDrmFormatModifierExplicitCreateInfoEXT.html) requires each explicit plane layout's `size` to be zero.
 - wgpu commit `d99c241a3b9dcc0f6674d990d007d79e94d39862` was inspected for DMA-BUF import capability and ownership invariants; Flutter commit `51fd9afadf309ba5337320bd3653f5345c156cb9` was inspected for sync-FD ownership and frame-slot reuse. Those projects are references only; no framework code or abstraction was copied.
+
+### DMA-BUF acquire-synchronization audit
+
+The concern was diagonal, triangle-shaped corruption during aggressive interactive resize. KMS frame
+eligibility already follows compositor Vulkan completion, and scanout slots remain pinned through
+page-flip retirement. The missing ordering was earlier: commits without the legacy explicit-sync
+extension entered Vulkan without waiting for the client producer recorded in the DMA-BUF reservation
+object. That allowed a retained-texture copy to observe a partially rendered client frame.
+
+The `linux-dmabuf` contract was checked for its default implicit synchronization rule and the kernel
+DMA-BUF contract for `DMA_BUF_IOCTL_EXPORT_SYNC_FILE`. wgpu's Vulkan DMA-BUF import was inspected to
+confirm that image-memory import does not itself wait for a producer, while Flutter's Vulkan sync-FD
+path was inspected for temporary binary-semaphore import and successful-import FD ownership. The
+Telorgon decision is to prefer a revision-scoped protocol acquire fence and otherwise export the
+single supported plane's implicit write fences for a read operation. Both sources feed the existing
+one-shot Vulkan semaphore wait. Export failure rejects publication rather than presenting an image
+whose producer completion is unknown. The ABI layout is compile-time checked, and the full Wayland
+feature graph is compile-checked for both supported Linux architectures; hardware resize remains a
+manual qualification step. No reference source was copied.
 
 ### Direct retained-composition audit
 

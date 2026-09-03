@@ -1264,13 +1264,19 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             )?;
                         }
                         let image = wayland.read_dma_buf(attachment.buffer).map_err(app_error)?;
-                        let acquire = wayland.take_acquire_fence(surface, snapshot.revision);
+                        // linux-dmabuf defaults to implicit synchronization. Preserve an explicit
+                        // protocol fence when present; otherwise snapshot the buffer's producer
+                        // fences so Vulkan cannot sample a partially rendered client frame.
+                        let acquire = match wayland.take_acquire_fence(surface, snapshot.revision) {
+                            Some(explicit) => explicit,
+                            None => image.export_implicit_read_sync_file().map_err(app_error)?,
+                        };
                         let queued = desktop_renderer.queue_dma_buf(DmaBufPublication {
                             surface,
                             revision: snapshot.revision,
                             buffer: attachment.buffer,
                             image,
-                            acquire,
+                            acquire: Some(acquire),
                             buffer_scale: snapshot.buffer_scale,
                             buffer_transform: snapshot.buffer_transform,
                             viewport,

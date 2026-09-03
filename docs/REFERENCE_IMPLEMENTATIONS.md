@@ -503,8 +503,8 @@ failure cases, and comparison points for independently written contracts.
 
 Concern:
 Linux DMA-BUF format/modifier negotiation, exact-use capability checks, importing owning memory and
-sync FDs, and preserving a narrow profile that can be compile-verified before Linux hardware is
-available.
+sync FDs, bridging implicit reservation fences into an explicit Vulkan wait, and preserving a narrow
+profile that can be compile-verified before Linux hardware is available.
 
 Reference source, revision, and symbols reviewed:
 
@@ -520,34 +520,43 @@ Official contracts cross-checked:
 Khronos Vulkan [`VK_EXT_image_drm_format_modifier`](https://registry.khronos.org/vulkan/specs/latest/man/html/VK_EXT_image_drm_format_modifier.html),
 [`VkPhysicalDeviceImageDrmFormatModifierInfoEXT`](https://registry.khronos.org/vulkan/specs/latest/man/html/VkPhysicalDeviceImageDrmFormatModifierInfoEXT.html),
 [`VkImportMemoryFdInfoKHR`](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImportMemoryFdInfoKHR.html),
-and [`VkImportSemaphoreFdInfoKHR`](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImportSemaphoreFdInfoKHR.html).
+and [`VkImportSemaphoreFdInfoKHR`](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImportSemaphoreFdInfoKHR.html);
+Wayland [`linux-dmabuf`](https://wayland.app/protocols/linux-dmabuf-v1) and
+[`linux-explicit-synchronization`](https://wayland.app/protocols/linux-explicit-synchronization-unstable-v1);
+and the Linux kernel [DMA-BUF synchronization API](https://docs.kernel.org/driver-api/dma-buf.html).
 
 Invariants extracted:
 Negotiation returns exact DRM-fourcc/modifier tuples and is followed by an image-format query for the
 actual usage; import repeats those checks rather than trusting a stale advertised record; only a
 successful Vulkan memory/semaphore import consumes the respective FD; sync-FD semaphore imports are
-temporary; and an exportable tuple must be selected when a test producer and consumer share the
-same fixture.
+temporary; absence of a protocol acquire fence does not prove that the producer is finished because
+`linux-dmabuf` defaults to implicit synchronization; implicit writer fences are exported for a read
+operation and enter the same Vulkan semaphore wait as an explicit protocol fence; and an exportable
+tuple must be selected when a test producer and consumer share the same fixture.
 
 Failure and recovery cases extracted:
 Unsupported modifiers or usage, invalid modifier sentinels, plane-count/layout disagreement,
 out-of-bounds damage, no compatible memory type, Vulkan allocation/import failure before FD
-consumption, and repeated release export.
+consumption, implicit-fence export failure, and repeated release export.
 
 Approaches rejected and why:
 Assuming `DRM_FORMAT_MOD_LINEAR` bypasses real producer/consumer negotiation; advertising every
 enumerated modifier without the secondary external-image query can return unusable tuples; treating
 all-ones as Linux's invalid modifier sentinel encodes the kernel ABI incorrectly; and exposing
 multi-plane/YUV records before descriptor conversion and per-plane binding exist would make a false
-capability claim.
+capability claim. Treating a missing protocol acquire fence as immediate availability would race
+Vulkan sampling against the client's implicit DMA-BUF producer.
 
 Telorgon-specific decision and tests:
 The hosted Linux device exposes deterministic single-memory-plane RGBA/BGRA capability records for
 an exact requested usage and retains import/export/dedicated-only flags and maximum extent. Portable
 metadata/release-state tests cover invalid sentinels, plane indices, layout and damage failures, plus
 one-shot export. A Linux-only owning-FD drop test and the negotiated E8 hardware fixture compile for
-`x86_64-unknown-linux-gnu`; the latter remains deliberately unexecuted until Linux hardware is
-available. No reference source was copied.
+`x86_64-unknown-linux-gnu`. The managed host now prefers the revision-scoped explicit protocol fence
+and otherwise exports the single supported DMA-BUF plane's reservation writer fences with
+`DMA_BUF_IOCTL_EXPORT_SYNC_FILE(DMA_BUF_SYNC_READ)`. Its UAPI record size is asserted at compile time,
+and the full feature graph compiles for x86-64 and AArch64 Linux; the hardware fixture remains
+deliberately unexecuted until Linux hardware is available. No reference source was copied.
 
 ### 6.10 Per-view environment read publication audit
 

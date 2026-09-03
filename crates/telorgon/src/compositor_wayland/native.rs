@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::{c_long, c_void};
 use std::fmt;
 use std::io::Read;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::FileExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
@@ -230,6 +230,43 @@ pub struct DmaBufFormat {
 pub struct DmaBufImage {
     pub descriptor: crate::compositor_wayland::DmaBufDescriptor,
     pub planes: Vec<OwnedFd>,
+}
+
+impl DmaBufImage {
+    /// Snapshots the producer write fences carried by this DMA-BUF for a Vulkan read submission.
+    ///
+    /// Linux-DMA-BUF uses implicit synchronization unless a protocol extension supplies an
+    /// explicit acquire fence. Vulkan itself is explicit-only, so the kernel reservation fences
+    /// must be exported as a sync file before importing the image into a Vulkan command stream.
+    pub fn export_implicit_read_sync_file(&self) -> Result<OwnedFd, NativeCompositorError> {
+        let plane = self
+            .planes
+            .first()
+            .ok_or_else(|| NativeCompositorError::new("DMA-BUF image has no plane file"))?;
+        let mut export = crate::platform_linux::ffi::dma_buf_export_sync_file {
+            flags: crate::platform_linux::ffi::DMA_BUF_SYNC_READ,
+            fd: -1,
+        };
+        let result = unsafe {
+            crate::platform_linux::ffi::ioctl(
+                plane.as_raw_fd(),
+                crate::platform_linux::ffi::DMA_BUF_IOCTL_EXPORT_SYNC_FILE,
+                std::ptr::from_mut(&mut export),
+            )
+        };
+        if result != 0 {
+            return Err(NativeCompositorError::new(format!(
+                "failed to export the DMA-BUF implicit read fence: {}",
+                std::io::Error::last_os_error()
+            )));
+        }
+        if export.fd < 0 {
+            return Err(NativeCompositorError::new(
+                "DMA-BUF implicit read-fence export returned no sync file",
+            ));
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(export.fd) })
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
