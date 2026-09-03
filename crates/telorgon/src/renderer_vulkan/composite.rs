@@ -240,6 +240,7 @@ impl VulkanDevice {
                 frame.core.command_buffer,
                 frame.core.staging.raw(),
                 &placement.staged,
+                self.inner.driver_workarounds,
             );
             let commit = &mut commits[placement.scene_index];
             commit.byte_count = commit

@@ -16,6 +16,17 @@ pub struct VulkanDiagnostics {
 }
 
 impl VulkanDiagnostics {
+    pub(crate) fn record_info(&self, message: String) {
+        self.messages
+            .lock()
+            .expect("diagnostic lock poisoned")
+            .push(VulkanDebugMessage {
+                severity: vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                kind: vk::DebugUtilsMessageTypeFlagsEXT::GENERAL,
+                message,
+            });
+    }
+
     pub fn messages(&self) -> Vec<VulkanDebugMessage> {
         self.messages
             .lock()

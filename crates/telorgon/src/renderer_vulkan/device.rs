@@ -7,6 +7,7 @@ use crate::render::{RenderError, RenderErrorKind, RenderResult};
 use ash::vk;
 
 use crate::renderer_vulkan::descriptor::DescriptorLayouts;
+use crate::renderer_vulkan::driver_workarounds::DriverWorkarounds;
 use crate::renderer_vulkan::error::{internal, unsupported, vk_error};
 use crate::renderer_vulkan::frame::{FrameSlots, VulkanRecordingFrame};
 use crate::renderer_vulkan::interop::PresentationRequirement;
@@ -76,6 +77,7 @@ pub(crate) struct DeviceInner {
     pub layouts: ManuallyDrop<DescriptorLayouts>,
     pub pipelines: ManuallyDrop<Mutex<PipelineCache>>,
     pub capabilities: VulkanCapabilities,
+    pub(crate) driver_workarounds: DriverWorkarounds,
     pub(crate) device_local_budget_bytes: Option<u64>,
     pub(crate) device_local_reserved_bytes: AtomicU64,
     pub(crate) next_frame_id: AtomicU64,
@@ -116,8 +118,10 @@ impl VulkanDevice {
                 )
             })?;
         let mut id_properties = vk::PhysicalDeviceIDProperties::default();
-        let mut properties2 =
-            vk::PhysicalDeviceProperties2::default().push_next(&mut id_properties);
+        let mut driver_properties = vk::PhysicalDeviceDriverProperties::default();
+        let mut properties2 = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut id_properties)
+            .push_next(&mut driver_properties);
         unsafe {
             instance
                 .inner
@@ -536,6 +540,7 @@ impl VulkanDevice {
             memory,
             sampler,
             capabilities,
+            driver_workarounds: DriverWorkarounds::for_driver(driver_properties.driver_id),
             device_local_budget_bytes: config.device_local_budget_bytes,
             device_local_reserved_bytes: AtomicU64::new(0),
             next_frame_id: AtomicU64::new(1),
@@ -590,6 +595,12 @@ impl VulkanDevice {
                 u8::from(inner.capabilities.present_wait)
             );
         }
+        inner.driver_workarounds.report(
+            inner.instance.diagnostics(),
+            &driver_properties,
+            &inner.capabilities.adapter_name,
+            inner.capabilities.driver_version,
+        );
         Ok(Self {
             frames: Some(frames),
             inner,

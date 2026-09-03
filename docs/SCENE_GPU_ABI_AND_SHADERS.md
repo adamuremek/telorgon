@@ -606,6 +606,12 @@ tracking is acceptable for the first scene buffers; image mip/layer and atlas up
 the range/subresource precision required to avoid conflicting use. Same-queue work across submissions
 still requires correct memory dependencies where a resource changes use.
 
+The implemented Vulkan renderer has one driver-scoped exception: V3DV uses `SHADER_READ` for the
+destination access of retained storage-buffer upload completion. It includes storage reads while
+avoiding a driver-side access-mask truncation. Other drivers, shader stages, ranges, pre-upload
+dependencies, and image barriers are unchanged. See the
+[V3DV workaround audit and acceptance procedure](V3DV_GEOMETRY_UPLOAD_WORKAROUND.md).
+
 ## 12. Offline shader bundle
 
 GLSL 450 is the authoritative source language only for the first Vulkan bundle. It is not a promised

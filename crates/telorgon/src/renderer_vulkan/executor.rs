@@ -11,6 +11,7 @@ use crate::render::{
 use ash::vk::{self, Handle};
 
 use crate::renderer_vulkan::buffer::AllocatedBuffer;
+use crate::renderer_vulkan::driver_workarounds::DriverWorkarounds;
 use crate::renderer_vulkan::error::{invalid_scene, unsupported};
 use crate::renderer_vulkan::external_image::{
     ExternalImageInner, VulkanExternalAcquire, VulkanExternalRelease,
@@ -23,7 +24,8 @@ use crate::renderer_vulkan::frame::{
 };
 use crate::renderer_vulkan::scene::{DrawBatch, validate_draw_order, validate_texture_count};
 use crate::renderer_vulkan::sync::{
-    color_to_final, fragment_sampled_state, image_transition, target_to_color,
+    after_storage_upload, before_storage_upload, color_to_final, fragment_sampled_state,
+    image_transition, target_to_color,
 };
 use crate::renderer_vulkan::upload::StagedUploads;
 use crate::renderer_vulkan::{VulkanDevice, VulkanFrameContext, VulkanScene, VulkanTarget};
@@ -154,6 +156,7 @@ impl RenderBackend for VulkanDevice {
                 frame.core.command_buffer,
                 frame.core.staging.raw(),
                 &staged,
+                self.inner.driver_workarounds,
             )
         };
         frame.core.images.extend(staged.retained_images());
@@ -941,6 +944,7 @@ pub(crate) fn record_uploads(
     command_buffer: vk::CommandBuffer,
     staging: vk::Buffer,
     uploads: &StagedUploads,
+    workarounds: DriverWorkarounds,
 ) -> (u32, u32) {
     if uploads.destinations.is_empty() && uploads.image_destinations.is_empty() {
         return (0, 0);
@@ -949,23 +953,7 @@ pub(crate) fn record_uploads(
         .destinations
         .iter()
         .map(|destination| {
-            vk::BufferMemoryBarrier2::default()
-                .src_stage_mask(if destination.previously_initialized {
-                    vk::PipelineStageFlags2::VERTEX_SHADER
-                        | vk::PipelineStageFlags2::FRAGMENT_SHADER
-                } else {
-                    vk::PipelineStageFlags2::NONE
-                })
-                .src_access_mask(if destination.previously_initialized {
-                    vk::AccessFlags2::SHADER_STORAGE_READ
-                } else {
-                    vk::AccessFlags2::NONE
-                })
-                .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-                .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .buffer(destination.buffer.raw())
-                .offset(0)
-                .size(vk::WHOLE_SIZE)
+            before_storage_upload(destination.buffer.raw(), destination.previously_initialized)
         })
         .collect::<Vec<_>>();
     let mut before_images = uploads
@@ -1066,19 +1054,7 @@ pub(crate) fn record_uploads(
     let after_buffers = uploads
         .destinations
         .iter()
-        .map(|destination| {
-            vk::BufferMemoryBarrier2::default()
-                .src_stage_mask(vk::PipelineStageFlags2::COPY)
-                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                .dst_stage_mask(
-                    vk::PipelineStageFlags2::VERTEX_SHADER
-                        | vk::PipelineStageFlags2::FRAGMENT_SHADER,
-                )
-                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ)
-                .buffer(destination.buffer.raw())
-                .offset(0)
-                .size(vk::WHOLE_SIZE)
-        })
+        .map(|destination| after_storage_upload(destination.buffer.raw(), workarounds))
         .collect::<Vec<_>>();
     let mut after_images = uploads
         .image_destinations

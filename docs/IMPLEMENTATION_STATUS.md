@@ -96,6 +96,12 @@ production-qualified.
 > qualification remain incomplete. See
 > [WAYLAND_COMPOSITOR_ARCHITECTURE.md](WAYLAND_COMPOSITOR_ARCHITECTURE.md).
 
+> V3DV compatibility: owned and hosted Vulkan devices identify the driver and use a V3DV-only
+> storage-buffer upload-completion workaround; all other drivers retain the precise default mask.
+> CPU regression coverage does not establish that the reported Raspberry Pi diagonal resize artifact
+> is resolved. The before/after Pi comparison and cross-driver hardware qualification remain user-run.
+> See [V3DV geometry-upload workaround](V3DV_GEOMETRY_UPLOAD_WORKAROUND.md).
+
 ## Current classification
 
 | Area | Status | Current evidence and boundary |

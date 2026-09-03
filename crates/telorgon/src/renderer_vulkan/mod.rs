@@ -8,6 +8,7 @@ mod config;
 mod descriptor;
 mod device;
 mod diagnostics;
+mod driver_workarounds;
 mod entry;
 mod error;
 mod executor;

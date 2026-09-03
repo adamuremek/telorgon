@@ -17,6 +17,7 @@ use crate::renderer_vulkan::descriptor::{
     DescriptorLayouts, FrameDescriptorSets, allocate_frame_sets,
 };
 use crate::renderer_vulkan::device::{DeviceInner, DeviceOwnership, NEXT_DEVICE_ID};
+use crate::renderer_vulkan::driver_workarounds::DriverWorkarounds;
 use crate::renderer_vulkan::error::{unsupported, vk_error};
 use crate::renderer_vulkan::external_image::{
     ExternalImageInner, HostedExternalImageUse, HostedExternalSemaphoreSignal,
@@ -567,13 +568,17 @@ impl VulkanDevice {
                 return Err(vk_error("failed to create hosted Vulkan sampler", result));
             }
         };
-        let properties = unsafe {
+        let mut driver_properties = vk::PhysicalDeviceDriverProperties::default();
+        let mut properties2 =
+            vk::PhysicalDeviceProperties2::default().push_next(&mut driver_properties);
+        unsafe {
             descriptor
                 .instance
                 .inner
                 .raw
-                .get_physical_device_properties(descriptor.physical_device)
+                .get_physical_device_properties2(descriptor.physical_device, &mut properties2)
         };
+        let properties = properties2.properties;
         let adapter_name = unsafe { std::ffi::CStr::from_ptr(properties.device_name.as_ptr()) }
             .to_string_lossy()
             .into_owned();
@@ -631,6 +636,7 @@ impl VulkanDevice {
                 profiler_timestamp_period_ns: properties.limits.timestamp_period,
             },
             device_local_budget_bytes: config.device_local_budget_bytes,
+            driver_workarounds: DriverWorkarounds::for_driver(driver_properties.driver_id),
             device_local_reserved_bytes: AtomicU64::new(0),
             next_frame_id: AtomicU64::new(1),
             next_completion_value: AtomicU64::new(1),
@@ -647,6 +653,12 @@ impl VulkanDevice {
             owned_dma_buf_imports: false,
             hosted_extensions: descriptor.extensions,
         });
+        inner.driver_workarounds.report(
+            inner.instance.diagnostics(),
+            &driver_properties,
+            &inner.capabilities.adapter_name,
+            inner.capabilities.driver_version,
+        );
         Ok(Self {
             frames: None,
             inner,
