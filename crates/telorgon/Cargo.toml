@@ -71,6 +71,9 @@ sha2 = { workspace = true, optional = true }
 softbuffer = { workspace = true, optional = true }
 telorgon-macros.workspace = true
 thiserror.workspace = true
+# fontdb enables only tinyvec/alloc. Enable std for tinyvec 1.13.0's vec! usage;
+# Telorgon already requires std, and this must propagate to downstream builds.
+tinyvec.workspace = true
 tokio = { workspace = true, optional = true }
 toml.workspace = true
 unicode-segmentation.workspace = true
