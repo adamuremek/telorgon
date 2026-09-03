@@ -89,6 +89,27 @@ pub(super) fn window_content_offset(window: &ClientWindow, config: &LinuxDesktop
     }
 }
 
+pub(super) fn window_content_rect(
+    window: &ClientWindow,
+    position: PointI,
+    config: &LinuxDesktopConfig,
+) -> RectI {
+    content_rect(
+        position,
+        window_content_offset(window, config),
+        window.requested_size,
+    )
+}
+
+fn content_rect(position: PointI, offset: PointI, size: SizeI) -> RectI {
+    RectI {
+        x: position.x.saturating_add(offset.x),
+        y: position.y.saturating_add(offset.y),
+        width: size.width,
+        height: size.height,
+    }
+}
+
 pub(super) fn legacy_window_outer(window: &ClientWindow, config: &LinuxDesktopConfig) -> SizeI {
     SizeI {
         width: window.requested_size.width + config.window_border * 2,
@@ -427,6 +448,26 @@ mod tests {
         assert_eq!(
             surface_local_to_target(local, origin, source, target),
             output
+        );
+    }
+
+    #[test]
+    fn compositor_content_clip_is_independent_of_client_buffer_margins() {
+        assert_eq!(
+            content_rect(
+                PointI { x: 100, y: 80 },
+                PointI { x: 4, y: 28 },
+                SizeI {
+                    width: 900,
+                    height: 600,
+                },
+            ),
+            RectI {
+                x: 104,
+                y: 108,
+                width: 900,
+                height: 600,
+            }
         );
     }
 

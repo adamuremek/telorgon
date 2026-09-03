@@ -183,6 +183,7 @@ pub(super) fn apply_surface_publication(
     display: &Display,
     wayland: &mut NativeCompositor<'_>,
     windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
     stacking_order: &mut Vec<WaylandSurfaceId>,
     next_window_offset: &mut i32,
     work_area: RectI,
@@ -271,14 +272,15 @@ pub(super) fn apply_surface_publication(
     );
     let mut reconciled_position = position;
     let mut resize_anchor = previous_window.and_then(|window| window.resize_anchor);
-    let resize_final = previous_window.and_then(|window| window.resize_final);
-    let final_resize_acked = role == SurfaceRole::XdgToplevel
-        && resize_final.is_some_and(|final_resize| {
-            final_resize.was_committed_with(snapshot.acknowledged_configure)
+    let mut retained_resize_final = previous_window.and_then(|window| window.resize_final);
+    let final_resize_committed = role == SurfaceRole::XdgToplevel
+        && retained_resize_final.as_mut().is_some_and(|final_resize| {
+            final_resize.observe_commit(snapshot.acknowledged_configure, committed_window_extent)
         });
-    let mut retained_resize_final = resize_final;
-    if final_resize_acked && let Some(anchor) = resize_anchor.take() {
-        reconciled_position = anchor.reconcile_position(position, committed_window_extent);
+    if final_resize_committed {
+        if let Some(anchor) = resize_anchor.take() {
+            reconciled_position = anchor.reconcile_position(position, committed_window_extent);
+        }
         requested_size = committed_window_extent;
         retained_resize_final = None;
     }
@@ -383,7 +385,15 @@ pub(super) fn apply_surface_publication(
         stacking_order.push(surface);
     }
     *pointer_scene_dirty |= pointer_geometry_changed;
-    if session_locked && role == SurfaceRole::SessionLock {
+    if is_new && role == SurfaceRole::XdgToplevel && !session_locked {
+        focus_toplevel(
+            display,
+            wayland,
+            windows,
+            configure_scheduler,
+            Some(surface),
+        )?;
+    } else if session_locked && role == SurfaceRole::SessionLock {
         wayland
             .set_keyboard_focus(1, Some(surface), display.next_serial())
             .map_err(app_error)?;
@@ -396,6 +406,7 @@ pub(super) fn finish_shm_copy(
     display: &Display,
     wayland: &mut NativeCompositor<'_>,
     windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
     stacking_order: &mut Vec<WaylandSurfaceId>,
     next_window_offset: &mut i32,
     work_area: RectI,
@@ -430,6 +441,7 @@ pub(super) fn finish_shm_copy(
             display,
             wayland,
             windows,
+            configure_scheduler,
             stacking_order,
             next_window_offset,
             work_area,

@@ -171,8 +171,9 @@ path that consumed that revision.
 `telorgon-platform-linux` owns narrow bindings to libseat, libinput, and xkbcommon. The runtime opens
 the requested seat, obtains the DRM FD through libseat, publishes one `wl_seat`, creates an
 NUL-terminated XKB keymap in a memfd, and delivers pointer motion/focus/buttons/axes plus keyboard
-focus/keys/modifiers and slot-stable touch down/motion/up/frame/cancel streams. Pointer and touch
-coordinates are transformed into surface-local coordinates.
+focus/keys/modifiers and slot-stable touch down/motion/up/frame/cancel streams. Newly mapped normal
+toplevels receive keyboard focus, and keyboard delivery follows that focus independently from
+pointer hover. Pointer and touch coordinates are transformed into surface-local coordinates.
 
 Relative-pointer and pointer-constraints v1 are native-dispatched. A constraint is unique per
 pointer/surface pair, follows pointer focus, implements persistent and one-shot lifetimes, and
@@ -243,7 +244,10 @@ The operational managed path is entirely Telorgon-rendered:
    target rectangle. Source pixels and placement geometry remain independent, so all eight resize
    edges track the pointer without waiting for a client commit. Pointer coordinates are mapped back
    into the committed surface coordinate space while that preview is active. Commit-latched XDG
-   window geometry keeps client-side shadow margins out of resize-size and fixed-edge calculations.
+   window geometry maps the source buffer while a stable compositor content-slot clip keeps
+   client-side shadow margins out of resize-size, hit-test, and fixed-edge calculations. A final
+   configure acknowledgement is retained across commits, but it cannot retire the resize
+   transaction until the client publishes the configured window extent.
 4. Backend selection happens once in the desktop renderer assembly. The selected implementation
    owns its scene map and output state for the remainder of the run; neither backend calls the
    other. Vulkan applies deltas to `VulkanScene`, stages changed rows and per-placement uniforms,

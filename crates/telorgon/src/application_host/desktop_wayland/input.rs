@@ -437,15 +437,14 @@ pub(super) fn hit_test_surface(
         .rev()
         .filter_map(|surface| windows.get(surface).map(|window| (*surface, window)))
         .find(|(_, window)| {
-            let origin = window_content_origin(window, config);
-            let target = window_content_target_extent(window);
+            let target = window_content_rect(window, window.position, config);
             window.role != SurfaceRole::Cursor
                 && !window.minimized
                 && (window.role == SurfaceRole::SessionLock) == session_locked
-                && position.x >= origin.x as f32
-                && position.y >= origin.y as f32
-                && position.x < (origin.x + target.width) as f32
-                && position.y < (origin.y + target.height) as f32
+                && position.x >= target.x as f32
+                && position.y >= target.y as f32
+                && position.x < target.right() as f32
+                && position.y < target.bottom() as f32
         })
         .map(|(surface, _)| surface)
 }

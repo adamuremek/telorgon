@@ -879,28 +879,38 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             KeyDirection::Up
                         };
                         keyboard.update_key(keycode, direction);
-                        if pointer_focus.is_some() {
+                        let keyboard_focused = wayland
+                            .core()
+                            .seats
+                            .get(&1)
+                            .and_then(|seat| seat.keyboard_focus)
+                            .is_some();
+                        if keyboard_focused {
                             let serial = display.next_serial();
-                            let _ = wayland.keyboard_key(
-                                1,
-                                time,
-                                keycode,
-                                if pressed {
-                                    WaylandButtonState::Pressed
-                                } else {
-                                    WaylandButtonState::Released
-                                },
-                                serial,
-                            );
+                            wayland
+                                .keyboard_key(
+                                    1,
+                                    time,
+                                    keycode,
+                                    if pressed {
+                                        WaylandButtonState::Pressed
+                                    } else {
+                                        WaylandButtonState::Released
+                                    },
+                                    serial,
+                                )
+                                .map_err(app_error)?;
                             let modifiers = keyboard.modifiers();
-                            let _ = wayland.keyboard_modifiers(
-                                1,
-                                serial,
-                                modifiers.depressed,
-                                modifiers.latched,
-                                modifiers.locked,
-                                modifiers.group,
-                            );
+                            wayland
+                                .keyboard_modifiers(
+                                    1,
+                                    serial,
+                                    modifiers.depressed,
+                                    modifiers.latched,
+                                    modifiers.locked,
+                                    modifiers.group,
+                                )
+                                .map_err(app_error)?;
                         }
                     }
                     LinuxInputEventKind::PointerAxis {
@@ -1092,6 +1102,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 &display,
                 &mut wayland,
                 &mut windows,
+                &mut configure_scheduler,
                 &mut stacking_order,
                 &mut next_window_offset,
                 work_area,
@@ -1274,6 +1285,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             &display,
                             &mut wayland,
                             &mut windows,
+                            &mut configure_scheduler,
                             &mut stacking_order,
                             &mut next_window_offset,
                             work_area,
@@ -1430,6 +1442,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         &display,
                         &mut wayland,
                         &mut windows,
+                        &mut configure_scheduler,
                         &mut stacking_order,
                         &mut next_window_offset,
                         work_area,

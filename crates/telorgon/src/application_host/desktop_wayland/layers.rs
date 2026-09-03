@@ -460,9 +460,12 @@ pub(super) fn prepare_desktop_layers(
         }
         // Keep the last committed buffer attached to the compositor-controlled window rectangle.
         // The retained scene backends scale `window.size` into this target while the client draws
-        // and commits its next size, so chrome and content move together with the pointer.
+        // and commits its next size, so chrome and content move together with the pointer. Clip the
+        // mapped buffer to the stable content slot; XDG window-geometry margins are source mapping,
+        // not extra compositor window area.
         let preview_target = surface_target_rect(window, position, config);
-        let preview_clip = (window.role == SurfaceRole::XdgToplevel).then_some(preview_target);
+        let preview_clip = (window.role == SurfaceRole::XdgToplevel)
+            .then(|| window_content_rect(window, position, config));
         layers.push(DesktopLayer::image(
             DesktopLayerKey::Surface(surface.get()),
             DesktopSceneKey::Surface(surface.get()),

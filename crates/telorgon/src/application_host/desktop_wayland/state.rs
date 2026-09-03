@@ -27,23 +27,43 @@ pub(super) struct ConfigureScheduler {
 pub(super) struct FinalResizeConfigure {
     pub size: SizeI,
     pub serial: Option<u32>,
+    acknowledged: bool,
 }
 
 impl FinalResizeConfigure {
     pub fn pending(size: SizeI) -> Self {
-        Self { size, serial: None }
+        Self {
+            size,
+            serial: None,
+            acknowledged: false,
+        }
     }
 
     pub fn record_sent(&mut self, size: SizeI, serial: u32) {
-        if self.size == size {
+        if self.size == size && self.serial.is_none() {
             self.serial = Some(serial);
         }
     }
 
-    pub fn was_committed_with(self, acknowledged: Option<XdgConfigure>) -> bool {
-        self.serial
+    /// Observes one surface commit and returns true only once the client has both acknowledged the
+    /// terminal configure and published content with its configured window extent.
+    ///
+    /// Some clients can acknowledge the latest configure while a previously rendered buffer is
+    /// still being committed. Remembering the acknowledgement lets the following matching commit
+    /// complete the transaction without allowing that stale buffer to replace compositor geometry.
+    pub fn observe_commit(
+        &mut self,
+        acknowledged: Option<XdgConfigure>,
+        committed_size: SizeI,
+    ) -> bool {
+        self.acknowledged |= self
+            .serial
             .zip(acknowledged)
-            .is_some_and(|(serial, configure)| serial_was_superseded_by(serial, configure.serial))
+            .is_some_and(|(serial, configure)| {
+                serial_was_superseded_by(serial, configure.serial)
+                    && configure.size == Some(self.size)
+            });
+        self.acknowledged && committed_size == self.size
     }
 }
 
@@ -246,7 +266,7 @@ mod tests {
             width: 801,
             height: 603,
         };
-        assert!(!FinalResizeConfigure::pending(size).was_committed_with(None));
+        assert!(!FinalResizeConfigure::pending(size).observe_commit(None, size));
     }
 
     #[test]
@@ -267,9 +287,12 @@ mod tests {
         let mut final_resize = FinalResizeConfigure::pending(size);
         final_resize.record_sent(size, 4);
 
-        assert!(!final_resize.was_committed_with(Some(configure(3))));
-        assert!(final_resize.was_committed_with(Some(configure(4))));
-        assert!(final_resize.was_committed_with(Some(configure(5))));
+        assert!(!final_resize.observe_commit(Some(configure(3)), size));
+        assert!(final_resize.observe_commit(Some(configure(4)), size));
+
+        let mut newer = FinalResizeConfigure::pending(size);
+        newer.record_sent(size, 4);
+        assert!(newer.observe_commit(Some(configure(5)), size));
     }
 
     #[test]
@@ -290,8 +313,61 @@ mod tests {
         let mut final_resize = FinalResizeConfigure::pending(size);
         final_resize.record_sent(size, u32::MAX);
 
-        assert!(final_resize.was_committed_with(Some(configure(1))));
-        assert!(!final_resize.was_committed_with(Some(configure(u32::MAX - 1))));
+        assert!(final_resize.observe_commit(Some(configure(1)), size));
+
+        let mut older = FinalResizeConfigure::pending(size);
+        older.record_sent(size, u32::MAX);
+        assert!(!older.observe_commit(Some(configure(u32::MAX - 1)), size));
+    }
+
+    #[test]
+    fn stale_commit_cannot_replace_the_terminal_resize_geometry() {
+        use crate::compositor_wayland::{DecorationMode, ToplevelState};
+
+        let final_size = SizeI {
+            width: 960,
+            height: 640,
+        };
+        let stale_size = SizeI {
+            width: 720,
+            height: 640,
+        };
+        let configure = XdgConfigure {
+            serial: 12,
+            size: Some(final_size),
+            bounds: None,
+            states: ToplevelState::default(),
+            decoration: DecorationMode::ServerSide,
+        };
+        let mut final_resize = FinalResizeConfigure::pending(final_size);
+        final_resize.record_sent(final_size, configure.serial);
+
+        assert!(!final_resize.observe_commit(Some(configure), stale_size));
+        assert!(final_resize.observe_commit(None, final_size));
+    }
+
+    #[test]
+    fn newer_configure_for_another_size_cannot_complete_the_resize() {
+        use crate::compositor_wayland::{DecorationMode, ToplevelState};
+
+        let final_size = SizeI {
+            width: 960,
+            height: 640,
+        };
+        let configure = XdgConfigure {
+            serial: 13,
+            size: Some(SizeI {
+                width: 800,
+                height: 600,
+            }),
+            bounds: None,
+            states: ToplevelState::default(),
+            decoration: DecorationMode::ServerSide,
+        };
+        let mut final_resize = FinalResizeConfigure::pending(final_size);
+        final_resize.record_sent(final_size, 12);
+
+        assert!(!final_resize.observe_commit(Some(configure), final_size));
     }
 
     #[test]
