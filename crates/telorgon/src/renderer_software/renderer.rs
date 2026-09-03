@@ -55,6 +55,13 @@ pub struct SoftwareFrameContext<'frame> {
     surface: &'frame mut SoftwareSurface,
 }
 
+#[cfg(target_os = "linux")]
+pub(crate) struct SoftwareCompositeLayer<'scene> {
+    pub scene: &'scene SoftwareScene,
+    pub target: RectI,
+    pub clip: Option<RectI>,
+}
+
 #[derive(Copy, Clone, Debug)]
 pub struct SoftwareTarget<'frame> {
     info: RenderTargetInfo,
@@ -270,6 +277,137 @@ impl RenderBackend for SoftwareRenderer {
     }
 }
 
+#[cfg(target_os = "linux")]
+impl SoftwareRenderer {
+    /// Composites independent retained scenes directly into one software framebuffer.
+    ///
+    /// The caller supplies back-to-front placement order and output-space damage. No intermediate
+    /// layer surfaces are allocated, so this is the software pipeline rather than a bridge used by
+    /// another renderer.
+    pub(crate) fn render_composite(
+        &self,
+        surface: &mut SoftwareSurface,
+        layers: &[SoftwareCompositeLayer<'_>],
+        extent: SizeI,
+        damage: Option<RectI>,
+        clear: ColorRgba8,
+    ) -> RenderResult<RenderStats> {
+        if extent.width <= 0 || extent.height <= 0 {
+            return Err(RenderError::new(
+                RenderErrorKind::InvalidTarget,
+                "software composite target extent must be positive",
+            ));
+        }
+        let output = RectI {
+            x: 0,
+            y: 0,
+            width: extent.width,
+            height: extent.height,
+        };
+        let resized = surface.ensure_framebuffer(extent);
+        let render_region = if resized {
+            output
+        } else {
+            damage.unwrap_or(output)
+        };
+        if !rect_contains(output, render_region) {
+            return Err(RenderError::new(
+                RenderErrorKind::InvalidTarget,
+                "software composite damage lies outside the output",
+            ));
+        }
+        surface.presented_damage = if render_region == output {
+            DamageRegion {
+                full: true,
+                rects: Vec::new(),
+                ..DamageRegion::default()
+            }
+        } else {
+            DamageRegion {
+                full: false,
+                rects: vec![rect_i_to_f(render_region)],
+                ..DamageRegion::default()
+            }
+        };
+        let width = extent.width as usize;
+        let height = extent.height as usize;
+        clear_region(
+            &mut surface.framebuffer_rgba8,
+            width,
+            height,
+            rect_i_to_f(render_region),
+            clear,
+            ColorSpace::Srgb,
+        );
+
+        let mut batches = 0_u32;
+        let mut epoch = 0_u64;
+        for layer in layers {
+            let expected = SizeI {
+                width: layer.scene.extent.width.round() as i32,
+                height: layer.scene.extent.height.round() as i32,
+            };
+            if expected.width != layer.target.width || expected.height != layer.target.height {
+                return Err(RenderError::new(
+                    RenderErrorKind::HostContract,
+                    "software desktop placement must match its retained scene extent",
+                ));
+            }
+            epoch = epoch.max(layer.scene.epoch);
+            let visible = intersect_rect_i(layer.target, render_region).and_then(|region| {
+                layer
+                    .clip
+                    .map_or(Some(region), |clip| intersect_rect_i(region, clip))
+            });
+            if let Some(visible) = visible {
+                let local = RectF {
+                    x: (visible.x - layer.target.x) as f32,
+                    y: (visible.y - layer.target.y) as f32,
+                    width: visible.width as f32,
+                    height: visible.height as f32,
+                };
+                let mut target = RasterTarget {
+                    pixels: &mut surface.framebuffer_rgba8,
+                    width,
+                    height,
+                    origin: crate::core::PointI {
+                        x: layer.target.x,
+                        y: layer.target.y,
+                    },
+                    blend_mode: BlendMode::Alpha,
+                    color_space: ColorSpace::Srgb,
+                };
+                layer.scene.draw_region(&mut target, local);
+                batches = batches.saturating_add(
+                    layer
+                        .scene
+                        .draw_order
+                        .iter()
+                        .enumerate()
+                        .filter(|(index, item)| {
+                            *index == 0 || layer.scene.draw_order[index - 1].batch != item.batch
+                        })
+                        .count() as u32,
+                );
+            }
+        }
+        Ok(RenderStats {
+            recorded: true,
+            epoch,
+            upload_bytes_recorded: 0,
+            buffer_copies: 0,
+            buffer_allocations: 0,
+            descriptor_writes: 0,
+            passes: 1,
+            barriers: 0,
+            batches,
+            draws: batches,
+            dispatches: 0,
+            damage_area: render_region.width as f32 * render_region.height as f32,
+        })
+    }
+}
+
 impl RenderReadback<SoftwareRenderer> for SoftwareReadback {
     type Pending = ReadbackImage;
 
@@ -343,7 +481,7 @@ impl SoftwareSurface {
         })
     }
 
-    fn ensure_framebuffer(&mut self, extent: SizeI) -> bool {
+    pub(crate) fn ensure_framebuffer(&mut self, extent: SizeI) -> bool {
         if self.framebuffer_extent == extent && !self.framebuffer_rgba8.is_empty() {
             return false;
         }
@@ -372,6 +510,11 @@ impl SoftwareTarget<'_> {
 impl SoftwareScene {
     pub fn background(&self) -> ColorRgba8 {
         self.background
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn discard_pending_damage(&mut self) {
+        self.pending_damage = DamageRegion::default();
     }
 
     fn rasterize_presented_damage(
@@ -416,9 +559,14 @@ impl SoftwareScene {
             pixels: &mut surface.framebuffer_rgba8,
             width,
             height,
+            origin: crate::core::PointI::default(),
             blend_mode: BlendMode::Alpha,
             color_space,
         };
+        self.draw_region(&mut target, region);
+    }
+
+    fn draw_region(&self, target: &mut RasterTarget<'_>, region: RectF) {
         for item in &self.draw_order {
             target.blend_mode = item.batch.blend;
             let item_clip = self
@@ -430,7 +578,7 @@ impl SoftwareScene {
                 PrimitiveKind::Box => {
                     if let Some(instance) = self.boxes.get(item.index as usize) {
                         draw_box(
-                            &mut target,
+                            target,
                             instance,
                             self.spatial_for(instance.spatial),
                             item_clip,
@@ -441,7 +589,7 @@ impl SoftwareScene {
                 PrimitiveKind::Glyph => {
                     if let Some(instance) = self.glyphs.get(item.index as usize) {
                         draw_glyph(
-                            &mut target,
+                            target,
                             instance,
                             self.spatial_for(instance.spatial),
                             item_clip,
@@ -456,7 +604,7 @@ impl SoftwareScene {
                         && let Some(image) = self.image_resources.get(&instance.image)
                     {
                         draw_image(
-                            &mut target,
+                            target,
                             instance,
                             self.spatial_for(instance.spatial),
                             item_clip,
@@ -470,7 +618,7 @@ impl SoftwareScene {
                         && let Some(material) = self.material_resources.get(&instance.material)
                     {
                         draw_material(
-                            &mut target,
+                            target,
                             instance,
                             self.spatial_for(instance.spatial),
                             item_clip,
@@ -492,6 +640,7 @@ struct RasterTarget<'a> {
     pixels: &'a mut [u8],
     width: usize,
     height: usize,
+    origin: crate::core::PointI,
     blend_mode: BlendMode,
     color_space: ColorSpace,
 }
@@ -514,7 +663,14 @@ impl RasterTarget<'_> {
         source_rgb: [f32; 3],
         source_alpha: f32,
     ) {
-        if x < 0 || y < 0 || (source_alpha <= 0.0 && self.blend_mode == BlendMode::Alpha) {
+        let x = x.saturating_add(self.origin.x);
+        let y = y.saturating_add(self.origin.y);
+        if x < 0
+            || y < 0
+            || x as usize >= self.width
+            || y as usize >= self.height
+            || (source_alpha <= 0.0 && self.blend_mode == BlendMode::Alpha)
+        {
             return;
         }
         let index = (y as usize * self.width + x as usize) * 4;
@@ -578,6 +734,20 @@ fn rect_contains(outer: RectI, inner: RectI) -> bool {
         && inner.y >= outer.y
         && inner.right() <= outer.right()
         && inner.bottom() <= outer.bottom()
+}
+
+#[cfg(target_os = "linux")]
+fn intersect_rect_i(left: RectI, right: RectI) -> Option<RectI> {
+    let x = left.x.max(right.x);
+    let y = left.y.max(right.y);
+    let right_edge = left.right().min(right.right());
+    let bottom = left.bottom().min(right.bottom());
+    (right_edge > x && bottom > y).then_some(RectI {
+        x,
+        y,
+        width: right_edge - x,
+        height: bottom - y,
+    })
 }
 
 fn rect_i_to_f(rect: RectI) -> RectF {
@@ -1281,6 +1451,7 @@ mod tests {
             pixels: &mut pixels,
             width: 3,
             height: 1,
+            origin: crate::core::PointI::default(),
             blend_mode: BlendMode::Alpha,
             color_space: ColorSpace::Srgb,
         };
@@ -1335,6 +1506,7 @@ mod tests {
             pixels: &mut pixels,
             width: 1,
             height: 1,
+            origin: crate::core::PointI::default(),
             blend_mode: BlendMode::Alpha,
             color_space: ColorSpace::Srgb,
         };
@@ -1481,6 +1653,110 @@ mod tests {
 
         assert_eq!(first.epoch, 1);
         assert_eq!(second.epoch, 0);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn desktop_composite_draws_independent_scenes_in_placement_order() {
+        fn colored_scene(color: ColorRgba8) -> RenderScene {
+            let node = NodeId::new(0, 1);
+            let bounds = RectF {
+                x: 0.0,
+                y: 0.0,
+                width: 2.0,
+                height: 2.0,
+            };
+            let mut scene = RenderScene::default();
+            scene.extent = SizeF {
+                width: 2.0,
+                height: 2.0,
+            };
+            scene.boxes.upsert(
+                node,
+                BoxInstance {
+                    node,
+                    rect: bounds,
+                    view_bounds: bounds,
+                    background: Some(color),
+                    border: Border::default(),
+                    outline: Outline::default(),
+                    corner_radii: CornerRadii::default(),
+                    shadows: ShadowList::default(),
+                    opacity: 1.0,
+                    clip: ClipId(0),
+                    spatial: SpatialId(0),
+                },
+            );
+            scene.set_draw_order(vec![DrawItem {
+                kind: PrimitiveKind::Box,
+                index: 0,
+                batch: BatchKey {
+                    pipeline: PipelineKind::AnalyticBox,
+                    resource: 0,
+                    clip: ClipId(0),
+                    blend: BlendMode::Opaque,
+                    target: 0,
+                },
+            }]);
+            scene
+        }
+
+        let renderer = SoftwareRenderer;
+        let mut red = renderer.create_scene().unwrap();
+        let mut blue = renderer.create_scene().unwrap();
+        renderer
+            .apply_scene_delta(
+                &mut red,
+                &colored_scene(ColorRgba8::rgba(255, 0, 0, 255))
+                    .take_delta()
+                    .unwrap(),
+            )
+            .unwrap();
+        renderer
+            .apply_scene_delta(
+                &mut blue,
+                &colored_scene(ColorRgba8::rgba(0, 0, 255, 255))
+                    .take_delta()
+                    .unwrap(),
+            )
+            .unwrap();
+        let mut surface = SoftwareSurface::default();
+        renderer
+            .render_composite(
+                &mut surface,
+                &[
+                    SoftwareCompositeLayer {
+                        scene: &red,
+                        target: RectI {
+                            x: 0,
+                            y: 0,
+                            width: 2,
+                            height: 2,
+                        },
+                        clip: None,
+                    },
+                    SoftwareCompositeLayer {
+                        scene: &blue,
+                        target: RectI {
+                            x: 1,
+                            y: 0,
+                            width: 2,
+                            height: 2,
+                        },
+                        clip: None,
+                    },
+                ],
+                SizeI {
+                    width: 4,
+                    height: 2,
+                },
+                None,
+                ColorRgba8::rgba(0, 0, 0, 255),
+            )
+            .unwrap();
+        assert_eq!(&surface.pixels_rgba8()[0..4], &[255, 0, 0, 255]);
+        assert_eq!(&surface.pixels_rgba8()[4..8], &[0, 0, 255, 255]);
+        assert_eq!(&surface.pixels_rgba8()[12..16], &[0, 0, 0, 255]);
     }
 
     #[test]

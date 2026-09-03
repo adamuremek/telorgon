@@ -1,0 +1,409 @@
+use super::*;
+
+pub(super) struct ClientWindow {
+    pub(super) revision: u64,
+    pub(super) role: SurfaceRole,
+    pub(super) parent: Option<WaylandSurfaceId>,
+    pub(super) offset: PointI,
+    pub(super) server_decorated: bool,
+    pub(super) position: PointI,
+    pub(super) size: SizeI,
+    pub(super) requested_size: SizeI,
+    pub(super) resize_anchor: Option<ResizeAnchor>,
+    pub(super) resize_final_size: Option<SizeI>,
+    pub(super) restore_geometry: Option<(PointI, SizeI)>,
+    pub(super) maximized: bool,
+    pub(super) fullscreen: bool,
+    pub(super) minimized: bool,
+    pub(super) chrome_outer: Option<SizeI>,
+    pub(super) chrome_content_offset: Option<PointI>,
+    pub(super) chrome: Option<WindowChromeSnapshot>,
+    pub(super) alpha_mode: ImageAlphaMode,
+    pub(super) pixel_format: ImagePixelFormat,
+    pending_image_update: PendingClientImageUpdate,
+    pub(super) pixels: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum PendingClientImageUpdate {
+    #[default]
+    Unchanged,
+    Full(Arc<[u8]>),
+    Region(RectI),
+}
+
+impl PendingClientImageUpdate {
+    fn merge_region(&mut self, update: &crate::render::ImageResourceUpdate) {
+        match self {
+            Self::Full(pixels) => patch_client_pixels(Arc::make_mut(pixels), update),
+            Self::Region(rect) => *rect = union_rect(*rect, update.rect),
+            Self::Unchanged => *self = Self::Region(update.rect),
+        }
+    }
+}
+
+pub(super) enum PreparedClientImage {
+    Unchanged {
+        extent: SizeI,
+        pixel_format: ImagePixelFormat,
+        alpha_mode: ImageAlphaMode,
+    },
+    Full {
+        image: crate::render::ImageResource,
+        retained_pixels: Vec<u8>,
+    },
+    Region(crate::render::ImageResourceUpdate),
+}
+
+impl PreparedClientImage {
+    pub(super) fn full(image: crate::render::ImageResource) -> Self {
+        let retained_pixels = image.pixels.to_vec();
+        Self::Full {
+            image,
+            retained_pixels,
+        }
+    }
+
+    fn extent(&self) -> SizeI {
+        match self {
+            Self::Unchanged { extent, .. } => *extent,
+            Self::Full { image, .. } => image.extent,
+            Self::Region(update) => update.extent,
+        }
+    }
+
+    fn pixel_format(&self) -> ImagePixelFormat {
+        match self {
+            Self::Unchanged { pixel_format, .. } => *pixel_format,
+            Self::Full { image, .. } => image.pixel_format,
+            Self::Region(update) => update.pixel_format,
+        }
+    }
+
+    fn alpha_mode(&self) -> ImageAlphaMode {
+        match self {
+            Self::Unchanged { alpha_mode, .. } => *alpha_mode,
+            Self::Full { image, .. } => image.alpha_mode,
+            Self::Region(update) => update.alpha_mode,
+        }
+    }
+}
+
+impl ClientWindow {
+    fn apply_image(&mut self, revision: u64, image: PreparedClientImage) {
+        self.revision = self.revision.max(revision);
+        match image {
+            PreparedClientImage::Unchanged { .. } => {}
+            PreparedClientImage::Full {
+                image,
+                retained_pixels,
+            } => {
+                self.size = image.extent;
+                self.alpha_mode = image.alpha_mode;
+                self.pixel_format = image.pixel_format;
+                self.pixels = retained_pixels;
+                self.pending_image_update = PendingClientImageUpdate::Full(image.pixels);
+            }
+            PreparedClientImage::Region(update) => {
+                patch_client_pixels(&mut self.pixels, &update);
+                self.pending_image_update.merge_region(&update);
+            }
+        }
+    }
+
+    pub(super) fn take_image_update(&mut self) -> DesktopImageUpdate {
+        match std::mem::take(&mut self.pending_image_update) {
+            PendingClientImageUpdate::Unchanged => DesktopImageUpdate::Unchanged,
+            PendingClientImageUpdate::Full(pixels) => DesktopImageUpdate::Full(pixels),
+            PendingClientImageUpdate::Region(rect) => {
+                DesktopImageUpdate::Regions(vec![DesktopImageRegion {
+                    rect,
+                    row_bytes: rect.width as usize * 4,
+                    pixels: copy_client_region(&self.pixels, self.size, rect).into(),
+                }])
+            }
+        }
+    }
+}
+
+fn patch_client_pixels(target: &mut [u8], update: &crate::render::ImageResourceUpdate) {
+    let destination_stride = update.extent.width as usize * 4;
+    let copy_bytes = update.rect.width as usize * 4;
+    for row in 0..update.rect.height as usize {
+        let source = row * update.row_bytes;
+        let target_offset =
+            (update.rect.y as usize + row) * destination_stride + update.rect.x as usize * 4;
+        target[target_offset..target_offset + copy_bytes]
+            .copy_from_slice(&update.pixels[source..source + copy_bytes]);
+    }
+}
+
+fn copy_client_region(source: &[u8], extent: SizeI, rect: RectI) -> Vec<u8> {
+    let stride = extent.width as usize * 4;
+    let row_bytes = rect.width as usize * 4;
+    let mut pixels = Vec::with_capacity(row_bytes * rect.height as usize);
+    for row in rect.y as usize..rect.bottom() as usize {
+        let start = row * stride + rect.x as usize * 4;
+        pixels.extend_from_slice(&source[start..start + row_bytes]);
+    }
+    pixels
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn apply_surface_publication(
+    display: &Display,
+    wayland: &mut NativeCompositor<'_>,
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    stacking_order: &mut Vec<WaylandSurfaceId>,
+    next_window_offset: &mut i32,
+    work_area: RectI,
+    session_locked: bool,
+    pointer_scene_dirty: &mut bool,
+    snapshot: &crate::compositor_wayland::SurfaceStateSnapshot,
+    prepared_image: PreparedClientImage,
+) -> AppResult<()> {
+    let surface = snapshot.surface;
+    let role = snapshot
+        .role
+        .ok_or_else(|| AppError::new("published surface has no role"))?;
+    let image_extent = prepared_image.extent();
+    let image_pixel_format = prepared_image.pixel_format();
+    let image_alpha_mode = prepared_image.alpha_mode();
+    let (parent, offset, position) = if role == SurfaceRole::Subsurface {
+        let parent = wayland.core().subsurfaces.parent(surface);
+        let offset = wayland
+            .core()
+            .subsurfaces
+            .position(surface)
+            .map_or(PointI::default(), |position| position.offset);
+        let position = parent
+            .and_then(|parent| windows.get(&parent))
+            .map_or(offset, |parent| PointI {
+                x: parent.position.x + offset.x,
+                y: parent.position.y + offset.y,
+            });
+        (parent, offset, position)
+    } else if role == SurfaceRole::XdgPopup {
+        let (parent, geometry) = wayland.popup_placement(surface).unwrap_or((
+            None,
+            RectI {
+                x: 0,
+                y: 0,
+                width: image_extent.width,
+                height: image_extent.height,
+            },
+        ));
+        let offset = PointI {
+            x: geometry.x,
+            y: geometry.y,
+        };
+        let position = parent
+            .and_then(|parent| windows.get(&parent))
+            .map_or(offset, |parent| PointI {
+                x: parent.position.x + offset.x,
+                y: parent.position.y + offset.y,
+            });
+        (parent, offset, position)
+    } else if matches!(
+        role,
+        SurfaceRole::Cursor | SurfaceRole::DragIcon | SurfaceRole::SessionLock
+    ) {
+        (None, PointI::default(), PointI::default())
+    } else {
+        let position = windows.get(&surface).map_or_else(
+            || {
+                let offset = *next_window_offset;
+                *next_window_offset = (*next_window_offset + 28) % 280;
+                PointI {
+                    x: work_area.x + 48 + offset,
+                    y: work_area.y + 48 + offset,
+                }
+            },
+            |window| window.position,
+        );
+        (None, PointI::default(), position)
+    };
+    let is_new = !windows.contains_key(&surface);
+    let previous_window = windows.get(&surface);
+    let mut requested_size = retained_requested_size(
+        previous_window.map(|window| window.requested_size),
+        image_extent,
+    );
+    let mut reconciled_position = position;
+    let mut resize_anchor = previous_window.and_then(|window| window.resize_anchor);
+    let resize_final_size = previous_window.and_then(|window| window.resize_final_size);
+    let final_resize_acked = role == SurfaceRole::XdgToplevel
+        && acknowledged_final_resize(
+            resize_final_size,
+            wayland
+                .core()
+                .xdg_surface(surface)
+                .and_then(|xdg| xdg.last_acked()),
+        );
+    let mut retained_resize_final_size = resize_final_size;
+    if final_resize_acked && let Some(anchor) = resize_anchor.take() {
+        reconciled_position = anchor.reconcile_position(position, image_extent);
+        requested_size = image_extent;
+        retained_resize_final_size = None;
+    }
+    let (
+        restore_geometry,
+        maximized,
+        fullscreen,
+        minimized,
+        chrome_outer,
+        chrome_content_offset,
+        chrome,
+    ) = windows
+        .get(&surface)
+        .map_or((None, false, false, false, None, None, None), |window| {
+            (
+                window.restore_geometry,
+                window.maximized,
+                window.fullscreen,
+                window.minimized,
+                window.chrome_outer,
+                window.chrome_content_offset,
+                window.chrome.clone(),
+            )
+        });
+    let server_decorated = role == SurfaceRole::XdgToplevel
+        && wayland.decoration_mode(surface)
+            != Some(crate::compositor_wayland::DecorationMode::ClientSide);
+    let pointer_geometry_changed = !matches!(role, SurfaceRole::Cursor | SurfaceRole::DragIcon)
+        && previous_window.is_none_or(|window| {
+            window.role != role
+                || window.position != reconciled_position
+                || window.size != image_extent
+                || window.minimized != minimized
+                || window.server_decorated != server_decorated
+        });
+    if let Some(window) = windows.get_mut(&surface) {
+        window.role = role;
+        window.parent = parent;
+        window.offset = offset;
+        window.server_decorated = server_decorated;
+        window.position = reconciled_position;
+        window.requested_size = requested_size;
+        window.restore_geometry = restore_geometry;
+        window.maximized = maximized;
+        window.fullscreen = fullscreen;
+        window.minimized = minimized;
+        window.chrome_outer = chrome_outer;
+        window.chrome_content_offset = chrome_content_offset;
+        window.chrome = chrome;
+        window.resize_anchor = resize_anchor;
+        window.resize_final_size = retained_resize_final_size;
+        window.apply_image(snapshot.revision, prepared_image);
+    } else {
+        let PreparedClientImage::Full {
+            image,
+            retained_pixels,
+        } = prepared_image
+        else {
+            return Err(AppError::new(
+                "new surface publication did not provide a complete image",
+            ));
+        };
+        windows.insert(
+            surface,
+            ClientWindow {
+                revision: snapshot.revision,
+                role,
+                parent,
+                offset,
+                server_decorated,
+                position: reconciled_position,
+                size: image.extent,
+                requested_size,
+                restore_geometry,
+                maximized,
+                fullscreen,
+                minimized,
+                chrome_outer,
+                chrome_content_offset,
+                chrome,
+                resize_anchor,
+                resize_final_size: retained_resize_final_size,
+                alpha_mode: image_alpha_mode,
+                pixel_format: image_pixel_format,
+                pending_image_update: PendingClientImageUpdate::Full(image.pixels),
+                pixels: retained_pixels,
+            },
+        );
+    }
+    if is_new && !matches!(role, SurfaceRole::Cursor | SurfaceRole::DragIcon) {
+        stacking_order.push(surface);
+    }
+    *pointer_scene_dirty |= pointer_geometry_changed;
+    if session_locked && role == SurfaceRole::SessionLock {
+        wayland
+            .set_keyboard_focus(1, Some(surface), display.next_serial())
+            .map_err(app_error)?;
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn finish_shm_copy(
+    display: &Display,
+    wayland: &mut NativeCompositor<'_>,
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    stacking_order: &mut Vec<WaylandSurfaceId>,
+    next_window_offset: &mut i32,
+    work_area: RectI,
+    session_locked: bool,
+    pointer_scene_dirty: &mut bool,
+    pending_buffers: &mut BTreeMap<crate::compositor_wayland::WaylandBufferId, usize>,
+    pending_surfaces: &mut BTreeMap<WaylandSurfaceId, usize>,
+    completion: ShmCopyCompletion,
+) -> AppResult<bool> {
+    let pending = pending_buffers
+        .get_mut(&completion.buffer)
+        .ok_or_else(|| AppError::new("completed SHM buffer copy was not tracked"))?;
+    *pending = pending
+        .checked_sub(1)
+        .ok_or_else(|| AppError::new("completed SHM buffer copy count underflow"))?;
+    if *pending == 0 {
+        pending_buffers.remove(&completion.buffer);
+    }
+    let pending = pending_surfaces
+        .get_mut(&completion.snapshot.surface)
+        .ok_or_else(|| AppError::new("completed SHM surface copy was not tracked"))?;
+    *pending = pending
+        .checked_sub(1)
+        .ok_or_else(|| AppError::new("completed SHM surface copy count underflow"))?;
+    if *pending == 0 {
+        pending_surfaces.remove(&completion.snapshot.surface);
+    }
+    let image = completion.result.map_err(AppError::new)?;
+    let current = wayland
+        .core()
+        .world
+        .surface(completion.snapshot.surface)
+        .map(|surface| surface.snapshot().clone());
+    let apply = current
+        .as_ref()
+        .is_some_and(|snapshot| snapshot.attachment.is_some())
+        && !pending_surfaces.contains_key(&completion.snapshot.surface);
+    if apply {
+        apply_surface_publication(
+            display,
+            wayland,
+            windows,
+            stacking_order,
+            next_window_offset,
+            work_area,
+            session_locked,
+            pointer_scene_dirty,
+            current.as_ref().expect("live surface checked"),
+            image,
+        )?;
+    }
+    if !pending_buffers.contains_key(&completion.buffer) {
+        wayland
+            .release_buffer(completion.buffer)
+            .map_err(app_error)?;
+    }
+    Ok(apply)
+}

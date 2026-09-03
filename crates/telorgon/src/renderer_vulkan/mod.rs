@@ -2,6 +2,8 @@
 
 mod adapter;
 mod buffer;
+#[cfg(target_os = "linux")]
+mod composite;
 mod config;
 mod descriptor;
 mod device;
@@ -26,6 +28,8 @@ mod target;
 mod upload;
 
 pub use adapter::{AdapterReport, DeviceSelection};
+#[cfg(target_os = "linux")]
+pub use composite::{VulkanCompositePlacement, VulkanCompositeScene};
 pub use config::{VulkanConfig, VulkanLiveResizeMode};
 pub use device::{VulkanCapabilities, VulkanDevice, VulkanMemoryMetrics};
 pub use diagnostics::{VulkanDebugMessage, VulkanDiagnostics};

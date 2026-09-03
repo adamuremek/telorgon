@@ -88,10 +88,11 @@ and passes decoded requests to Telorgon-owned state. `libwayland-server` remains
 resource, client, socket, and event-loop implementation.
 
 Within the managed host, `desktop_wayland.rs` is the single-owner orchestration loop. Its sibling
-modules isolate cursor-plane/KMS lifetime tracking, event sources and input profiling, geometry and
-damage math, pointer routing and hit testing, resize transactions, composed layer preparation,
-pointer visuals, retained desktop-scene synchronization, bounded full-SHM copying, and
-Vulkan/software scanout. These boundaries are internal and do not create additional owners. Two
+modules isolate client publication, cursor-plane/KMS lifetime tracking, event sources and input
+profiling, geometry and damage math, pointer routing and hit testing, resize transactions, composed
+layer preparation, pointer visuals, renderer-neutral desktop-scene synchronization, bounded
+full-SHM copying, and separate Vulkan/software renderer assemblies. These boundaries are internal
+and do not create additional owners. Two
 explicit blocking operations are isolated: the Vulkan completion waiter and a single bounded SHM
 copy worker. The latter receives only duplicated FDs plus immutable commit metadata; it never
 accesses Wayland objects or compositor state.
@@ -230,20 +231,26 @@ The operational managed path is entirely Telorgon-rendered:
    pixel conversion. Buffer transform/scale and viewporter crop/destination use bounded
    deterministic sampling.
 3. Client images, the composed background, composed server frames, shell widgets, popups, drag
-   icons, and the software cursor are synchronized into one renderer-neutral retained desktop
-   scene with stable image/node identities. Client and composed-chrome damage update only the
-   corresponding retained image region; hidden/minimized layers retain their image identity without
-   contributing a draw. Focus-state changes reconcile the existing window-frame component root
-   instead of recreating its runtime. Movement and interactive preview changes damage the union of
-   old and new bounds. A committed buffer that is stale during resize is clipped to the desired
-   content rectangle and is never stretched.
-4. The selected renderer composites that scene. Vulkan stages only changed image rows. If an older
-   submission still samples that image, a reusable copy-on-write texture receives an on-GPU content
-   preserve followed by the regional patch; an idle texture is patched in place. It then draws the
-   individual layers directly into the selected imported GBM target, without a full-screen CPU
-   flatten/upload. Software patches the same retained resources, applies the same delta to its
-   retained reference surface, and copies only accumulated output damage into the mapped GBM
-   target. The composed pointer uses three
+   icons, and a composited cursor become a renderer-neutral frame containing retained-scene deltas,
+   ordered placements, clips, and output damage. This layer contains no backend scene, pixel
+   surface, rasterizer, or Vulkan handle. Scene identity is separate from placement identity, so one
+   retained control can appear in several windows while movement still damages the correct old and
+   new bounds. Hidden/minimized producers keep their retained identity without contributing a draw,
+   and a hidden client revision is not consumed before its queued pixels are delivered. Focus-state
+   changes reconcile the existing window-frame component root instead of recreating its runtime. A
+   committed buffer that is stale during resize is clipped to the desired content rectangle and is
+   never stretched.
+4. Backend selection happens once in the desktop renderer assembly. The selected implementation
+   owns its scene map and output state for the remainder of the run; neither backend calls the
+   other. Vulkan applies deltas to `VulkanScene`, stages changed rows and per-placement uniforms,
+   and records all ordered placements directly into the imported GBM target in one dynamic render
+   pass, command buffer, and submission. There is no `SoftwareScene`, software raster, intermediate
+   layer surface, CPU-flattened desktop, or full-screen texture upload in that path. Software applies
+   the same neutral deltas to `SoftwareScene` and rasterizes every placement directly into one
+   retained output framebuffer, clearing and copying only accumulated output damage; it creates no
+   Vulkan object. CPU work that remains in Vulkan mode is protocol ingestion—bounds checking,
+   optional Wayland SHM format/geometry conversion, and construction of staging bytes—not rendering.
+   The composed pointer uses three
    completion-retired ARGB8888 GBM cursor buffers when an atomic cursor plane is available;
    otherwise it remains an ordinary retained desktop-scene layer.
 5. Three linear GBM scanout buffers receive the primary output. Primary and cursor state are
@@ -257,16 +264,16 @@ allocation bounds, consumes an optional acquire sync FD, creates a generation-sc
 external-image lease, and binds it into `VulkanScene`. The external-image path can export the
 matching release requirement.
 
-The managed KMS path also has an owned Vulkan scanout route. All three primary GBM buffers are imported with
-their explicit modifier and row layout as Vulkan color targets. Telorgon renders the retained
-desktop scene's individual image layers into the selected target, transfers queue ownership back to
+The managed KMS path also has an owned Vulkan scanout route. All three primary GBM buffers are
+imported with their explicit modifier and row layout as Vulkan color targets. Telorgon renders the
+ordered retained-scene placements into the selected target, transfers queue ownership back to
 `VK_QUEUE_FAMILY_FOREIGN_EXT`, waits for GPU completion, and only then makes that frame eligible for
-the serialized atomic KMS scheduler. `Renderer::Vulkan` requires this route. `Renderer::Auto`
-attempts it on each supported
-adapter and falls back to the mapped software scanout route; `Renderer::Software` selects the
-mapped route directly. Client surfaces and all shell visuals remain Telorgon render resources in
-both cases. SHM content is currently copied into those retained resources; end-to-end managed-KMS
-DMA-BUF binding remains a separate zero-copy integration step.
+the serialized atomic KMS scheduler. `Renderer::Vulkan` requires this route and fails startup if it
+cannot be created. `Renderer::Auto` attempts it before any frame is rendered and otherwise constructs
+the separate mapped software assembly; it never switches or combines backends mid-run.
+`Renderer::Software` constructs only the mapped software route. SHM content is currently copied into
+backend-owned retained image resources; end-to-end managed-KMS DMA-BUF binding remains a separate
+zero-copy integration step.
 
 The GBM/KMS bindings are Telorgon-owned and use the original libgbm/libdrm ABIs. Scanout allocation,
 mapping, modifier-aware framebuffer creation, connector/encoder/CRTC/plane discovery, primary and
@@ -284,6 +291,9 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
   to the owner without another whole-image copy.
 - A direct SHM regional update carries tightly packed native-order rows through the desktop scene;
   a renderer may not reinterpret damage as permission to discard pixels outside that rectangle.
+- Renderer-neutral scene identity is distinct from placement identity. Removing a placement may not
+  discard a still-live shared scene, and a hidden revision may not advance image content until its
+  queued pixel update is consumed.
 - Vulkan image replacement while an older submission is in flight preserves the old contents with
   a transfer-source/transfer-destination image copy before applying regional staging bytes. Both
   images remain completion-pinned, and only an unpinned retired image may re-enter the pool.
@@ -293,7 +303,7 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
   specification, while allocation size is retained separately for bounds checking.
 - A GBM buffer outlives its KMS framebuffer, and both outlive the atomic request that references it.
 - A cursor buffer is never mapped while it is current or named by the one pending CRTC commit. A
-  software fallback retains an active cursor framebuffer until an atomic plane-disable completion.
+  composited fallback retains an active cursor framebuffer until an atomic plane-disable completion.
 - Only one nonblocking atomic commit is outstanding per CRTC. Pointer events received while it is
   outstanding replace desired cursor position rather than enqueueing additional commits.
 - A libseat-managed DRM FD remains owned by the seat; KMS receives a duplicate.
@@ -310,14 +320,20 @@ The implementation is based on the following primary specifications and source a
 - The [Vulkan explicit DRM modifier structure](https://registry.khronos.org/vulkan/specs/latest/man/html/VkImageDrmFormatModifierExplicitCreateInfoEXT.html) requires each explicit plane layout's `size` to be zero.
 - wgpu commit `d99c241a3b9dcc0f6674d990d007d79e94d39862` was inspected for DMA-BUF import capability and ownership invariants; Flutter commit `51fd9afadf309ba5337320bd3653f5345c156cb9` was inspected for sync-FD ownership and frame-slot reuse. Those projects are references only; no framework code or abstraction was copied.
 
-### Retained SHM and chrome-update audit
+### Direct retained-composition audit
 
-The concern was focus-triggered whole-frame work: rebuilding composed window chrome and copying,
-converting, then re-uploading complete SHM images on the compositor/input owner thread. Telorgon's
-component, render-scene, software, Vulkan, and Wayland ownership documents were read first. Egui
-commit `fd54387eac03f57ca772a8fb590ceaadf780f31c` was inspected at
-`crates/egui-wgpu/src/renderer.rs::update_texture` and `epaint/src/textures.rs::TexturesDelta` for
-retained texture identity and partial writes. Xilem/Masonry commit
+The concern was focus-triggered whole-frame work and the accidental use of software-rasterized layer
+surfaces as Vulkan inputs. Telorgon's component, render-scene, software, Vulkan, and Wayland
+ownership documents were read first. Slint commit
+`69ecb713f5c62d1b6fe986ff822a57f22152b4d9` was inspected at
+`internal/core/window.rs::draw_contents` and `internal/renderers/anyrender/lib.rs` for walking
+multiple component scenes through one selected renderer. Egui commit
+`fd54387eac03f57ca772a8fb590ceaadf780f31c` was inspected at
+`crates/egui-wgpu/src/renderer.rs::render` and `epaint/src/textures.rs::TexturesDelta` for ordered
+clipped draws in an existing render pass, retained texture identity, and partial writes. Qt commit
+`3e2d6bd456a8e850bcf641de77d1d5d8bc8419ef` was inspected at
+`src/quick/scenegraph/coreapi/qsgrendernode.cpp` and the batch renderer's
+prepare/begin/record/end-pass flow for explicit render-state ownership. Xilem/Masonry commit
 `ce7b04d2ba2d9d7a8c364f2ab109e2083121e144` was inspected at
 `xilem_core/src/views/any_view.rs::dyn_rebuild` and
 `masonry/src/properties/content_color.rs` for same-type in-place reconciliation and property-scoped
@@ -328,16 +344,27 @@ defines damage in buffer coordinates as the area where pending buffer contents d
 surface contents. The Vulkan [copy-command rules](https://docs.vulkan.org/spec/latest/chapters/copies.html)
 and [format rules](https://docs.vulkan.org/spec/latest/chapters/formats.html) govern the regional
 buffer-to-image writes, image preservation copy, row length, and native BGRA/RGBA formats.
+The Vulkan [dynamic-rendering rules](https://docs.vulkan.org/spec/latest/chapters/renderpass.html),
+[descriptor-pool lifetime rules](https://docs.vulkan.org/spec/latest/chapters/descriptorsets.html),
+[synchronization rules](https://docs.vulkan.org/spec/latest/chapters/synchronization.html), and
+[viewport rules](https://docs.vulkan.org/spec/latest/chapters/vertexpostproc.html) govern the single
+pass, per-completed-slot descriptor reset, explicit transfer/draw dependencies, and placement
+viewports used by direct composition.
 
-Adopted invariants are: a same-type root update preserves component/runtime identity; a partial
-write preserves all pixels outside its rectangle; native four-channel SHM order remains explicit;
-and resources named by an incomplete Vulkan submission remain pinned. Rebuilding every frame on
-focus, flattening the desktop through software before Vulkan, and replacing a sampled image with a
-full CPU re-upload were rejected because each scales work with unaffected state. Portable tests
-cover root reconciliation, regional desktop damage, hidden-layer retention, native SHM channel
-order, software BGRA sampling, and upload classification. Linux hardware timing and visual
-qualification remain user-run gaps; profiler spans distinguish worker-full and owner-regional SHM
-copies and publish the actual copied byte count.
+Adopted invariants are: a same-type root update preserves component/runtime identity; shell/runtime
+layers emit only neutral deltas; scene identity is independent of placement; a partial write
+preserves all pixels outside its rectangle; native four-channel SHM order remains explicit; Vulkan
+and software own disjoint scene/output types; and resources named by an incomplete Vulkan submission
+remain pinned. Rebuilding every frame on focus, flattening any layer through software before Vulkan,
+creating per-layer CPU surfaces, replacing a sampled image with a full CPU re-upload, and issuing a
+Vulkan pass/submission per desktop layer were rejected because each scales work with unaffected
+state or crosses the backend boundary. Portable tests cover root reconciliation, disjoint regional
+desktop writes, hidden-revision retention, shared-scene placement, native SHM channel order,
+software BGRA sampling, and shared-staging alignment. Linux checks compile both direct compositor
+assemblies, and portable source-boundary tests reject backend types in neutral desktop modules or
+cross-references between the Vulkan and software assemblies. Hardware timing and visual
+qualification remain user-run gaps; profiler spans distinguish Vulkan composite work from software
+raster work and distinguish worker-full from owner-regional SHM copies.
 
 ### Atomic cursor-plane audit
 
@@ -377,17 +404,17 @@ cursor-only commits do not imply client-surface presentation.
 Failure and recovery cases extracted:
 Missing cursor plane/ARGB8888/properties, unsupported modifier allocation, cursor image larger than
 the reported hardware extent, rejected test or runtime commit, a cursor update arriving during an
-outstanding primary flip, and software fallback while a cursor framebuffer remains active.
+outstanding primary flip, and composited fallback while a cursor framebuffer remains active.
 
 Approaches rejected and why:
 Legacy drmModeMoveCursor/drmModeSetCursor2 is an untracked driver-dependent update beside the atomic
-primary path; software-only cursors force primary damage on every move; DRM_MODE_PAGE_FLIP_ASYNC may
+primary path; composited cursors force primary damage on every move; DRM_MODE_PAGE_FLIP_ASYNC may
 tear; one commit per raw input event ignores CRTC back-pressure and loses mailbox coalescing.
 
 Telorgon-specific decision:
 Auto-select an atomic ARGB8888 cursor plane, use three GBM/DRM framebuffer slots, append the newest
 cursor generation to a primary or cursor-only vblank commit, and disable that plane atomically in
-the same primary commit that introduces the software cursor fallback.
+the same primary commit that introduces the composited cursor fallback.
 
 Tests/diagnostics derived:
 Pure cursor-state tests cover in-flight motion coalescing, current/pending buffer exclusion, and

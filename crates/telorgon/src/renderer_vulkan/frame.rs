@@ -11,6 +11,8 @@ use gpu_allocator::MemoryLocation;
 use crate::renderer_vulkan::VulkanDevice;
 use crate::renderer_vulkan::buffer::AllocatedBuffer;
 use crate::renderer_vulkan::descriptor::allocate_frame_sets;
+#[cfg(target_os = "linux")]
+use crate::renderer_vulkan::descriptor::create_composite_descriptor_pool;
 use crate::renderer_vulkan::descriptor::{
     FrameDescriptorSets, MAX_TEXTURE_SETS, PRIMITIVE_SET_COUNT,
 };
@@ -87,6 +89,8 @@ pub(crate) struct FrameCore {
     pub(crate) command_buffer: vk::CommandBuffer,
     pub(crate) descriptor_sets: FrameDescriptorSets,
     pub(crate) descriptor_bindings: DescriptorBindingState,
+    #[cfg(target_os = "linux")]
+    pub(crate) composite_descriptor_pool: Option<vk::DescriptorPool>,
     pub(crate) staging: Arc<AllocatedBuffer>,
     pub(crate) buffers: Vec<Arc<AllocatedBuffer>>,
     pub(crate) images: Vec<Arc<AllocatedImage>>,
@@ -191,6 +195,8 @@ struct FrameSlot {
     descriptor_pool: vk::DescriptorPool,
     descriptor_sets: FrameDescriptorSets,
     descriptor_bindings: DescriptorBindingState,
+    #[cfg(target_os = "linux")]
+    composite_descriptor_pool: vk::DescriptorPool,
     staging: Arc<AllocatedBuffer>,
     #[cfg(feature = "instrumentation")]
     profiler_timestamps: Option<ProfilerTimestampQueries>,
@@ -255,6 +261,18 @@ impl FrameSlot {
                     return Err(error);
                 }
             };
+        #[cfg(target_os = "linux")]
+        let composite_descriptor_pool = match create_composite_descriptor_pool(&device.raw) {
+            Ok(pool) => pool,
+            Err(error) => {
+                unsafe {
+                    device.raw.destroy_descriptor_pool(descriptor_pool, None);
+                    device.raw.destroy_fence(fence, None);
+                    device.raw.destroy_command_pool(command_pool, None);
+                }
+                return Err(error);
+            }
+        };
         let staging = match AllocatedBuffer::new(
             Arc::clone(device),
             staging_bytes,
@@ -267,6 +285,10 @@ impl FrameSlot {
             Ok(buffer) => Arc::new(buffer),
             Err(error) => {
                 unsafe {
+                    #[cfg(target_os = "linux")]
+                    device
+                        .raw
+                        .destroy_descriptor_pool(composite_descriptor_pool, None);
                     device.raw.destroy_descriptor_pool(descriptor_pool, None);
                     device.raw.destroy_fence(fence, None);
                     device.raw.destroy_command_pool(command_pool, None);
@@ -341,6 +363,8 @@ impl FrameSlot {
             descriptor_pool,
             descriptor_sets,
             descriptor_bindings: DescriptorBindingState::default(),
+            #[cfg(target_os = "linux")]
+            composite_descriptor_pool,
             staging,
             #[cfg(feature = "instrumentation")]
             profiler_timestamps,
@@ -357,6 +381,9 @@ impl Drop for FrameSlot {
             }
             self.device
                 .destroy_descriptor_pool(self.descriptor_pool, None);
+            #[cfg(target_os = "linux")]
+            self.device
+                .destroy_descriptor_pool(self.composite_descriptor_pool, None);
             self.device.destroy_fence(self.fence, None);
             self.device.destroy_command_pool(self.command_pool, None);
         }
@@ -535,6 +562,16 @@ impl FrameSlots {
                 .map_err(|result| {
                     vk_error("failed to reset Vulkan frame-slot command pool", result)
                 })?;
+            #[cfg(target_os = "linux")]
+            self.device
+                .raw
+                .reset_descriptor_pool(
+                    slot.composite_descriptor_pool,
+                    vk::DescriptorPoolResetFlags::empty(),
+                )
+                .map_err(|result| {
+                    vk_error("failed to reset Vulkan composite descriptor pool", result)
+                })?;
             self.device
                 .raw
                 .begin_command_buffer(
@@ -575,6 +612,8 @@ impl FrameSlots {
                 command_buffer: slot.command_buffer,
                 descriptor_sets: slot.descriptor_sets,
                 descriptor_bindings: slot.descriptor_bindings,
+                #[cfg(target_os = "linux")]
+                composite_descriptor_pool: Some(slot.composite_descriptor_pool),
                 staging: Arc::clone(&slot.staging),
                 buffers: Vec::new(),
                 images: Vec::new(),

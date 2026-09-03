@@ -80,6 +80,8 @@ pub(crate) struct DeviceInner {
     pub(crate) device_local_reserved_bytes: AtomicU64,
     pub(crate) next_frame_id: AtomicU64,
     pub next_completion_value: AtomicU64,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) uniform_buffer_offset_alignment: u64,
     #[cfg(feature = "instrumentation")]
     pub(crate) profiler_timestamp_valid_bits: u32,
     #[cfg(feature = "instrumentation")]
@@ -525,6 +527,10 @@ impl VulkanDevice {
             device_local_reserved_bytes: AtomicU64::new(0),
             next_frame_id: AtomicU64::new(1),
             next_completion_value: AtomicU64::new(1),
+            uniform_buffer_offset_alignment: properties
+                .limits
+                .min_uniform_buffer_offset_alignment
+                .max(1),
             #[cfg(feature = "instrumentation")]
             profiler_timestamp_valid_bits,
             #[cfg(feature = "instrumentation")]

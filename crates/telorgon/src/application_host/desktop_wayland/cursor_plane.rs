@@ -17,7 +17,7 @@ pub(super) struct CursorCommitTracker {
     pub(super) applied_serial: u64,
     pub(super) current_buffer: Option<usize>,
     pub(super) in_flight: Option<CursorSnapshot>,
-    pub(super) software_fallback_requested: bool,
+    pub(super) composited_fallback_requested: bool,
 }
 
 impl CursorCommitTracker {
@@ -49,8 +49,8 @@ impl CursorCommitTracker {
         }
     }
 
-    pub(super) fn request_software_fallback(&mut self) {
-        self.software_fallback_requested = true;
+    pub(super) fn request_composited_fallback(&mut self) {
+        self.composited_fallback_requested = true;
         self.hide();
     }
 
@@ -94,7 +94,7 @@ impl CursorCommitTracker {
     }
 
     pub(super) fn ready_to_retire(&self) -> bool {
-        self.software_fallback_requested
+        self.composited_fallback_requested
             && self.current_buffer.is_none()
             && self.in_flight.is_none()
     }
@@ -299,12 +299,12 @@ impl<'gbm, 'kms, 'fd> HardwareCursor<'gbm, 'kms, 'fd> {
         self.state.desired_submission().is_some()
     }
 
-    pub(super) fn request_software_fallback(&mut self) {
-        self.state.request_software_fallback();
+    pub(super) fn request_composited_fallback(&mut self) {
+        self.state.request_composited_fallback();
     }
 
-    pub(super) fn software_fallback_requested(&self) -> bool {
-        self.state.software_fallback_requested
+    pub(super) fn composited_fallback_requested(&self) -> bool {
+        self.state.composited_fallback_requested
     }
 
     pub(super) fn ready_to_retire(&self) -> bool {

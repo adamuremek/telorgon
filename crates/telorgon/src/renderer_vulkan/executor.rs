@@ -635,7 +635,7 @@ fn validate_resource_updates(delta: &RenderSceneDelta) -> RenderResult<()> {
     Ok(())
 }
 
-fn validate_retained_scene(scene: &VulkanScene) -> RenderResult<()> {
+pub(crate) fn validate_retained_scene(scene: &VulkanScene) -> RenderResult<()> {
     for draw in &scene.draw_order {
         let spatial_clip = match draw.kind {
             PrimitiveKind::Box => scene
@@ -682,7 +682,7 @@ fn validate_retained_scene(scene: &VulkanScene) -> RenderResult<()> {
     Ok(())
 }
 
-fn begin_external_image_uses(
+pub(crate) fn begin_external_image_uses(
     frame: &mut crate::renderer_vulkan::frame::FrameCore,
     scene: &VulkanScene,
 ) -> RenderResult<u32> {
@@ -695,8 +695,22 @@ fn begin_external_image_uses(
             "external image leases currently require command-only hosted Vulkan",
         ));
     }
-    let mut waits = BTreeSet::new();
-    let mut signals = BTreeSet::new();
+    let mut waits = frame
+        .external_images
+        .iter()
+        .filter_map(|image| match image.acquire {
+            VulkanExternalAcquire::BinarySemaphore(semaphore) => Some(semaphore.as_raw()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let mut signals = frame
+        .external_images
+        .iter()
+        .filter_map(|image| match image.release {
+            VulkanExternalRelease::BinarySemaphore(semaphore) => Some(semaphore.as_raw()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
     for image in &external {
         if let VulkanExternalAcquire::BinarySemaphore(semaphore) = image.acquire
             && !waits.insert(semaphore.as_raw())
@@ -726,7 +740,7 @@ fn begin_external_image_uses(
         begun.push(image);
     }
     let count = begun.len() as u32;
-    frame.external_images = begun;
+    frame.external_images.extend(begun);
     Ok(count.saturating_mul(2))
 }
 
@@ -918,7 +932,7 @@ fn bind_scene_descriptors(
     writes.len() as u32
 }
 
-fn record_uploads(
+pub(crate) fn record_uploads(
     device: &ash::Device,
     command_buffer: vk::CommandBuffer,
     staging: vk::Buffer,
@@ -1102,13 +1116,13 @@ fn record_uploads(
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-struct ViewMapping {
+pub(crate) struct ViewMapping {
     logical_extent: SizeF,
     target_region: RectI,
 }
 
 impl ViewMapping {
-    fn new(logical_extent: SizeF, target_region: RectI) -> Self {
+    pub(crate) fn new(logical_extent: SizeF, target_region: RectI) -> Self {
         Self {
             logical_extent: SizeF {
                 width: logical_extent.width.max(1.0),
@@ -1118,7 +1132,7 @@ impl ViewMapping {
         }
     }
 
-    fn logical_bounds(self) -> RectF {
+    pub(crate) fn logical_bounds(self) -> RectF {
         RectF {
             x: 0.0,
             y: 0.0,
@@ -1127,7 +1141,7 @@ impl ViewMapping {
         }
     }
 
-    fn logical_rect_to_scissor(self, rect: RectF) -> vk::Rect2D {
+    pub(crate) fn logical_rect_to_scissor(self, rect: RectF) -> vk::Rect2D {
         let Some(rect) = rect.intersection(self.logical_bounds()) else {
             return empty_scissor(self.target_region);
         };
@@ -1155,7 +1169,7 @@ impl ViewMapping {
     }
 }
 
-fn batch_scissor(
+pub(crate) fn batch_scissor(
     scene: &VulkanScene,
     batch: &DrawBatch,
     mapping: ViewMapping,
@@ -1177,7 +1191,7 @@ fn batch_scissor(
     intersect_scissor(scene_scissor, render_region)
 }
 
-fn intersect_scissor(scissor: vk::Rect2D, region: RectI) -> vk::Rect2D {
+pub(crate) fn intersect_scissor(scissor: vk::Rect2D, region: RectI) -> vk::Rect2D {
     let left = scissor.offset.x.max(region.x);
     let top = scissor.offset.y.max(region.y);
     let right = scissor
@@ -1212,7 +1226,7 @@ fn empty_scissor(region: RectI) -> vk::Rect2D {
     }
 }
 
-fn primitive_index(kind: PrimitiveKind) -> usize {
+pub(crate) fn primitive_index(kind: PrimitiveKind) -> usize {
     match kind {
         PrimitiveKind::Box => 0,
         PrimitiveKind::Glyph => 1,
@@ -1220,7 +1234,7 @@ fn primitive_index(kind: PrimitiveKind) -> usize {
         PrimitiveKind::Material => 3,
     }
 }
-fn buffer_info(buffer: &Arc<AllocatedBuffer>) -> vk::DescriptorBufferInfo {
+pub(crate) fn buffer_info(buffer: &Arc<AllocatedBuffer>) -> vk::DescriptorBufferInfo {
     vk::DescriptorBufferInfo {
         buffer: buffer.raw(),
         offset: 0,
@@ -1236,7 +1250,7 @@ fn color_range() -> vk::ImageSubresourceRange {
         layer_count: 1,
     }
 }
-fn rect2d(region: RectI) -> vk::Rect2D {
+pub(crate) fn rect2d(region: RectI) -> vk::Rect2D {
     vk::Rect2D {
         offset: vk::Offset2D {
             x: region.x,
@@ -1265,7 +1279,11 @@ fn validate_render_region(region: RectI, target: &VulkanTarget<'_>) -> RenderRes
     }
     Ok(())
 }
-fn gpu_view(scene: &VulkanScene, target: &VulkanTarget<'_>, mapping: ViewMapping) -> GpuView {
+pub(crate) fn gpu_view(
+    scene: &VulkanScene,
+    target: &VulkanTarget<'_>,
+    mapping: ViewMapping,
+) -> GpuView {
     let width = mapping.logical_extent.width;
     let height = mapping.logical_extent.height;
     let region = mapping.target_region;
@@ -1299,7 +1317,7 @@ fn gpu_view(scene: &VulkanScene, target: &VulkanTarget<'_>, mapping: ViewMapping
         ],
     }
 }
-fn linear_clear(color: ColorRgba8) -> [f32; 4] {
+pub(crate) fn linear_clear(color: ColorRgba8) -> [f32; 4] {
     let alpha = color.a as f32 / 255.0;
     let decode = |byte: u8| {
         let value = byte as f32 / 255.0;

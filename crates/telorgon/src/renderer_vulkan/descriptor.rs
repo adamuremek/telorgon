@@ -11,6 +11,10 @@ pub(crate) struct DescriptorLayouts {
 
 pub(crate) const PRIMITIVE_SET_COUNT: usize = 4;
 pub(crate) const MAX_TEXTURE_SETS: usize = 128;
+#[cfg(target_os = "linux")]
+pub(crate) const MAX_COMPOSITE_SCENES: u32 = 256;
+#[cfg(target_os = "linux")]
+pub(crate) const MAX_COMPOSITE_TEXTURE_SETS: u32 = 2_048;
 
 #[derive(Copy, Clone)]
 pub(crate) struct FrameDescriptorSets {
@@ -18,6 +22,14 @@ pub(crate) struct FrameDescriptorSets {
     pub(crate) scene: vk::DescriptorSet,
     pub(crate) primitives: [vk::DescriptorSet; PRIMITIVE_SET_COUNT],
     pub(crate) textures: [vk::DescriptorSet; MAX_TEXTURE_SETS],
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) struct CompositeDescriptorSets {
+    pub(crate) view: vk::DescriptorSet,
+    pub(crate) scene: vk::DescriptorSet,
+    pub(crate) primitives: [vk::DescriptorSet; PRIMITIVE_SET_COUNT],
+    pub(crate) textures: Vec<vk::DescriptorSet>,
 }
 
 impl DescriptorLayouts {
@@ -217,4 +229,98 @@ pub(crate) fn allocate_frame_sets(
             textures,
         },
     ))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn create_composite_descriptor_pool(
+    device: &ash::Device,
+) -> RenderResult<vk::DescriptorPool> {
+    let pool_sizes = [
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: MAX_COMPOSITE_SCENES,
+        },
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: MAX_COMPOSITE_SCENES * (3 + PRIMITIVE_SET_COUNT as u32 * 2),
+        },
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            descriptor_count: MAX_COMPOSITE_TEXTURE_SETS * 2,
+        },
+    ];
+    unsafe {
+        device.create_descriptor_pool(
+            &vk::DescriptorPoolCreateInfo::default()
+                .max_sets(
+                    MAX_COMPOSITE_SCENES * (2 + PRIMITIVE_SET_COUNT as u32)
+                        + MAX_COMPOSITE_TEXTURE_SETS,
+                )
+                .pool_sizes(&pool_sizes),
+            None,
+        )
+    }
+    .map_err(|result| vk_error("failed to create Vulkan composite descriptor pool", result))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn allocate_composite_sets(
+    device: &ash::Device,
+    pool: vk::DescriptorPool,
+    layouts: &DescriptorLayouts,
+    texture_counts: &[usize],
+) -> RenderResult<Vec<CompositeDescriptorSets>> {
+    if texture_counts.len() > MAX_COMPOSITE_SCENES as usize
+        || texture_counts.iter().any(|count| *count > MAX_TEXTURE_SETS)
+        || texture_counts.iter().sum::<usize>() > MAX_COMPOSITE_TEXTURE_SETS as usize
+    {
+        return Err(crate::renderer_vulkan::error::internal(
+            "Vulkan composite descriptor request exceeds its pool limits",
+        ));
+    }
+    if texture_counts.is_empty() {
+        return Ok(Vec::new());
+    }
+    let expected = texture_counts
+        .iter()
+        .map(|count| 2 + PRIMITIVE_SET_COUNT + *count)
+        .sum::<usize>();
+    let mut set_layouts = Vec::with_capacity(expected);
+    for texture_count in texture_counts {
+        set_layouts.push(layouts.sets[0]);
+        set_layouts.push(layouts.sets[1]);
+        set_layouts.extend(std::iter::repeat_n(layouts.sets[2], PRIMITIVE_SET_COUNT));
+        set_layouts.extend(std::iter::repeat_n(layouts.sets[3], *texture_count));
+    }
+    let sets = unsafe {
+        device.allocate_descriptor_sets(
+            &vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(pool)
+                .set_layouts(&set_layouts),
+        )
+    }
+    .map_err(|result| {
+        vk_error(
+            "failed to allocate Vulkan composite descriptor sets",
+            result,
+        )
+    })?;
+    if sets.len() != expected {
+        return Err(crate::renderer_vulkan::error::internal(
+            "Vulkan returned the wrong composite descriptor-set count",
+        ));
+    }
+    let mut sets = sets.into_iter();
+    Ok(texture_counts
+        .iter()
+        .map(|texture_count| CompositeDescriptorSets {
+            view: sets.next().expect("composite view set count was checked"),
+            scene: sets.next().expect("composite scene set count was checked"),
+            primitives: std::array::from_fn(|_| {
+                sets.next()
+                    .expect("composite primitive set count was checked")
+            }),
+            textures: sets.by_ref().take(*texture_count).collect(),
+        })
+        .collect())
 }

@@ -634,6 +634,10 @@ impl VulkanDevice {
             device_local_reserved_bytes: AtomicU64::new(0),
             next_frame_id: AtomicU64::new(1),
             next_completion_value: AtomicU64::new(1),
+            uniform_buffer_offset_alignment: properties
+                .limits
+                .min_uniform_buffer_offset_alignment
+                .max(1),
             #[cfg(feature = "instrumentation")]
             profiler_timestamp_valid_bits: 0,
             #[cfg(feature = "instrumentation")]
@@ -697,6 +701,8 @@ impl VulkanDevice {
             command_buffer: descriptor.command_buffer,
             descriptor_sets,
             descriptor_bindings: DescriptorBindingState::default(),
+            #[cfg(target_os = "linux")]
+            composite_descriptor_pool: None,
             staging: Arc::clone(&arena.staging),
             buffers: Vec::new(),
             images: Vec::new(),

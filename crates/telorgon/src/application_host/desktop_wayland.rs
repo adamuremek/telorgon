@@ -6,8 +6,6 @@ use std::sync::Arc;
 #[cfg(feature = "profiler")]
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::compositor_render::{
@@ -29,15 +27,7 @@ use crate::presenter_vulkan_kms::{
     GbmBuffer, GbmDevice, KmsCrtcId, KmsDevice, KmsFramebuffer, KmsObjectProperties, KmsPlaneId,
     KmsPropertyObject, KmsTopology, ScanoutFormat,
 };
-use crate::render::{
-    ImageAlphaMode, ImageId, ImagePixelFormat, RenderBackend, RenderRequest, RenderSceneDelta,
-    RenderTargetInfo, TargetLoad, TargetStore,
-};
-use crate::renderer_software::{SoftwareRenderer, SoftwareScene, SoftwareSurface, SoftwareTarget};
-use crate::renderer_vulkan::{
-    DeviceSelection, SubmissionReceipt, VulkanConfig, VulkanDevice, VulkanDmaBufScanoutTarget,
-    VulkanInstance, VulkanScene,
-};
+use crate::render::{ImageAlphaMode, ImageId, ImagePixelFormat, RenderSceneDelta};
 use crate::runtime::CompositionDriver;
 use crate::wayland_server::{Display, ProtocolCatalog, ProtocolSourcePaths};
 use crate::{
@@ -48,12 +38,13 @@ use crate::{
 
 use crate::application_host::declaration::ShellActionHandler;
 use crate::application_host::{
-    AppError, AppResult, ComposedAppRuntime, LinuxDesktopConfig, ReadyDesktopEnvironment, Renderer,
+    AppError, AppResult, ComposedAppRuntime, LinuxDesktopConfig, ReadyDesktopEnvironment,
     ShellWidgetAnchor, ShellWidgetExtent, WindowFrameFactory,
 };
 
 // Keep this root focused on assembling resources and running the single Wayland/KMS owner loop.
 // Each stateful or policy-heavy subsystem below owns its own invariants and focused tests.
+mod client;
 mod cursor_plane;
 mod event_source;
 mod geometry;
@@ -61,11 +52,12 @@ mod input;
 mod interaction;
 mod layers;
 mod pointer_visual;
-mod scanout;
+mod renderer;
 mod scene;
 mod shm_copy;
 mod state;
 
+use client::{ClientWindow, PreparedClientImage, apply_surface_publication, finish_shm_copy};
 #[cfg(test)]
 use cursor_plane::{CursorCommitTracker, HARDWARE_CURSOR_BUFFER_COUNT};
 use cursor_plane::{HardwareCursor, PendingKmsCommit};
@@ -77,423 +69,20 @@ use input::*;
 use interaction::*;
 use layers::*;
 use pointer_visual::*;
-use scanout::{SoftwareScanout, VulkanScanout};
+use renderer::{DesktopRenderResult, DesktopRenderer};
 #[cfg(test)]
-use scanout::{
+use renderer::{
     VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT, VULKAN_STAGING_MIN_BYTES_PER_SLOT,
     vulkan_staging_budget_bytes,
 };
-use scene::{DesktopImageUpdate, DesktopLayer, DesktopLayerKey, DesktopScene, delta_damage};
+use scene::{
+    DesktopComposition, DesktopImageRegion, DesktopImageUpdate, DesktopLayer, DesktopLayerKey,
+    DesktopSceneKey,
+};
 use shm_copy::{ShmCopyCompletion, ShmCopyRequest, ShmCopyWorker};
 use state::{ConfigureScheduler, PendingResizeConfigure, ResizeAnchor, acknowledged_final_resize};
 
 const MAX_DEFERRED_SHM_COPIES: usize = 64;
-
-struct ClientWindow {
-    revision: u64,
-    role: SurfaceRole,
-    parent: Option<WaylandSurfaceId>,
-    offset: PointI,
-    server_decorated: bool,
-    position: PointI,
-    size: SizeI,
-    requested_size: SizeI,
-    resize_anchor: Option<ResizeAnchor>,
-    resize_final_size: Option<SizeI>,
-    restore_geometry: Option<(PointI, SizeI)>,
-    maximized: bool,
-    fullscreen: bool,
-    minimized: bool,
-    chrome_outer: Option<SizeI>,
-    chrome_content_offset: Option<PointI>,
-    chrome: Option<WindowChromeSnapshot>,
-    alpha_mode: ImageAlphaMode,
-    pixel_format: ImagePixelFormat,
-    pending_image_update: PendingClientImageUpdate,
-    pixels: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-enum PendingClientImageUpdate {
-    #[default]
-    Unchanged,
-    Full(Arc<[u8]>),
-    Region(RectI),
-}
-
-impl PendingClientImageUpdate {
-    fn merge_region(&mut self, update: &crate::render::ImageResourceUpdate) {
-        match self {
-            Self::Full(pixels) => patch_client_pixels(Arc::make_mut(pixels), update),
-            Self::Region(rect) => *rect = union_rect(*rect, update.rect),
-            Self::Unchanged => *self = Self::Region(update.rect),
-        }
-    }
-}
-
-enum PreparedClientImage {
-    Unchanged {
-        extent: SizeI,
-        pixel_format: ImagePixelFormat,
-        alpha_mode: ImageAlphaMode,
-    },
-    Full {
-        image: crate::render::ImageResource,
-        retained_pixels: Vec<u8>,
-    },
-    Region(crate::render::ImageResourceUpdate),
-}
-
-impl PreparedClientImage {
-    fn full(image: crate::render::ImageResource) -> Self {
-        let retained_pixels = image.pixels.to_vec();
-        Self::Full {
-            image,
-            retained_pixels,
-        }
-    }
-
-    fn extent(&self) -> SizeI {
-        match self {
-            Self::Unchanged { extent, .. } => *extent,
-            Self::Full { image, .. } => image.extent,
-            Self::Region(update) => update.extent,
-        }
-    }
-
-    fn pixel_format(&self) -> ImagePixelFormat {
-        match self {
-            Self::Unchanged { pixel_format, .. } => *pixel_format,
-            Self::Full { image, .. } => image.pixel_format,
-            Self::Region(update) => update.pixel_format,
-        }
-    }
-
-    fn alpha_mode(&self) -> ImageAlphaMode {
-        match self {
-            Self::Unchanged { alpha_mode, .. } => *alpha_mode,
-            Self::Full { image, .. } => image.alpha_mode,
-            Self::Region(update) => update.alpha_mode,
-        }
-    }
-}
-
-impl ClientWindow {
-    fn apply_image(&mut self, revision: u64, image: PreparedClientImage) {
-        self.revision = self.revision.max(revision);
-        match image {
-            PreparedClientImage::Unchanged { .. } => {}
-            PreparedClientImage::Full {
-                image,
-                retained_pixels,
-            } => {
-                self.size = image.extent;
-                self.alpha_mode = image.alpha_mode;
-                self.pixel_format = image.pixel_format;
-                self.pixels = retained_pixels;
-                self.pending_image_update = PendingClientImageUpdate::Full(image.pixels);
-            }
-            PreparedClientImage::Region(update) => {
-                patch_client_pixels(&mut self.pixels, &update);
-                self.pending_image_update.merge_region(&update);
-            }
-        }
-    }
-
-    fn take_image_update(&mut self) -> DesktopImageUpdate {
-        match std::mem::take(&mut self.pending_image_update) {
-            PendingClientImageUpdate::Unchanged => DesktopImageUpdate::Unchanged,
-            PendingClientImageUpdate::Full(pixels) => DesktopImageUpdate::Full(pixels),
-            PendingClientImageUpdate::Region(rect) => DesktopImageUpdate::Region {
-                rect,
-                row_bytes: rect.width as usize * 4,
-                pixels: copy_client_region(&self.pixels, self.size, rect).into(),
-            },
-        }
-    }
-}
-
-fn patch_client_pixels(target: &mut [u8], update: &crate::render::ImageResourceUpdate) {
-    let destination_stride = update.extent.width as usize * 4;
-    let copy_bytes = update.rect.width as usize * 4;
-    for row in 0..update.rect.height as usize {
-        let source = row * update.row_bytes;
-        let target_offset =
-            (update.rect.y as usize + row) * destination_stride + update.rect.x as usize * 4;
-        target[target_offset..target_offset + copy_bytes]
-            .copy_from_slice(&update.pixels[source..source + copy_bytes]);
-    }
-}
-
-fn copy_client_region(source: &[u8], extent: SizeI, rect: RectI) -> Vec<u8> {
-    let stride = extent.width as usize * 4;
-    let row_bytes = rect.width as usize * 4;
-    let mut pixels = Vec::with_capacity(row_bytes * rect.height as usize);
-    for row in rect.y as usize..rect.bottom() as usize {
-        let start = row * stride + rect.x as usize * 4;
-        pixels.extend_from_slice(&source[start..start + row_bytes]);
-    }
-    pixels
-}
-
-#[allow(clippy::too_many_arguments)]
-fn apply_surface_publication(
-    display: &Display,
-    wayland: &mut NativeCompositor<'_>,
-    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
-    stacking_order: &mut Vec<WaylandSurfaceId>,
-    next_window_offset: &mut i32,
-    work_area: RectI,
-    session_locked: bool,
-    pointer_scene_dirty: &mut bool,
-    snapshot: &crate::compositor_wayland::SurfaceStateSnapshot,
-    prepared_image: PreparedClientImage,
-) -> AppResult<()> {
-    let surface = snapshot.surface;
-    let role = snapshot
-        .role
-        .ok_or_else(|| AppError::new("published surface has no role"))?;
-    let image_extent = prepared_image.extent();
-    let image_pixel_format = prepared_image.pixel_format();
-    let image_alpha_mode = prepared_image.alpha_mode();
-    let (parent, offset, position) = if role == SurfaceRole::Subsurface {
-        let parent = wayland.core().subsurfaces.parent(surface);
-        let offset = wayland
-            .core()
-            .subsurfaces
-            .position(surface)
-            .map_or(PointI::default(), |position| position.offset);
-        let position = parent
-            .and_then(|parent| windows.get(&parent))
-            .map_or(offset, |parent| PointI {
-                x: parent.position.x + offset.x,
-                y: parent.position.y + offset.y,
-            });
-        (parent, offset, position)
-    } else if role == SurfaceRole::XdgPopup {
-        let (parent, geometry) = wayland.popup_placement(surface).unwrap_or((
-            None,
-            RectI {
-                x: 0,
-                y: 0,
-                width: image_extent.width,
-                height: image_extent.height,
-            },
-        ));
-        let offset = PointI {
-            x: geometry.x,
-            y: geometry.y,
-        };
-        let position = parent
-            .and_then(|parent| windows.get(&parent))
-            .map_or(offset, |parent| PointI {
-                x: parent.position.x + offset.x,
-                y: parent.position.y + offset.y,
-            });
-        (parent, offset, position)
-    } else if matches!(
-        role,
-        SurfaceRole::Cursor | SurfaceRole::DragIcon | SurfaceRole::SessionLock
-    ) {
-        (None, PointI::default(), PointI::default())
-    } else {
-        let position = windows.get(&surface).map_or_else(
-            || {
-                let offset = *next_window_offset;
-                *next_window_offset = (*next_window_offset + 28) % 280;
-                PointI {
-                    x: work_area.x + 48 + offset,
-                    y: work_area.y + 48 + offset,
-                }
-            },
-            |window| window.position,
-        );
-        (None, PointI::default(), position)
-    };
-    let is_new = !windows.contains_key(&surface);
-    let previous_window = windows.get(&surface);
-    let mut requested_size = retained_requested_size(
-        previous_window.map(|window| window.requested_size),
-        image_extent,
-    );
-    let mut reconciled_position = position;
-    let mut resize_anchor = previous_window.and_then(|window| window.resize_anchor);
-    let resize_final_size = previous_window.and_then(|window| window.resize_final_size);
-    let final_resize_acked = role == SurfaceRole::XdgToplevel
-        && acknowledged_final_resize(
-            resize_final_size,
-            wayland
-                .core()
-                .xdg_surface(surface)
-                .and_then(|xdg| xdg.last_acked()),
-        );
-    let mut retained_resize_final_size = resize_final_size;
-    if final_resize_acked && let Some(anchor) = resize_anchor.take() {
-        reconciled_position = anchor.reconcile_position(position, image_extent);
-        requested_size = image_extent;
-        retained_resize_final_size = None;
-    }
-    let (
-        restore_geometry,
-        maximized,
-        fullscreen,
-        minimized,
-        chrome_outer,
-        chrome_content_offset,
-        chrome,
-    ) = windows
-        .get(&surface)
-        .map_or((None, false, false, false, None, None, None), |window| {
-            (
-                window.restore_geometry,
-                window.maximized,
-                window.fullscreen,
-                window.minimized,
-                window.chrome_outer,
-                window.chrome_content_offset,
-                window.chrome.clone(),
-            )
-        });
-    let server_decorated = role == SurfaceRole::XdgToplevel
-        && wayland.decoration_mode(surface)
-            != Some(crate::compositor_wayland::DecorationMode::ClientSide);
-    let pointer_geometry_changed = !matches!(role, SurfaceRole::Cursor | SurfaceRole::DragIcon)
-        && previous_window.is_none_or(|window| {
-            window.role != role
-                || window.position != reconciled_position
-                || window.size != image_extent
-                || window.minimized != minimized
-                || window.server_decorated != server_decorated
-        });
-    if let Some(window) = windows.get_mut(&surface) {
-        window.role = role;
-        window.parent = parent;
-        window.offset = offset;
-        window.server_decorated = server_decorated;
-        window.position = reconciled_position;
-        window.requested_size = requested_size;
-        window.restore_geometry = restore_geometry;
-        window.maximized = maximized;
-        window.fullscreen = fullscreen;
-        window.minimized = minimized;
-        window.chrome_outer = chrome_outer;
-        window.chrome_content_offset = chrome_content_offset;
-        window.chrome = chrome;
-        window.resize_anchor = resize_anchor;
-        window.resize_final_size = retained_resize_final_size;
-        window.apply_image(snapshot.revision, prepared_image);
-    } else {
-        let PreparedClientImage::Full {
-            image,
-            retained_pixels,
-        } = prepared_image
-        else {
-            return Err(AppError::new(
-                "new surface publication did not provide a complete image",
-            ));
-        };
-        windows.insert(
-            surface,
-            ClientWindow {
-                revision: snapshot.revision,
-                role,
-                parent,
-                offset,
-                server_decorated,
-                position: reconciled_position,
-                size: image.extent,
-                requested_size,
-                restore_geometry,
-                maximized,
-                fullscreen,
-                minimized,
-                chrome_outer,
-                chrome_content_offset,
-                chrome,
-                resize_anchor,
-                resize_final_size: retained_resize_final_size,
-                alpha_mode: image_alpha_mode,
-                pixel_format: image_pixel_format,
-                pending_image_update: PendingClientImageUpdate::Full(image.pixels),
-                pixels: retained_pixels,
-            },
-        );
-    }
-    if is_new && !matches!(role, SurfaceRole::Cursor | SurfaceRole::DragIcon) {
-        stacking_order.push(surface);
-    }
-    *pointer_scene_dirty |= pointer_geometry_changed;
-    if session_locked && role == SurfaceRole::SessionLock {
-        wayland
-            .set_keyboard_focus(1, Some(surface), display.next_serial())
-            .map_err(app_error)?;
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finish_shm_copy(
-    display: &Display,
-    wayland: &mut NativeCompositor<'_>,
-    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
-    stacking_order: &mut Vec<WaylandSurfaceId>,
-    next_window_offset: &mut i32,
-    work_area: RectI,
-    session_locked: bool,
-    pointer_scene_dirty: &mut bool,
-    pending_buffers: &mut BTreeMap<crate::compositor_wayland::WaylandBufferId, usize>,
-    pending_surfaces: &mut BTreeMap<WaylandSurfaceId, usize>,
-    completion: ShmCopyCompletion,
-) -> AppResult<bool> {
-    let pending = pending_buffers
-        .get_mut(&completion.buffer)
-        .ok_or_else(|| AppError::new("completed SHM buffer copy was not tracked"))?;
-    *pending = pending
-        .checked_sub(1)
-        .ok_or_else(|| AppError::new("completed SHM buffer copy count underflow"))?;
-    if *pending == 0 {
-        pending_buffers.remove(&completion.buffer);
-    }
-    let pending = pending_surfaces
-        .get_mut(&completion.snapshot.surface)
-        .ok_or_else(|| AppError::new("completed SHM surface copy was not tracked"))?;
-    *pending = pending
-        .checked_sub(1)
-        .ok_or_else(|| AppError::new("completed SHM surface copy count underflow"))?;
-    if *pending == 0 {
-        pending_surfaces.remove(&completion.snapshot.surface);
-    }
-    let image = completion.result.map_err(AppError::new)?;
-    let current = wayland
-        .core()
-        .world
-        .surface(completion.snapshot.surface)
-        .map(|surface| surface.snapshot().clone());
-    let apply = current
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.attachment.is_some())
-        && !pending_surfaces.contains_key(&completion.snapshot.surface);
-    if apply {
-        apply_surface_publication(
-            display,
-            wayland,
-            windows,
-            stacking_order,
-            next_window_offset,
-            work_area,
-            session_locked,
-            pointer_scene_dirty,
-            current.as_ref().expect("live surface checked"),
-            image,
-        )?;
-    }
-    if !pending_buffers.contains_key(&completion.buffer) {
-        wayland
-            .release_buffer(completion.buffer)
-            .map_err(app_error)?;
-    }
-    Ok(apply)
-}
 
 pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let _profiler = crate::application_host::profiler::ManagedProfiler::start(
@@ -596,17 +185,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .enumerate()
         .map(|(index, framebuffer)| FrameSlot::new(index, framebuffer.id()))
         .collect::<Vec<_>>();
-    let mut vulkan_scanout = match renderer {
-        Renderer::Vulkan => Some(VulkanScanout::new(&scanout_buffers, extent)?),
-        Renderer::Auto => VulkanScanout::new(&scanout_buffers, extent).ok(),
-        Renderer::Software => None,
-    };
-    let mut software_scanout = if vulkan_scanout.is_none() {
-        Some(SoftwareScanout::new(frame_slots.len())?)
-    } else {
-        None
-    };
-    let mut desktop_scene = DesktopScene::new(extent);
+    let mut desktop_renderer = DesktopRenderer::new(renderer, &scanout_buffers, extent)?;
+    let mut desktop_scene = DesktopComposition::new(extent);
     let cursor_plane = topology.planes.iter().find(|candidate| {
         candidate.possible_crtcs_mask & (1_u32.checked_shl(crtc_index as u32).unwrap_or(0)) != 0
             && candidate.formats.contains(&DRM_FORMAT_ARGB8888)
@@ -622,7 +202,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     crate::profiler::record_instant(if hardware_cursor.is_some() {
         "presentation.cursor.hardware_available"
     } else {
-        "presentation.cursor.software_fallback"
+        "presentation.cursor.composited_fallback"
     });
 
     let display = Display::new().map_err(app_error)?;
@@ -681,9 +261,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let input_ready = Box::new(InputReadyState::new(true));
     let kms_ready = Box::new(AtomicBool::new(false));
     let runtime_ready = Box::new(AtomicBool::new(false));
-    let vulkan_completion_ready = vulkan_scanout
-        .as_ref()
-        .map(|_| Box::new(AtomicBool::new(false)));
+    let vulkan_completion_ready = desktop_renderer
+        .is_vulkan()
+        .then(|| Box::new(AtomicBool::new(false)));
     let external_mask = crate::wayland_server::ffi::WL_EVENT_READABLE
         | crate::wayland_server::ffi::WL_EVENT_HANGUP
         | crate::wayland_server::ffi::WL_EVENT_ERROR;
@@ -723,11 +303,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         )
     }
     .map_err(app_error)?;
-    let _vulkan_completion_source = match (&vulkan_scanout, &vulkan_completion_ready) {
-        (Some(vulkan), Some(ready)) => Some(
+    let _vulkan_completion_source = match (
+        desktop_renderer.completion_event_fd(),
+        &vulkan_completion_ready,
+    ) {
+        (Some(event_fd), Some(ready)) => Some(
             unsafe {
                 display.event_loop().add_fd(
-                    vulkan.completion_event_fd(),
+                    event_fd,
                     external_mask,
                     Some(mark_external_fd_ready),
                     std::ptr::from_ref(ready.as_ref()).cast_mut().cast(),
@@ -767,7 +350,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .collect::<AppResult<Vec<_>>>()?;
     // Mount icon components immediately so semantic icon declarations are validated and retained.
     for (_, icon) in &mut icon_layers {
-        let _ = icon.render(
+        icon.prepare(
             SizeI {
                 width: 24,
                 height: 24,
@@ -1403,7 +986,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     }
                 } else if hardware_cursor
                     .as_ref()
-                    .is_some_and(|cursor| !cursor.software_fallback_requested())
+                    .is_some_and(|cursor| !cursor.composited_fallback_requested())
                 {
                     hardware_cursor
                         .as_mut()
@@ -1418,7 +1001,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     pointer_primary_dirty = true;
                     #[cfg(feature = "profiler")]
                     {
-                        cursor_path = PointerCursorPath::SoftwareDamage;
+                        cursor_path = PointerCursorPath::CompositedDamage;
                     }
                 }
             }
@@ -1550,7 +1133,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 {
                     hardware_cursor = None;
                     #[cfg(feature = "profiler")]
-                    crate::profiler::record_instant("presentation.cursor.software_fallback");
+                    crate::profiler::record_instant("presentation.cursor.composited_fallback");
                 }
             }
         }
@@ -1558,9 +1141,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         if vulkan_completion_ready
             .as_ref()
             .is_some_and(|ready| ready.swap(false, Ordering::AcqRel))
-            && let Some(vulkan) = &vulkan_scanout
         {
-            for completion in vulkan.drain_completions() {
+            for completion in desktop_renderer.drain_completions() {
                 completion.result.map_err(AppError::new)?;
                 frame_slots[completion.slot_index]
                     .gpu_completed()
@@ -1961,7 +1543,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             let cursor_fallback_submission = cursor_snapshot.is_some()
                 && hardware_cursor
                     .as_ref()
-                    .is_some_and(HardwareCursor::software_fallback_requested);
+                    .is_some_and(HardwareCursor::composited_fallback_requested);
             #[cfg(feature = "profiler")]
             let _kms_commit = crate::profiler::span!("presentation.kms.atomic_commit");
             let commit_result = if first_modeset {
@@ -2064,7 +1646,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     let cursor = hardware_cursor
                         .as_mut()
                         .expect("failed atomic cursor remains owned");
-                    cursor.request_software_fallback();
+                    cursor.request_composited_fallback();
                     if cursor.ready_to_retire() {
                         hardware_cursor = None;
                     }
@@ -2198,29 +1780,35 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             let mut cursor_on_hardware = false;
             if let Some(cursor) = &mut hardware_cursor {
                 cursor.move_to(pointer_position);
-                if !cursor.software_fallback_requested() {
-                    let update = match &rendered_cursor {
-                        Some(image) => cursor.set_image(image),
-                        None => {
-                            cursor.hide();
-                            Ok(())
-                        }
-                    };
-                    if update.is_ok() {
-                        cursor_on_hardware = true;
-                        #[cfg(feature = "profiler")]
-                        crate::profiler::record_instant(
-                            "presentation.cursor.hardware_image_staged",
-                        );
+                if !cursor.composited_fallback_requested() {
+                    let update = if let Some(image) =
+                        rendered_cursor.as_ref().and_then(CursorVisual::image)
+                    {
+                        cursor.set_image(image).map(|_| true)
                     } else {
-                        cursor.request_software_fallback();
-                        #[cfg(feature = "profiler")]
-                        {
-                            pending_primary_pointer_event_us = latest_pointer_event_this_turn
-                                .or_else(|| pending_deferred_cursor_event_us.take());
-                            crate::profiler::record_instant(
-                                "presentation.cursor.hardware_image_failed",
-                            );
+                        cursor.hide();
+                        Ok(rendered_cursor.is_none())
+                    };
+                    match update {
+                        Ok(on_hardware) => {
+                            cursor_on_hardware = on_hardware;
+                            #[cfg(feature = "profiler")]
+                            if on_hardware {
+                                crate::profiler::record_instant(
+                                    "presentation.cursor.hardware_image_staged",
+                                );
+                            }
+                        }
+                        Err(_) => {
+                            cursor.request_composited_fallback();
+                            #[cfg(feature = "profiler")]
+                            {
+                                pending_primary_pointer_event_us = latest_pointer_event_this_turn
+                                    .or_else(|| pending_deferred_cursor_event_us.take());
+                                crate::profiler::record_instant(
+                                    "presentation.cursor.hardware_image_failed",
+                                );
+                            }
                         }
                     }
                 }
@@ -2242,6 +1830,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 &stacking_order,
                 &mut widgets,
                 &mut icon_layers,
+                &mut pointer,
                 wayland.drag_icon(1),
                 drag_position,
                 (!cursor_on_hardware)
@@ -2250,45 +1839,49 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 pointer_position,
                 &config,
             )?;
-            let Some(delta) = desktop_scene.synchronize(extent, layers) else {
+            let Some(frame) = desktop_scene.synchronize(extent, layers) else {
                 repaint = false;
                 continue;
             };
-            let frame_damage = delta_damage(&delta, extent);
             let frame_id = next_frame_id;
             next_frame_id = next_frame_id.wrapping_add(1).max(1);
             frame_slots[scanout_index]
                 .begin_render(frame_id)
                 .map_err(app_error)?;
-            if let Some(vulkan) = &mut vulkan_scanout {
-                vulkan.render(scanout_index, extent, delta, frame_damage)?;
-                frame_slots[scanout_index]
-                    .gpu_submitted()
-                    .map_err(app_error)?;
-            } else {
-                let software = software_scanout
-                    .as_mut()
-                    .expect("software output exists when Vulkan is disabled");
-                let scanout_region = software.render(scanout_index, extent, delta, frame_damage)?;
-                #[cfg(feature = "profiler")]
-                {
-                    crate::profiler::counter!(
-                        "render.upload_bytes",
-                        rect_area(scanout_region).saturating_mul(4)
-                    );
-                    crate::profiler::counter!("render.damage_area", rect_area(scanout_region));
+            match desktop_renderer.render(scanout_index, frame)? {
+                DesktopRenderResult::Vulkan => {
+                    frame_slots[scanout_index]
+                        .gpu_submitted()
+                        .map_err(app_error)?;
                 }
-                scanout_buffers[scanout_index]
-                    .map_write()
-                    .map_err(app_error)?
-                    .write_rgba8_region(software.pixels(), scanout_region)
-                    .map_err(app_error)?;
-                software.mark_copied(scanout_index);
-                frame_slots[scanout_index]
-                    .gpu_submitted()
-                    .and_then(|_| frame_slots[scanout_index].gpu_completed())
-                    .map_err(app_error)?;
-                ready_scanout.push_back(scanout_index);
+                DesktopRenderResult::Software {
+                    damage: scanout_region,
+                } => {
+                    #[cfg(feature = "profiler")]
+                    {
+                        crate::profiler::counter!(
+                            "render.upload_bytes",
+                            rect_area(scanout_region).saturating_mul(4)
+                        );
+                        crate::profiler::counter!("render.damage_area", rect_area(scanout_region));
+                    }
+                    scanout_buffers[scanout_index]
+                        .map_write()
+                        .map_err(app_error)?
+                        .write_rgba8_region(
+                            desktop_renderer
+                                .software_pixels()
+                                .expect("software result owns software pixels"),
+                            scanout_region,
+                        )
+                        .map_err(app_error)?;
+                    desktop_renderer.mark_software_copied(scanout_index);
+                    frame_slots[scanout_index]
+                        .gpu_submitted()
+                        .and_then(|_| frame_slots[scanout_index].gpu_completed())
+                        .map_err(app_error)?;
+                    ready_scanout.push_back(scanout_index);
+                }
             }
             #[cfg(feature = "profiler")]
             {
@@ -2494,7 +2087,7 @@ mod tests {
         cursor.mark_submitted(visible).unwrap();
         cursor.mark_completed(visible).unwrap();
 
-        cursor.request_software_fallback();
+        cursor.request_composited_fallback();
         assert!(!cursor.ready_to_retire());
         let hidden = cursor.desired_submission().expect("plane disable is dirty");
         assert!(!hidden.visible);

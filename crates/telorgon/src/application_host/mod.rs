@@ -9,6 +9,9 @@ mod delta_queue;
 mod desktop_wayland;
 // Keep the platform-neutral compositor transaction and retained-scene tests executable on the
 // development host even when the native Wayland/KMS owner is compiled only for Linux.
+#[cfg(test)]
+#[path = "desktop_wayland/backend_boundary.rs"]
+mod desktop_wayland_backend_boundary_tests;
 #[cfg(all(test, not(target_os = "linux")))]
 #[path = "desktop_wayland/scene.rs"]
 mod desktop_wayland_scene_tests;

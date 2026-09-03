@@ -2,13 +2,7 @@ use super::*;
 
 pub(super) struct Layer {
     pub(super) runtime: ComposedAppRuntime,
-    renderer: SoftwareRenderer,
-    scene: SoftwareScene,
-    surface: SoftwareSurface,
-    content_version: u64,
-    retained_pixels: Arc<[u8]>,
-    retained_version: u64,
-    pending_update: DesktopImageUpdate,
+    pending_deltas: Vec<RenderSceneDelta>,
 }
 
 impl Layer {
@@ -17,8 +11,6 @@ impl Layer {
         extent: SizeI,
         assets: AssetBundle,
     ) -> AppResult<Self> {
-        let renderer = SoftwareRenderer;
-        let scene = renderer.create_scene().map_err(app_error)?;
         let mut runtime = ComposedAppRuntime::from_composition_driver(driver, extent)?;
         let mut media = AssetMediaCache::new(assets).map_err(app_error)?;
         for resource in media.preload_render_resources().map_err(app_error)? {
@@ -26,17 +18,11 @@ impl Layer {
         }
         Ok(Self {
             runtime,
-            renderer,
-            scene,
-            surface: SoftwareSurface::default(),
-            content_version: 0,
-            retained_pixels: Arc::from([]),
-            retained_version: 0,
-            pending_update: DesktopImageUpdate::Unchanged,
+            pending_deltas: Vec::new(),
         })
     }
 
-    pub(super) fn render(&mut self, extent: SizeI, now: u64, force: bool) -> AppResult<&[u8]> {
+    pub(super) fn prepare(&mut self, extent: SizeI, now: u64, force: bool) -> AppResult<()> {
         let extent_changed = self.runtime.extent()
             != (SizeF {
                 width: extent.width as f32,
@@ -47,62 +33,14 @@ impl Layer {
         }
         self.runtime
             .prepare_frame(MonotonicInstant::from_nanos(now), force)?;
-        let mut changed = extent_changed || force;
         while let Some(delta) = self.runtime.pop_scene_delta() {
-            changed = true;
-            self.renderer
-                .apply_scene_delta(&mut self.scene, &delta)
-                .map_err(app_error)?;
+            self.pending_deltas.push(delta);
         }
-        if !changed && self.content_version != 0 {
-            return Ok(self.surface.pixels_rgba8());
-        }
-        let target = SoftwareTarget::new(RenderTargetInfo::full(extent));
-        let clear = self.scene.background();
-        let mut frame = self.surface.begin_frame();
-        let stats = self
-            .renderer
-            .render(
-                &mut self.scene,
-                &mut frame,
-                &target,
-                &RenderRequest {
-                    force,
-                    load: TargetLoad::Clear(clear),
-                    store: TargetStore::Store,
-                    region: None,
-                },
-            )
-            .map_err(app_error)?;
-        if !stats.recorded {
-            return Ok(self.surface.pixels_rgba8());
-        }
-        self.content_version = self.content_version.wrapping_add(1).max(1);
-        let update = layer_update_from_damage(&self.surface, extent);
-        self.pending_update = merge_layer_update(
-            std::mem::replace(&mut self.pending_update, DesktopImageUpdate::Unchanged),
-            update,
-            &self.surface,
-            extent,
-        );
-        Ok(self.surface.pixels_rgba8())
+        Ok(())
     }
 
-    pub(super) fn content_version(&self) -> u64 {
-        self.content_version
-    }
-
-    pub(super) fn pixels(&mut self) -> Arc<[u8]> {
-        if self.retained_version != self.content_version {
-            self.retained_pixels = Arc::from(self.surface.pixels_rgba8());
-            self.retained_version = self.content_version;
-        }
-        self.pending_update = DesktopImageUpdate::Unchanged;
-        Arc::clone(&self.retained_pixels)
-    }
-
-    pub(super) fn take_update(&mut self) -> DesktopImageUpdate {
-        std::mem::replace(&mut self.pending_update, DesktopImageUpdate::Unchanged)
+    pub(super) fn take_deltas(&mut self) -> Vec<RenderSceneDelta> {
+        std::mem::take(&mut self.pending_deltas)
     }
 
     pub(super) fn pointer_motion(&mut self, position: PointF, now: MonotonicInstant) -> bool {
@@ -136,63 +74,6 @@ impl Layer {
     fn animation_active(&self) -> bool {
         self.runtime.animation_active()
     }
-}
-
-fn layer_update_from_damage(surface: &SoftwareSurface, extent: SizeI) -> DesktopImageUpdate {
-    let damage = surface.presented_damage();
-    if damage.full {
-        return DesktopImageUpdate::Full(Arc::from(surface.pixels_rgba8()));
-    }
-    let rect = damage
-        .rects
-        .iter()
-        .map(|rect| rect.to_i32())
-        .filter_map(|rect| intersect_rect(rect, full_rect(extent)))
-        .reduce(union_rect);
-    rect.map_or(DesktopImageUpdate::Unchanged, |rect| {
-        DesktopImageUpdate::Region {
-            rect,
-            row_bytes: rect.width as usize * 4,
-            pixels: copy_software_region(surface.pixels_rgba8(), extent, rect).into(),
-        }
-    })
-}
-
-fn merge_layer_update(
-    previous: DesktopImageUpdate,
-    current: DesktopImageUpdate,
-    surface: &SoftwareSurface,
-    extent: SizeI,
-) -> DesktopImageUpdate {
-    match (previous, current) {
-        (DesktopImageUpdate::Unchanged, current) => current,
-        (previous, DesktopImageUpdate::Unchanged) => previous,
-        (_, DesktopImageUpdate::Full(_)) | (DesktopImageUpdate::Full(_), _) => {
-            DesktopImageUpdate::Full(Arc::from(surface.pixels_rgba8()))
-        }
-        (
-            DesktopImageUpdate::Region { rect: left, .. },
-            DesktopImageUpdate::Region { rect: right, .. },
-        ) => {
-            let rect = union_rect(left, right);
-            DesktopImageUpdate::Region {
-                rect,
-                row_bytes: rect.width as usize * 4,
-                pixels: copy_software_region(surface.pixels_rgba8(), extent, rect).into(),
-            }
-        }
-    }
-}
-
-fn copy_software_region(source: &[u8], extent: SizeI, rect: RectI) -> Vec<u8> {
-    let stride = extent.width as usize * 4;
-    let row_bytes = rect.width as usize * 4;
-    let mut pixels = Vec::with_capacity(row_bytes * rect.height as usize);
-    for row in rect.y as usize..rect.bottom() as usize {
-        let start = row * stride + rect.x as usize * 4;
-        pixels.extend_from_slice(&source[start..start + row_bytes]);
-    }
-    pixels
 }
 
 pub(super) fn route_frame_pointer_motion(
@@ -341,7 +222,6 @@ pub(super) fn refresh_window_frames(
                     snapshot: None,
                     outer: previous_outer,
                     icon_image: None,
-                    content_version: 0,
                 },
             );
         }
@@ -370,7 +250,7 @@ pub(super) fn refresh_window_frames(
             frame.icon_image = icon_image_id;
         }
         frame.model = model;
-        frame.layer.render(frame.outer, now, created)?;
+        frame.layer.prepare(frame.outer, now, created)?;
         let mut snapshot =
             WindowChromeSnapshot::derive(frame.layer.runtime.ui(), frame.layer.runtime.layout())
                 .map_err(app_error)?;
@@ -390,7 +270,7 @@ pub(super) fn refresh_window_frames(
         };
         if corrected != frame.outer {
             frame.outer = corrected;
-            frame.layer.render(frame.outer, now, true)?;
+            frame.layer.prepare(frame.outer, now, true)?;
             snapshot = WindowChromeSnapshot::derive(
                 frame.layer.runtime.ui(),
                 frame.layer.runtime.layout(),
@@ -398,8 +278,7 @@ pub(super) fn refresh_window_frames(
             .map_err(app_error)?;
         }
         frame.snapshot = Some(snapshot.clone());
-        frame.layer.render(frame.outer, now, false)?;
-        frame.content_version = frame.layer.content_version();
+        frame.layer.prepare(frame.outer, now, false)?;
         updates.push((
             surface,
             frame.outer,
@@ -440,7 +319,6 @@ pub(super) struct WindowFrameLayer {
     pub(super) snapshot: Option<WindowChromeSnapshot>,
     pub(super) outer: SizeI,
     icon_image: Option<ImageId>,
-    pub(super) content_version: u64,
 }
 
 pub(super) fn desktop_runtime_schedule(
@@ -481,28 +359,27 @@ pub(super) fn prepare_desktop_layers(
     stacking_order: &[WaylandSurfaceId],
     widgets: &mut [WidgetLayer],
     icons: &mut [(String, Layer)],
+    pointer_layer: &mut Option<Layer>,
     drag_icon: Option<WaylandSurfaceId>,
     drag_position: PointF,
-    cursor: Option<&RenderedCursor>,
+    cursor: Option<&CursorVisual>,
     pointer_position: PointF,
     config: &LinuxDesktopConfig,
 ) -> AppResult<Vec<DesktopLayer>> {
     let mut layers = Vec::new();
-    if !session_locked {
-        background.render(extent, now, first_modeset)?;
-        let pixels = background.pixels();
-        layers.push(DesktopLayer {
-            key: DesktopLayerKey::Background,
-            content_version: background.content_version(),
-            update: DesktopImageUpdate::Full(pixels),
-            extent,
-            position: PointI::default(),
-            clip: None,
-            alpha_mode: ImageAlphaMode::Opaque,
-            pixel_format: ImagePixelFormat::Rgba8,
-            visible: true,
-        });
-    }
+    background.prepare(extent, now, first_modeset)?;
+    layers.push(DesktopLayer::retained(
+        DesktopLayerKey::Background,
+        DesktopSceneKey::Background,
+        if session_locked {
+            Vec::new()
+        } else {
+            background.take_deltas()
+        },
+        extent,
+        PointI::default(),
+        !session_locked,
+    ));
 
     let placements = windows
         .iter()
@@ -533,17 +410,18 @@ pub(super) fn prepare_desktop_layers(
         if window_is_decorated(window)
             && let Some(frame) = frames.get_mut(surface)
         {
-            layers.push(DesktopLayer {
-                key: DesktopLayerKey::Frame(surface.get()),
-                content_version: frame.content_version,
-                update: frame.layer.take_update(),
-                extent: frame.outer,
+            layers.push(DesktopLayer::retained(
+                DesktopLayerKey::Frame(surface.get()),
+                DesktopSceneKey::Frame(surface.get()),
+                if visible {
+                    frame.layer.take_deltas()
+                } else {
+                    Vec::new()
+                },
+                frame.outer,
                 position,
-                clip: None,
-                alpha_mode: ImageAlphaMode::Straight,
-                pixel_format: ImagePixelFormat::Rgba8,
                 visible,
-            });
+            ));
         }
         if visible
             && window_is_decorated(window)
@@ -562,14 +440,13 @@ pub(super) fn prepare_desktop_layers(
                 else {
                     continue;
                 };
-                icon.render(icon_extent, now, false)?;
-                let pixels = icon.pixels();
-                layers.push(DesktopLayer {
-                    key: DesktopLayerKey::LegacyControl(surface.get(), index as u8),
-                    content_version: icon.content_version(),
-                    update: DesktopImageUpdate::Full(pixels),
-                    extent: icon_extent,
-                    position: PointI {
+                icon.prepare(icon_extent, now, false)?;
+                layers.push(DesktopLayer::retained(
+                    DesktopLayerKey::LegacyControl(surface.get(), index as u8),
+                    DesktopSceneKey::LegacyControl(index as u8),
+                    icon.take_deltas(),
+                    icon_extent,
+                    PointI {
                         x: position.x + outer.width
                             - config.window_border
                             - (index as i32 + 1) * (icon_extent.width + 4),
@@ -577,11 +454,8 @@ pub(super) fn prepare_desktop_layers(
                             + config.window_border
                             + (config.titlebar_height - icon_extent.height) / 2,
                     },
-                    clip: None,
-                    alpha_mode: ImageAlphaMode::Premultiplied,
-                    pixel_format: ImagePixelFormat::Rgba8,
-                    visible: true,
-                });
+                    true,
+                ));
             }
         }
         let content_offset = window_content_offset(window, config);
@@ -601,75 +475,163 @@ pub(super) fn prepare_desktop_layers(
             width: window.requested_size.width,
             height: window.requested_size.height,
         });
-        layers.push(DesktopLayer {
-            key: DesktopLayerKey::Surface(surface.get()),
-            content_version: window.revision,
-            update: window.take_image_update(),
-            extent: window.size,
-            position: content_position,
-            clip: preview_clip,
-            alpha_mode: window.alpha_mode,
-            pixel_format: window.pixel_format,
+        layers.push(DesktopLayer::image(
+            DesktopLayerKey::Surface(surface.get()),
+            DesktopSceneKey::Surface(surface.get()),
+            window.revision,
+            if visible {
+                window.take_image_update()
+            } else {
+                DesktopImageUpdate::Unchanged
+            },
+            window.size,
+            content_position,
+            preview_clip,
+            window.alpha_mode,
+            window.pixel_format,
             visible,
-        });
+        ));
     }
 
-    if !session_locked {
-        for (index, widget) in widgets.iter_mut().enumerate() {
-            let widget_extent = resolved_widget_extent(extent, widget.width, widget.height);
-            let position = widget_position(extent, widget_extent, widget.anchor);
-            widget.layer.render(widget_extent, now, false)?;
-            let pixels = widget.layer.pixels();
-            layers.push(DesktopLayer {
-                key: DesktopLayerKey::Widget(index as u32),
-                content_version: widget.layer.content_version(),
-                update: DesktopImageUpdate::Full(pixels),
-                extent: widget_extent,
-                position,
-                clip: None,
-                alpha_mode: ImageAlphaMode::Straight,
-                pixel_format: ImagePixelFormat::Rgba8,
-                visible: true,
-            });
+    // Drag-icon surfaces intentionally do not participate in ordinary window stacking, so retain
+    // them from the surface map and add only the active icon as an output placement.
+    for (surface, icon) in windows
+        .iter_mut()
+        .filter(|(_, window)| window.role == SurfaceRole::DragIcon)
+    {
+        let visible = !session_locked && drag_icon == Some(*surface);
+        layers.push(DesktopLayer::image(
+            DesktopLayerKey::DragIcon(surface.get()),
+            DesktopSceneKey::DragIcon(surface.get()),
+            icon.revision,
+            if visible {
+                icon.take_image_update()
+            } else {
+                DesktopImageUpdate::Unchanged
+            },
+            icon.size,
+            PointI {
+                x: drag_position.x.round() as i32,
+                y: drag_position.y.round() as i32,
+            },
+            None,
+            icon.alpha_mode,
+            icon.pixel_format,
+            visible,
+        ));
+    }
+
+    for (index, widget) in widgets.iter_mut().enumerate() {
+        let widget_extent = resolved_widget_extent(extent, widget.width, widget.height);
+        let position = widget_position(extent, widget_extent, widget.anchor);
+        if !session_locked {
+            widget.layer.prepare(widget_extent, now, false)?;
         }
-        if let Some((surface, icon)) =
-            drag_icon.and_then(|surface| windows.get_mut(&surface).map(|icon| (surface, icon)))
-        {
-            layers.push(DesktopLayer {
-                key: DesktopLayerKey::DragIcon(surface.get()),
-                content_version: icon.revision,
-                update: icon.take_image_update(),
-                extent: icon.size,
-                position: PointI {
-                    x: drag_position.x.round() as i32,
-                    y: drag_position.y.round() as i32,
-                },
-                clip: None,
-                alpha_mode: icon.alpha_mode,
-                pixel_format: icon.pixel_format,
-                visible: true,
-            });
-        }
+        layers.push(DesktopLayer::retained(
+            DesktopLayerKey::Widget(index as u32),
+            DesktopSceneKey::Widget(index as u32),
+            if session_locked {
+                Vec::new()
+            } else {
+                widget.layer.take_deltas()
+            },
+            widget_extent,
+            position,
+            !session_locked,
+        ));
     }
     if let Some(cursor) = cursor {
-        layers.push(DesktopLayer {
-            key: DesktopLayerKey::Cursor,
-            content_version: cursor_image_signature(cursor),
-            update: DesktopImageUpdate::Full(Arc::from(cursor.rgba.as_slice())),
-            extent: cursor.size,
-            position: PointI {
-                x: pointer_position.x.round() as i32 - cursor.hotspot.x,
-                y: pointer_position.y.round() as i32 - cursor.hotspot.y,
-            },
-            clip: None,
-            alpha_mode: if cursor.premultiplied {
-                ImageAlphaMode::Premultiplied
-            } else {
-                ImageAlphaMode::Straight
-            },
-            pixel_format: ImagePixelFormat::Rgba8,
-            visible: true,
-        });
+        match cursor {
+            CursorVisual::Image(cursor) => layers.push(DesktopLayer::image(
+                DesktopLayerKey::Cursor,
+                DesktopSceneKey::CursorImage,
+                cursor_image_signature(cursor),
+                DesktopImageUpdate::Full(Arc::from(cursor.rgba.as_slice())),
+                cursor.size,
+                PointI {
+                    x: pointer_position.x.round() as i32 - cursor.hotspot.x,
+                    y: pointer_position.y.round() as i32 - cursor.hotspot.y,
+                },
+                None,
+                if cursor.premultiplied {
+                    ImageAlphaMode::Premultiplied
+                } else {
+                    ImageAlphaMode::Straight
+                },
+                ImagePixelFormat::Rgba8,
+                true,
+            )),
+            CursorVisual::Composed { source, size } => {
+                let (scene, layer) = match source {
+                    ComposedCursorSource::Pointer => {
+                        let Some(pointer) = pointer_layer.as_mut() else {
+                            return Ok(layers);
+                        };
+                        (DesktopSceneKey::ComposedPointer, pointer)
+                    }
+                    ComposedCursorSource::Icon(index) => {
+                        let Some((_, icon)) = icons.get_mut(*index) else {
+                            return Ok(layers);
+                        };
+                        (DesktopSceneKey::ComposedIcon(*index), icon)
+                    }
+                };
+                layer.prepare(*size, now, false)?;
+                layers.push(DesktopLayer::retained(
+                    DesktopLayerKey::Cursor,
+                    scene,
+                    layer.take_deltas(),
+                    *size,
+                    PointI {
+                        x: pointer_position.x.round() as i32,
+                        y: pointer_position.y.round() as i32,
+                    },
+                    true,
+                ));
+            }
+        }
+    }
+
+    // These source-only placements preserve backend scene state while a shared icon or composed
+    // pointer is temporarily not visible. Deltas stay with the producing runtime until a visible
+    // placement consumes them, so no renderer receives an update it cannot draw this frame.
+    for index in 0_u8..3 {
+        let source_extent = SizeI {
+            width: 24,
+            height: 24,
+        };
+        layers.push(DesktopLayer::retained(
+            DesktopLayerKey::LegacyControlSource(index),
+            DesktopSceneKey::LegacyControl(index),
+            Vec::new(),
+            source_extent,
+            PointI::default(),
+            false,
+        ));
+    }
+    for index in 0..icons.len() {
+        let source_extent = SizeI {
+            width: 24,
+            height: 24,
+        };
+        layers.push(DesktopLayer::retained(
+            DesktopLayerKey::ComposedIconSource(index),
+            DesktopSceneKey::ComposedIcon(index),
+            Vec::new(),
+            source_extent,
+            PointI::default(),
+            false,
+        ));
+    }
+    if pointer_layer.is_some() {
+        layers.push(DesktopLayer::retained(
+            DesktopLayerKey::ComposedPointerSource,
+            DesktopSceneKey::ComposedPointer,
+            Vec::new(),
+            config.pointer_extent,
+            PointI::default(),
+            false,
+        ));
     }
     Ok(layers)
 }

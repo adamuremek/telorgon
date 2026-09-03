@@ -7,6 +7,29 @@ pub(super) struct RenderedCursor {
     pub(super) premultiplied: bool,
 }
 
+#[derive(Clone, Debug)]
+pub(super) enum ComposedCursorSource {
+    Pointer,
+    Icon(usize),
+}
+
+pub(super) enum CursorVisual {
+    Image(RenderedCursor),
+    Composed {
+        source: ComposedCursorSource,
+        size: SizeI,
+    },
+}
+
+impl CursorVisual {
+    pub(super) fn image(&self) -> Option<&RenderedCursor> {
+        match self {
+            Self::Image(image) => Some(image),
+            Self::Composed { .. } => None,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn render_cursor_image(
     image: CursorImage,
@@ -18,7 +41,7 @@ pub(super) fn render_cursor_image(
     pointer_config: &PointerConfiguration,
     pointer_theme: Option<&PointerTheme>,
     pointer_media: &mut AssetMediaCache,
-) -> AppResult<Option<RenderedCursor>> {
+) -> AppResult<Option<CursorVisual>> {
     let rendered = match image {
         CursorImage::TelorgonDefault => render_semantic_pointer(
             PointerIcon::Default,
@@ -52,8 +75,8 @@ pub(super) fn render_cursor_image(
             pointer_config.pointer_overrides(),
             pointer_theme,
         ) {
-            PointerResolution::ClientSurface => {
-                windows.get(&surface).map(|cursor| RenderedCursor {
+            PointerResolution::ClientSurface => windows.get(&surface).map(|cursor| {
+                CursorVisual::Image(RenderedCursor {
                     rgba: client_pixels_rgba(cursor),
                     size: cursor.size,
                     hotspot: PointI {
@@ -62,13 +85,14 @@ pub(super) fn render_cursor_image(
                     },
                     premultiplied: true,
                 })
-            }
-            PointerResolution::Graphic(graphic) => {
-                Some(render_asset_pointer(graphic, extent, now, pointer_media)?)
-            }
-            PointerResolution::System(icon) => {
-                render_composed_pointer(icon, None, pointer, icons, extent, now)?
-            }
+            }),
+            PointerResolution::Graphic(graphic) => Some(CursorVisual::Image(render_asset_pointer(
+                graphic,
+                extent,
+                now,
+                pointer_media,
+            )?)),
+            PointerResolution::System(_) => render_composed_pointer(None, pointer, icons, extent),
             PointerResolution::Hidden => None,
         },
         CursorImage::Hidden => None,
@@ -102,22 +126,21 @@ fn render_semantic_pointer(
     pointer_config: &PointerConfiguration,
     pointer_theme: Option<&PointerTheme>,
     pointer_media: &mut AssetMediaCache,
-) -> AppResult<Option<RenderedCursor>> {
+) -> AppResult<Option<CursorVisual>> {
     match resolve_pointer(
         PointerRequest::Semantic(icon),
         pointer_config.client_cursor_mode(),
         pointer_config.pointer_overrides(),
         pointer_theme,
     ) {
-        PointerResolution::Graphic(graphic) => Ok(Some(render_asset_pointer(
+        PointerResolution::Graphic(graphic) => Ok(Some(CursorVisual::Image(render_asset_pointer(
             graphic,
             extent,
             now,
             pointer_media,
-        )?)),
+        )?))),
         PointerResolution::System(icon) => {
-            let rendered =
-                render_composed_pointer(icon, composed_icon_name, pointer, icons, extent, now)?;
+            let rendered = render_composed_pointer(composed_icon_name, pointer, icons, extent);
             if rendered.is_some() {
                 return Ok(rendered);
             }
@@ -237,36 +260,23 @@ fn render_asset_pointer(
 }
 
 fn render_composed_pointer(
-    _icon: PointerIcon,
     composed_icon_name: Option<&str>,
     pointer: &mut Option<Layer>,
     icons: &mut [(String, Layer)],
     extent: SizeI,
-    now: u64,
-) -> AppResult<Option<RenderedCursor>> {
-    if let Some((_, icon)) = composed_icon_name
-        .and_then(|name| icons.iter_mut().find(|(candidate, _)| candidate == name))
+) -> Option<CursorVisual> {
+    if let Some(index) = composed_icon_name
+        .and_then(|name| icons.iter().position(|(candidate, _)| candidate == name))
     {
-        return Ok(Some(RenderedCursor {
-            rgba: icon.render(extent, now, false)?.to_vec(),
+        return Some(CursorVisual::Composed {
+            source: ComposedCursorSource::Icon(index),
             size: extent,
-            hotspot: PointI::default(),
-            premultiplied: true,
-        }));
+        });
     }
-    pointer
-        .as_mut()
-        .map(|pointer| {
-            pointer
-                .render(extent, now, false)
-                .map(|pixels| RenderedCursor {
-                    rgba: pixels.to_vec(),
-                    size: extent,
-                    hotspot: PointI::default(),
-                    premultiplied: false,
-                })
-        })
-        .transpose()
+    pointer.as_ref().map(|_| CursorVisual::Composed {
+        source: ComposedCursorSource::Pointer,
+        size: extent,
+    })
 }
 
 pub(super) fn cursor_image_signature(cursor: &RenderedCursor) -> u64 {

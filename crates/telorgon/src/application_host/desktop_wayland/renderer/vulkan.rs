@@ -1,93 +1,24 @@
-use super::*;
+use std::collections::{BTreeMap, VecDeque};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
-pub(super) struct VulkanScanout {
-    device: VulkanDevice,
-    scene: VulkanScene,
-    targets: Vec<VulkanDmaBufScanoutTarget>,
-    content_version: u64,
-    completion_worker: VulkanCompletionWorker,
-    target_versions: Vec<u64>,
-    damage_history: VecDeque<(u64, Option<RectI>)>,
-}
+use crate::core::{ColorRgba8, RectI, SizeI};
+use crate::presenter_vulkan_kms::GbmBuffer;
+use crate::render::{RenderBackend, RenderRequest, TargetLoad, TargetStore};
+use crate::renderer_vulkan::{
+    DeviceSelection, SubmissionReceipt, VulkanCompositePlacement, VulkanCompositeScene,
+    VulkanConfig, VulkanDevice, VulkanDmaBufScanoutTarget, VulkanInstance, VulkanScene,
+};
 
-pub(super) struct SoftwareScanout {
-    renderer: SoftwareRenderer,
-    scene: SoftwareScene,
-    surface: SoftwareSurface,
-    content_version: u64,
-    target_versions: Vec<u64>,
-    damage_history: VecDeque<(u64, Option<RectI>)>,
-}
+use super::super::geometry::{accumulated_damage, full_rect, intersect_rect};
+use super::super::scene::{DesktopFrame, DesktopSceneKey};
+use crate::application_host::{AppError, AppResult};
 
-impl SoftwareScanout {
-    pub(super) fn new(targets: usize) -> AppResult<Self> {
-        let renderer = SoftwareRenderer;
-        Ok(Self {
-            scene: renderer.create_scene().map_err(app_error)?,
-            renderer,
-            surface: SoftwareSurface::default(),
-            content_version: 0,
-            target_versions: vec![0; targets],
-            damage_history: VecDeque::new(),
-        })
-    }
-
-    pub(super) fn render(
-        &mut self,
-        target_index: usize,
-        extent: SizeI,
-        delta: RenderSceneDelta,
-        damage: Option<RectI>,
-    ) -> AppResult<RectI> {
-        self.content_version = self.content_version.wrapping_add(1).max(1);
-        self.damage_history
-            .push_back((self.content_version, damage));
-        while self.damage_history.len() > 64 {
-            self.damage_history.pop_front();
-        }
-        self.renderer
-            .apply_scene_delta(&mut self.scene, &delta)
-            .map_err(app_error)?;
-        let target = SoftwareTarget::new(RenderTargetInfo::full(extent));
-        let render_damage = accumulated_damage(
-            self.target_versions[target_index],
-            self.content_version,
-            &self.damage_history,
-            extent,
-        );
-        let clear = self.scene.background();
-        let mut frame = self.surface.begin_frame();
-        self.renderer
-            .render(
-                &mut self.scene,
-                &mut frame,
-                &target,
-                &RenderRequest {
-                    force: true,
-                    // The software surface is retained by this scanout path. Clearing redraws
-                    // only `render_damage`; pixels outside it remain in the owned framebuffer.
-                    // `Preserve` is reserved for host-provided targets and is unsupported here.
-                    load: TargetLoad::Clear(clear),
-                    store: TargetStore::Store,
-                    region: render_damage,
-                },
-            )
-            .map_err(app_error)?;
-        Ok(render_damage.unwrap_or_else(|| full_rect(extent)))
-    }
-
-    pub(super) fn pixels(&self) -> &[u8] {
-        self.surface.pixels_rgba8()
-    }
-
-    pub(super) fn mark_copied(&mut self, target_index: usize) {
-        self.target_versions[target_index] = self.content_version;
-    }
-}
-
-pub(super) struct VulkanCompletion {
-    pub(super) slot_index: usize,
-    pub(super) result: Result<(), String>,
+pub(in crate::application_host::desktop_wayland) struct VulkanCompletion {
+    pub(in crate::application_host::desktop_wayland) slot_index: usize,
+    pub(in crate::application_host::desktop_wayland) result: Result<(), String>,
 }
 
 struct VulkanCompletionRequest {
@@ -201,12 +132,15 @@ impl Drop for VulkanCompletionWorker {
     }
 }
 
-pub(super) const VULKAN_STAGING_MIN_BYTES_PER_SLOT: u64 = 4 * 1024 * 1024;
-// A frame can still require a full-output layer upload after startup or a broad scene change.
-// Reserve that case plus retained-scene metadata, smaller layer updates, and copy alignment.
-pub(super) const VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT: u64 = 1024 * 1024;
+pub(in crate::application_host::desktop_wayland) const VULKAN_STAGING_MIN_BYTES_PER_SLOT: u64 =
+    16 * 1024 * 1024;
+pub(in crate::application_host::desktop_wayland) const VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT: u64 =
+    16 * 1024 * 1024;
 
-pub(super) fn vulkan_staging_budget_bytes(extent: SizeI, frame_slots: usize) -> AppResult<u64> {
+pub(in crate::application_host::desktop_wayland) fn vulkan_staging_budget_bytes(
+    extent: SizeI,
+    frame_slots: usize,
+) -> AppResult<u64> {
     let frame_bytes = u64::try_from(extent.width)
         .ok()
         .and_then(|width| {
@@ -216,6 +150,8 @@ pub(super) fn vulkan_staging_budget_bytes(extent: SizeI, frame_slots: usize) -> 
         })
         .and_then(|pixels| pixels.checked_mul(4))
         .ok_or_else(|| AppError::new("Vulkan scanout extent overflows its upload budget"))?;
+    // A direct compositor may receive one full client image in addition to changed shell
+    // resources. The budget is per reusable frame slot and performs no per-frame allocation.
     let bytes_per_slot = frame_bytes
         .checked_add(VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT)
         .ok_or_else(|| AppError::new("Vulkan scanout staging headroom overflows its budget"))?
@@ -227,11 +163,18 @@ pub(super) fn vulkan_staging_budget_bytes(extent: SizeI, frame_slots: usize) -> 
         .ok_or_else(|| AppError::new("Vulkan frame slots overflow their staging budget"))
 }
 
-impl VulkanScanout {
-    pub(super) fn new(
-        buffers: &[crate::presenter_vulkan_kms::GbmBuffer<'_, '_>],
-        extent: SizeI,
-    ) -> AppResult<Self> {
+pub(in crate::application_host::desktop_wayland) struct VulkanDesktopRenderer {
+    device: VulkanDevice,
+    scenes: BTreeMap<DesktopSceneKey, VulkanScene>,
+    targets: Vec<VulkanDmaBufScanoutTarget>,
+    content_version: u64,
+    completion_worker: VulkanCompletionWorker,
+    target_versions: Vec<u64>,
+    damage_history: VecDeque<(u64, Option<RectI>)>,
+}
+
+impl VulkanDesktopRenderer {
+    pub(super) fn new(buffers: &[GbmBuffer<'_, '_>], extent: SizeI) -> AppResult<Self> {
         let frames_in_flight = buffers.len().max(2);
         let staging_budget_bytes = vulkan_staging_budget_bytes(extent, frames_in_flight)?;
         let config = VulkanConfig {
@@ -288,11 +231,10 @@ impl VulkanScanout {
                     continue;
                 }
             };
-            let scene = device.create_scene().map_err(app_error)?;
             let target_count = targets.len();
             return Ok(Self {
                 device,
-                scene,
+                scenes: BTreeMap::new(),
                 targets,
                 content_version: 0,
                 completion_worker: VulkanCompletionWorker::new()?,
@@ -310,20 +252,30 @@ impl VulkanScanout {
         }))
     }
 
-    pub(super) fn render(
-        &mut self,
-        target_index: usize,
-        extent: SizeI,
-        delta: RenderSceneDelta,
-        damage: Option<RectI>,
-    ) -> AppResult<()> {
+    pub(super) fn render(&mut self, target_index: usize, frame: DesktopFrame) -> AppResult<()> {
         self.content_version = self.content_version.wrapping_add(1).max(1);
-        let damage = damage.and_then(|rect| intersect_rect(rect, full_rect(extent)));
+        let damage = frame
+            .damage
+            .and_then(|rect| intersect_rect(rect, full_rect(frame.extent)));
         self.damage_history
             .push_back((self.content_version, damage));
         while self.damage_history.len() > 64 {
             self.damage_history.pop_front();
         }
+        for update in &frame.updates {
+            let scene = match self.scenes.entry(update.key) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    entry.insert(self.device.create_scene().map_err(app_error)?)
+                }
+            };
+            for delta in &update.deltas {
+                self.device
+                    .apply_scene_delta(scene, delta)
+                    .map_err(app_error)?;
+            }
+        }
+        self.scenes.retain(|key, _| frame.live_scenes.contains(key));
         let previous_target_version = *self
             .target_versions
             .get(target_index)
@@ -332,24 +284,50 @@ impl VulkanScanout {
             previous_target_version,
             self.content_version,
             &self.damage_history,
-            extent,
+            frame.extent,
         );
-        self.device
-            .apply_scene_delta(&mut self.scene, &delta)
-            .map_err(app_error)?;
-        let clear = self.scene.background();
+
+        let scene_indices = self
+            .scenes
+            .keys()
+            .copied()
+            .enumerate()
+            .map(|(index, key)| (key, index))
+            .collect::<BTreeMap<_, _>>();
+        let placements = frame
+            .placements
+            .iter()
+            .map(|placement| {
+                Ok(VulkanCompositePlacement {
+                    scene_index: *scene_indices.get(&placement.scene).ok_or_else(|| {
+                        AppError::new(format!(
+                            "Vulkan desktop scene {:?} has no retained content",
+                            placement.scene
+                        ))
+                    })?,
+                    target: placement.target,
+                    clip: placement.clip,
+                })
+            })
+            .collect::<AppResult<Vec<_>>>()?;
+        let mut scenes = self
+            .scenes
+            .values_mut()
+            .map(|scene| VulkanCompositeScene { scene })
+            .collect::<Vec<_>>();
         let receipt = {
             let target = self
                 .targets
                 .get_mut(target_index)
                 .ok_or_else(|| AppError::new("Vulkan scanout target index is invalid"))?
                 .target();
-            let mut frame = self.device.begin_owned_frame().map_err(app_error)?;
+            let mut recording = self.device.begin_owned_frame().map_err(app_error)?;
             {
-                let mut context = frame.context_mut();
+                let mut context = recording.context_mut();
                 self.device
-                    .render(
-                        &mut self.scene,
+                    .render_composite(
+                        &mut scenes,
+                        &placements,
                         &mut context,
                         &target,
                         &RenderRequest {
@@ -357,7 +335,12 @@ impl VulkanScanout {
                             load: if render_damage.is_some() {
                                 TargetLoad::Preserve
                             } else {
-                                TargetLoad::Clear(clear)
+                                TargetLoad::Clear(ColorRgba8 {
+                                    r: 0,
+                                    g: 0,
+                                    b: 0,
+                                    a: 255,
+                                })
                             },
                             store: TargetStore::Store,
                             region: render_damage,
@@ -365,7 +348,7 @@ impl VulkanScanout {
                     )
                     .map_err(app_error)?;
             }
-            frame
+            recording
                 .finish()
                 .and_then(|frame| frame.submit())
                 .map_err(app_error)?
@@ -382,4 +365,8 @@ impl VulkanScanout {
     pub(super) fn drain_completions(&self) -> Vec<VulkanCompletion> {
         self.completion_worker.drain()
     }
+}
+
+fn app_error(error: impl std::fmt::Display) -> AppError {
+    AppError::new(error.to_string())
 }

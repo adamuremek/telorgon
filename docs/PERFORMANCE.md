@@ -66,7 +66,11 @@ Current unit tests exercise:
   lifecycle presentation forcing;
 - ordinary managed redraw demand capped at the current monitor refresh interval, with late frames
   scheduling from their actual start instead of issuing catch-up work;
-- retained software framebuffer identity and damage-aware rasterization; and
+- retained software framebuffer identity and damage-aware direct multi-scene rasterization;
+- renderer-neutral desktop damage, hidden-revision retention, and repeated placement of one retained
+  scene without duplicating its resources; and
+- source-boundary checks that reject backend types in neutral desktop modules or cross-references
+  between the Linux Vulkan and software assemblies; and
 - bounded scene-delta queue coalescing.
 
 These gates validate CPU algorithms and software behavior only.
@@ -86,6 +90,7 @@ Portable and compile-only tests in `telorgon-renderer-vulkan` currently verify:
 - adjacent-only mixed-pipeline painter-order batching, explicit blend modes, and measured batch/draw
   counts;
 - reusable per-frame command pools, command buffers, descriptor pools/sets, and mapped staging;
+- aligned multi-scene view records in one shared frame-staging stream;
 - generation-safe descriptor reuse and completion-pinned buffer retirement;
 - typed staging and device-local budget exhaustion;
 - versioned R8 atlas and native RGBA/BGRA image uploads, regional staging writes, in-place updates

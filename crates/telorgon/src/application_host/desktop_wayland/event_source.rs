@@ -104,7 +104,7 @@ pub(super) unsafe extern "C" fn mark_input_fd_ready(
 #[cfg(feature = "profiler")]
 #[derive(Clone, Copy)]
 pub(super) enum PointerCursorPath {
-    SoftwareDamage,
+    CompositedDamage,
     Hidden,
     Deferred,
     Unchanged,
@@ -180,8 +180,8 @@ impl PointerBatchProbe {
                 .map_or(0, |started| duration_ns(started.elapsed())),
         );
         crate::profiler::record_instant(match path {
-            PointerCursorPath::SoftwareDamage => {
-                "input.libinput.pointer_motion.pipeline.path.software_damage"
+            PointerCursorPath::CompositedDamage => {
+                "input.libinput.pointer_motion.pipeline.path.composited_damage"
             }
             PointerCursorPath::Hidden => "input.libinput.pointer_motion.pipeline.path.hidden",
             PointerCursorPath::Deferred => "input.libinput.pointer_motion.pipeline.path.deferred",

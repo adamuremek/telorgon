@@ -173,6 +173,8 @@ pub(crate) struct StagedDestination {
 
 pub(crate) struct StagedUploads {
     pub(crate) bytes: Vec<u8>,
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub(crate) view_offset: u64,
     pub(crate) destinations: Vec<StagedDestination>,
     pub(crate) image_destinations: Vec<StagedImageDestination>,
     pub(crate) byte_count: u64,
@@ -191,12 +193,34 @@ impl StagedUploads {
         plan: SceneUploadPlan,
         staging_capacity: u64,
     ) -> RenderResult<Self> {
-        let mut bytes = bytemuck::bytes_of(view).to_vec();
+        let mut bytes = Vec::new();
+        let mut staged = Self::append(
+            view,
+            plan,
+            staging_capacity,
+            &mut bytes,
+            align_of::<GpuView>(),
+        )?;
+        staged.bytes = bytes;
+        Ok(staged)
+    }
+
+    /// Appends one scene's uniform and uploads to a shared frame staging stream.
+    pub(crate) fn append(
+        view: &GpuView,
+        plan: SceneUploadPlan,
+        staging_capacity: u64,
+        bytes: &mut Vec<u8>,
+        view_alignment: usize,
+    ) -> RenderResult<Self> {
+        align_vec(bytes, view_alignment.max(align_of::<GpuView>()));
+        let view_offset = bytes.len() as u64;
+        bytes.extend_from_slice(bytemuck::bytes_of(view));
         let mut destinations = Vec::with_capacity(plan.groups.len());
         for group in plan.groups {
             let mut regions = Vec::with_capacity(group.chunks.len());
             for chunk in group.chunks {
-                align_vec(&mut bytes, COPY_ALIGNMENT);
+                align_vec(bytes, COPY_ALIGNMENT);
                 let source_offset = bytes.len() as u64;
                 let size = chunk.bytes.len() as u64;
                 bytes.extend_from_slice(&chunk.bytes);
@@ -217,7 +241,7 @@ impl StagedUploads {
         for group in plan.image_groups {
             let mut regions = Vec::with_capacity(group.chunks.len());
             for chunk in group.chunks {
-                align_vec(&mut bytes, COPY_ALIGNMENT);
+                align_vec(bytes, COPY_ALIGNMENT);
                 let source_offset = bytes.len() as u64;
                 bytes.extend_from_slice(&chunk.bytes);
                 regions.push(
@@ -252,7 +276,8 @@ impl StagedUploads {
             ));
         }
         Ok(Self {
-            bytes,
+            bytes: Vec::new(),
+            view_offset,
             destinations,
             image_destinations,
             byte_count: plan.byte_count,
@@ -320,5 +345,29 @@ mod tests {
         .err()
         .expect("undersized staging must fail");
         assert_eq!(error.kind(), RenderErrorKind::OutOfMemory);
+    }
+
+    #[test]
+    fn appended_views_receive_distinct_aligned_offsets() {
+        let mut bytes = Vec::new();
+        let first = StagedUploads::append(
+            &GpuView::zeroed(),
+            SceneUploadPlan::default(),
+            4_096,
+            &mut bytes,
+            256,
+        )
+        .unwrap();
+        let second = StagedUploads::append(
+            &GpuView::zeroed(),
+            SceneUploadPlan::default(),
+            4_096,
+            &mut bytes,
+            256,
+        )
+        .unwrap();
+        assert_eq!(first.view_offset, 0);
+        assert_eq!(second.view_offset, 256);
+        assert_eq!(bytes.len(), 256 + size_of::<GpuView>());
     }
 }
