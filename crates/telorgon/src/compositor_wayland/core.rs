@@ -3,8 +3,8 @@ use std::fmt;
 
 use crate::compositor_wayland::{
     BufferDescriptor, ClientId, ClientLimits, ObjectRegistry, ObjectRegistryError, OutputState,
-    ProtocolObjectId, SeatState, SerialLedger, SubsurfaceGraph, WaylandBufferId, WaylandSurfaceId,
-    WaylandWorld, WaylandWorldError, XdgSurfaceState,
+    ProtocolObjectId, SeatState, SerialLedger, SubsurfaceGraph, SurfaceState, WaylandBufferId,
+    WaylandSurfaceId, WaylandWorld, WaylandWorldError, XdgSurfaceState,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -87,6 +87,7 @@ impl CompositorCore {
     }
 
     pub fn disconnect_client(&mut self, client: ClientId) -> Result<(), CompositorCoreError> {
+        let surfaces = self.world.client_surfaces(client);
         self.world.remove_client(client)?;
         self.objects.remove_client(client);
         self.serials.remove_client(client);
@@ -98,8 +99,25 @@ impl CompositorCore {
             seat.remove_client(client);
         }
         self.actions
+            .extend(surfaces.into_iter().map(CompositorAction::WithdrawSurface));
+        self.actions
             .push(CompositorAction::DisconnectClient(client));
         Ok(())
+    }
+
+    pub fn destroy_surface(
+        &mut self,
+        client: ClientId,
+        surface: WaylandSurfaceId,
+    ) -> Result<SurfaceState, CompositorCoreError> {
+        let state = self.world.destroy_surface(client, surface)?;
+        self.xdg_surfaces.remove(&surface);
+        for seat in self.seats.values_mut() {
+            seat.remove_surface(surface);
+        }
+        self.actions
+            .push(CompositorAction::WithdrawSurface(surface));
+        Ok(state)
     }
 
     pub fn register_buffer(
@@ -219,5 +237,79 @@ impl From<WaylandWorldError> for CompositorCoreError {
 impl From<ObjectRegistryError> for CompositorCoreError {
     fn from(value: ObjectRegistryError) -> Self {
         Self::Objects(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compositor_wayland::{CursorImage, KeyboardFocus, PointerFocus, SeatCapabilities};
+    use crate::core::PointF;
+
+    fn client(raw: u32) -> ClientId {
+        ClientId::from_raw(raw).unwrap()
+    }
+
+    fn surface(raw: u32) -> WaylandSurfaceId {
+        WaylandSurfaceId::from_raw(raw).unwrap()
+    }
+
+    #[test]
+    fn destroying_a_surface_withdraws_it_and_clears_seat_references() {
+        let client = client(1);
+        let surface = surface(7);
+        let mut core = CompositorCore::default();
+        core.connect_client(client).unwrap();
+        core.world.create_surface(client, surface).unwrap();
+        let mut seat = SeatState::new("seat0", SeatCapabilities::default());
+        seat.pointer_focus = Some(PointerFocus {
+            client,
+            surface,
+            position: PointF::default(),
+            enter_serial: 1,
+        });
+        seat.keyboard_focus = Some(KeyboardFocus {
+            client,
+            surface,
+            enter_serial: 2,
+        });
+        seat.cursor = CursorImage::ClientSurface {
+            surface,
+            hotspot_x: 0,
+            hotspot_y: 0,
+        };
+        core.seats.insert(1, seat);
+
+        core.destroy_surface(client, surface).unwrap();
+
+        let seat = core.seats.get(&1).unwrap();
+        assert!(seat.pointer_focus.is_none());
+        assert!(seat.keyboard_focus.is_none());
+        assert_eq!(seat.cursor, CursorImage::TelorgonDefault);
+        assert_eq!(
+            core.drain_actions().collect::<Vec<_>>(),
+            vec![CompositorAction::WithdrawSurface(surface)]
+        );
+    }
+
+    #[test]
+    fn disconnecting_a_client_withdraws_all_of_its_surfaces() {
+        let client = client(1);
+        let mut core = CompositorCore::default();
+        core.connect_client(client).unwrap();
+        for surface in [surface(7), surface(8)] {
+            core.world.create_surface(client, surface).unwrap();
+        }
+
+        core.disconnect_client(client).unwrap();
+
+        assert_eq!(
+            core.drain_actions().collect::<Vec<_>>(),
+            vec![
+                CompositorAction::WithdrawSurface(surface(7)),
+                CompositorAction::WithdrawSurface(surface(8)),
+                CompositorAction::DisconnectClient(client),
+            ]
+        );
     }
 }

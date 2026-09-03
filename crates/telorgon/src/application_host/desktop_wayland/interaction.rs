@@ -38,15 +38,14 @@ impl WindowInteraction {
         pointer_start: PointF,
     ) -> Option<Self> {
         let window = windows.get_mut(&surface)?;
-        if window.resize_final_size.is_some() {
-            return None;
-        }
         window.resize_anchor = Some(ResizeAnchor::new(
             window.position,
             window.requested_size,
             edge,
         ));
-        window.resize_final_size = None;
+        // A new pointer grab supersedes an older final configure even if that client has not
+        // committed a matching buffer yet. A delayed client must never wedge future resizes.
+        window.resize_final = None;
         configure_scheduler.schedule_resize(surface, window.requested_size);
         Some(Self::Resize {
             surface,
@@ -117,7 +116,7 @@ pub(super) fn finish_window_interaction(
         return;
     };
     if let Some(window) = windows.get_mut(&surface) {
-        window.resize_final_size = Some(window.requested_size);
+        window.resize_final = Some(FinalResizeConfigure::pending(window.requested_size));
         configure_scheduler.schedule_final(surface, window.requested_size);
     }
 }
@@ -125,7 +124,7 @@ pub(super) fn finish_window_interaction(
 pub(super) fn flush_resize_configures(
     display: &Display,
     wayland: &mut NativeCompositor<'_>,
-    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
     configure_scheduler: &mut ConfigureScheduler,
     resize_budget_available: &mut bool,
 ) -> AppResult<()> {
@@ -142,11 +141,10 @@ pub(super) fn flush_resize_configures(
         let Some(window) = windows.get(&surface) else {
             continue;
         };
-        let waiting_for_ack = wayland
-            .core()
-            .xdg_surface(surface)
-            .is_some_and(|xdg| xdg.has_pending_configure());
-        if waiting_for_ack || (resizing && !*resize_budget_available) {
+        // XDG configures are superseding state, not a request/response lockstep. Waiting for every
+        // earlier ack can deadlock behind a same-size state-only configure; the client's ack of a
+        // newer serial validly retires every older configure.
+        if resizing && !*resize_budget_available {
             configure_scheduler.defer(PendingResizeConfigure {
                 surface,
                 size,
@@ -154,13 +152,20 @@ pub(super) fn flush_resize_configures(
             });
             continue;
         }
-        wayland
+        let serial = wayland
             .configure_toplevel(
                 surface,
                 Some(size),
                 window_toplevel_states(window, true, resizing),
             )
             .map_err(app_error)?;
+        if !resizing
+            && let Some(final_resize) = windows
+                .get_mut(&surface)
+                .and_then(|window| window.resize_final.as_mut())
+        {
+            final_resize.record_sent(size, serial);
+        }
         if resizing {
             *resize_budget_available = false;
         }
@@ -182,7 +187,7 @@ pub(super) fn set_window_maximized(
         return Ok(());
     };
     window.resize_anchor = None;
-    window.resize_final_size = None;
+    window.resize_final = None;
     if maximized {
         if !window.maximized && !window.fullscreen {
             window.restore_geometry = Some((window.position, window.requested_size));
@@ -227,7 +232,7 @@ pub(super) fn set_window_fullscreen(
         return Ok(());
     };
     window.resize_anchor = None;
-    window.resize_final_size = None;
+    window.resize_final = None;
     if fullscreen {
         if !window.maximized && !window.fullscreen {
             window.restore_geometry = Some((window.position, window.requested_size));

@@ -10,7 +10,7 @@ pub(super) struct ClientWindow {
     pub(super) size: SizeI,
     pub(super) requested_size: SizeI,
     pub(super) resize_anchor: Option<ResizeAnchor>,
-    pub(super) resize_final_size: Option<SizeI>,
+    pub(super) resize_final: Option<FinalResizeConfigure>,
     pub(super) restore_geometry: Option<(PointI, SizeI)>,
     pub(super) maximized: bool,
     pub(super) fullscreen: bool,
@@ -231,20 +231,16 @@ pub(super) fn apply_surface_publication(
     );
     let mut reconciled_position = position;
     let mut resize_anchor = previous_window.and_then(|window| window.resize_anchor);
-    let resize_final_size = previous_window.and_then(|window| window.resize_final_size);
+    let resize_final = previous_window.and_then(|window| window.resize_final);
     let final_resize_acked = role == SurfaceRole::XdgToplevel
-        && acknowledged_final_resize(
-            resize_final_size,
-            wayland
-                .core()
-                .xdg_surface(surface)
-                .and_then(|xdg| xdg.last_acked()),
-        );
-    let mut retained_resize_final_size = resize_final_size;
+        && resize_final.is_some_and(|final_resize| {
+            final_resize.was_acknowledged(wayland.core().xdg_surface(surface))
+        });
+    let mut retained_resize_final = resize_final;
     if final_resize_acked && let Some(anchor) = resize_anchor.take() {
         reconciled_position = anchor.reconcile_position(position, image_extent);
         requested_size = image_extent;
-        retained_resize_final_size = None;
+        retained_resize_final = None;
     }
     let (
         restore_geometry,
@@ -293,7 +289,7 @@ pub(super) fn apply_surface_publication(
         window.chrome_content_offset = chrome_content_offset;
         window.chrome = chrome;
         window.resize_anchor = resize_anchor;
-        window.resize_final_size = retained_resize_final_size;
+        window.resize_final = retained_resize_final;
         window.apply_image(snapshot.revision, prepared_image);
     } else {
         let PreparedClientImage::Full {
@@ -324,7 +320,7 @@ pub(super) fn apply_surface_publication(
                 chrome_content_offset,
                 chrome,
                 resize_anchor,
-                resize_final_size: retained_resize_final_size,
+                resize_final: retained_resize_final,
                 alpha_mode: image_alpha_mode,
                 pixel_format: image_pixel_format,
                 pending_image_update: PendingClientImageUpdate::Full(image.pixels),
@@ -376,17 +372,19 @@ pub(super) fn finish_shm_copy(
     if *pending == 0 {
         pending_surfaces.remove(&completion.snapshot.surface);
     }
-    let image = completion.result.map_err(AppError::new)?;
     let current = wayland
         .core()
         .world
         .surface(completion.snapshot.surface)
         .map(|surface| surface.snapshot().clone());
-    let apply = current
-        .as_ref()
-        .is_some_and(|snapshot| snapshot.attachment.is_some())
-        && !pending_surfaces.contains_key(&completion.snapshot.surface);
+    let completion_is_current = current.as_ref().is_some_and(|snapshot| {
+        snapshot.revision == completion.snapshot.revision
+            && snapshot.attachment == completion.snapshot.attachment
+    });
+    let apply =
+        completion_is_current && !pending_surfaces.contains_key(&completion.snapshot.surface);
     if apply {
+        let image = completion.result.map_err(AppError::new)?;
         apply_surface_publication(
             display,
             wayland,
@@ -396,7 +394,7 @@ pub(super) fn finish_shm_copy(
             work_area,
             session_locked,
             pointer_scene_dirty,
-            current.as_ref().expect("live surface checked"),
+            &completion.snapshot,
             image,
         )?;
     }

@@ -103,6 +103,13 @@ impl WaylandWorld {
         self.surface_owner.get(&surface).copied()
     }
 
+    pub fn client_surfaces(&self, client: ClientId) -> Vec<WaylandSurfaceId> {
+        self.clients
+            .get(&client)
+            .map(|state| state.surfaces.keys().copied().collect())
+            .unwrap_or_default()
+    }
+
     pub fn surface_mut(&mut self, surface: WaylandSurfaceId) -> Option<&mut SurfaceState> {
         let owner = *self.surface_owner.get(&surface)?;
         self.clients.get_mut(&owner)?.surfaces.get_mut(&surface)

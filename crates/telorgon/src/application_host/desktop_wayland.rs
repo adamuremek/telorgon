@@ -80,7 +80,7 @@ use scene::{
     DesktopSceneKey,
 };
 use shm_copy::{ShmCopyCompletion, ShmCopyRequest, ShmCopyWorker};
-use state::{ConfigureScheduler, PendingResizeConfigure, ResizeAnchor, acknowledged_final_resize};
+use state::{ConfigureScheduler, FinalResizeConfigure, PendingResizeConfigure, ResizeAnchor};
 
 const MAX_DEFERRED_SHM_COPIES: usize = 64;
 
@@ -711,6 +711,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 &config,
                                 &icon_layers,
                             )
+                            && wayland.core().world.surface(surface).is_some()
                         {
                             set_decoration_pointer_cursor(
                                 &mut wayland,
@@ -777,7 +778,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             repaint = true;
                             continue;
                         }
-                        if pointer_focus.is_some() {
+                        let seat_pointer_focus = wayland
+                            .core()
+                            .seats
+                            .get(&1)
+                            .and_then(|seat| seat.pointer_focus)
+                            .map(|focus| focus.surface);
+                        if seat_pointer_focus.is_some() {
                             let serial = display.next_serial();
                             wayland
                                 .pointer_button(
@@ -793,7 +800,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 )
                                 .map_err(app_error)?;
                             if pressed {
-                                focus_toplevel(&display, &mut wayland, &windows, pointer_focus)?;
+                                focus_toplevel(
+                                    &display,
+                                    &mut wayland,
+                                    &windows,
+                                    seat_pointer_focus,
+                                )?;
                             }
                         }
                         if !pressed
@@ -1038,7 +1050,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         flush_resize_configures(
             &display,
             &mut wayland,
-            &windows,
+            &mut windows,
             &mut configure_scheduler,
             &mut resize_configure_budget,
         )?;
@@ -1299,6 +1311,17 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     repaint = true;
                 }
                 CompositorAction::WithdrawSurface(surface) => {
+                    if wayland
+                        .core()
+                        .seats
+                        .get(&1)
+                        .and_then(|seat| seat.keyboard_focus)
+                        .is_some_and(|focus| focus.surface == surface)
+                    {
+                        wayland
+                            .set_keyboard_focus(1, None, display.next_serial())
+                            .map_err(app_error)?;
+                    }
                     windows.remove(&surface);
                     configure_scheduler.cancel(surface);
                     frame_layers.remove(&surface);
@@ -1477,7 +1500,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         flush_resize_configures(
             &display,
             &mut wayland,
-            &windows,
+            &mut windows,
             &mut configure_scheduler,
             &mut resize_configure_budget,
         )?;
@@ -1669,7 +1692,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             flush_resize_configures(
                 &display,
                 &mut wayland,
-                &windows,
+                &mut windows,
                 &mut configure_scheduler,
                 &mut resize_configure_budget,
             )?;

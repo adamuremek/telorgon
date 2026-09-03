@@ -30,7 +30,8 @@ pub(super) fn update_pointer_focus(
     position: PointF,
     config: &LinuxDesktopConfig,
 ) -> AppResult<()> {
-    let next = hit_test_surface(windows, stacking_order, position, config, session_locked);
+    let next = hit_test_surface(windows, stacking_order, position, config, session_locked)
+        .filter(|surface| wayland.core().world.surface(*surface).is_some());
     let seat_focus = wayland
         .core()
         .seats
@@ -132,6 +133,9 @@ pub(super) fn focus_toplevel(
     windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
     surface: Option<WaylandSurfaceId>,
 ) -> AppResult<()> {
+    let surface = surface
+        .and_then(|surface| toplevel_ancestor(windows, surface))
+        .filter(|surface| wayland.core().world.surface(*surface).is_some());
     let previous = wayland
         .core()
         .seats
@@ -185,6 +189,26 @@ pub(super) fn focus_toplevel(
             .map_err(app_error)?;
     }
     Ok(())
+}
+
+fn toplevel_ancestor(
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    surface: WaylandSurfaceId,
+) -> Option<WaylandSurfaceId> {
+    let mut candidate = surface;
+    // A valid surface tree cannot contain a parent cycle. The bound also fails closed if corrupt
+    // state reaches this host-side cache.
+    for _ in 0..=windows.len() {
+        let window = windows.get(&candidate)?;
+        match window.role {
+            SurfaceRole::XdgToplevel if !window.minimized => return Some(candidate),
+            SurfaceRole::XdgPopup | SurfaceRole::Subsurface => {
+                candidate = window.parent?;
+            }
+            _ => return None,
+        }
+    }
+    None
 }
 
 pub(super) fn hit_test_decoration(

@@ -6663,7 +6663,7 @@ impl NativeState {
                 self.pointer_constraints
                     .retain(|_, constraint| constraint.surface != surface);
                 self.session_lock_surfaces.remove(&surface);
-                let _ = self.core.world.destroy_surface(context.client, surface);
+                let _ = self.core.destroy_surface(context.client, surface);
             }
             ResourceKind::Region(object) => {
                 self.regions.remove(&object);

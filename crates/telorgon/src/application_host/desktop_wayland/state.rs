@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::compositor_wayland::{ResizeEdge, WaylandSurfaceId, XdgConfigure};
+use crate::compositor_wayland::{ResizeEdge, WaylandSurfaceId, XdgSurfaceState};
 use crate::core::{PointI, SizeI};
 
 /// The one configure that should be emitted for a surface at the end of an input turn.
@@ -16,6 +16,35 @@ pub(super) struct PendingResizeConfigure {
 #[derive(Debug, Default)]
 pub(super) struct ConfigureScheduler {
     pending: BTreeMap<WaylandSurfaceId, PendingResizeConfigure>,
+}
+
+/// The terminal configure for one interactive resize.
+///
+/// The size is known when the pointer grab ends, but the protocol serial does not exist until the
+/// scheduler emits the configure. Keeping both prevents an unrelated activation configure with the
+/// same size from being mistaken for the end of the resize transaction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FinalResizeConfigure {
+    pub size: SizeI,
+    pub serial: Option<u32>,
+}
+
+impl FinalResizeConfigure {
+    pub fn pending(size: SizeI) -> Self {
+        Self { size, serial: None }
+    }
+
+    pub fn record_sent(&mut self, size: SizeI, serial: u32) {
+        if self.size == size {
+            self.serial = Some(serial);
+        }
+    }
+
+    pub fn was_acknowledged(self, xdg_surface: Option<&XdgSurfaceState>) -> bool {
+        self.serial.is_some_and(|serial| {
+            xdg_surface.is_some_and(|xdg_surface| xdg_surface.configure_was_acknowledged(serial))
+        })
+    }
 }
 
 impl ConfigureScheduler {
@@ -116,15 +145,6 @@ fn resizes_top(edge: ResizeEdge) -> bool {
         edge,
         ResizeEdge::Top | ResizeEdge::TopLeft | ResizeEdge::TopRight
     )
-}
-
-pub(super) fn acknowledged_final_resize(
-    expected_size: Option<SizeI>,
-    acknowledged: Option<XdgConfigure>,
-) -> bool {
-    expected_size.is_some()
-        && acknowledged
-            .is_some_and(|configure| !configure.states.resizing && configure.size == expected_size)
 }
 
 #[cfg(test)]
@@ -233,41 +253,40 @@ mod tests {
     }
 
     #[test]
-    fn only_the_matching_final_ack_reconciles_a_resize_commit() {
-        use crate::compositor_wayland::{DecorationMode, ToplevelState};
-
+    fn final_resize_does_not_complete_before_its_configure_is_sent() {
         let size = SizeI {
             width: 801,
             height: 603,
         };
-        let configure = |configured_size, resizing| XdgConfigure {
-            serial: 4,
-            size: Some(configured_size),
-            bounds: None,
-            states: ToplevelState {
-                resizing,
-                ..ToplevelState::default()
-            },
-            decoration: DecorationMode::ServerSide,
+        assert!(!FinalResizeConfigure::pending(size).was_acknowledged(None));
+    }
+
+    #[test]
+    fn only_the_emitted_final_serial_can_complete_a_resize() {
+        use crate::compositor_wayland::{DecorationMode, ToplevelState, XdgConfigure};
+
+        let surface = surface();
+        let size = SizeI {
+            width: 801,
+            height: 603,
         };
-        assert!(!acknowledged_final_resize(
-            Some(size),
-            Some(configure(size, true))
-        ));
-        assert!(!acknowledged_final_resize(
-            Some(size),
-            Some(configure(
-                SizeI {
-                    width: 800,
-                    height: 600,
-                },
-                false,
-            ))
-        ));
-        assert!(acknowledged_final_resize(
-            Some(size),
-            Some(configure(size, false))
-        ));
+        let mut xdg = XdgSurfaceState::new(surface);
+        for serial in [4, 5] {
+            xdg.queue_configure(XdgConfigure {
+                serial,
+                size: Some(size),
+                bounds: None,
+                states: ToplevelState::default(),
+                decoration: DecorationMode::ServerSide,
+            })
+            .unwrap();
+        }
+        let mut final_resize = FinalResizeConfigure::pending(size);
+        final_resize.record_sent(size, 4);
+
+        assert!(!final_resize.was_acknowledged(Some(&xdg)));
+        xdg.ack_configure(5).unwrap();
+        assert!(final_resize.was_acknowledged(Some(&xdg)));
     }
 
     #[test]

@@ -129,6 +129,16 @@ impl XdgSurfaceState {
         !self.pending.is_empty()
     }
 
+    /// Returns whether a configure that was previously queued has been acknowledged, either
+    /// directly or by acknowledging a newer configure that superseded it.
+    pub fn configure_was_acknowledged(&self, serial: u32) -> bool {
+        self.last_acked.is_some()
+            && !self
+                .pending
+                .iter()
+                .any(|configure| configure.serial == serial)
+    }
+
     pub fn window_geometry(&self) -> Option<RectI> {
         self.window_geometry
     }
@@ -305,7 +315,24 @@ mod tests {
                 .unwrap();
         }
         surface.ack_configure(10).unwrap();
+        assert!(surface.configure_was_acknowledged(9));
+        assert!(surface.configure_was_acknowledged(10));
         assert_eq!(surface.ack_configure(9), Err(XdgError::UnknownConfigure));
+    }
+
+    #[test]
+    fn pending_configure_is_not_reported_as_acknowledged() {
+        let mut surface = XdgSurfaceState::new(WaylandSurfaceId::from_raw(1).unwrap());
+        surface
+            .queue_configure(XdgConfigure {
+                serial: 9,
+                size: None,
+                bounds: None,
+                states: ToplevelState::default(),
+                decoration: DecorationMode::ServerSide,
+            })
+            .unwrap();
+        assert!(!surface.configure_was_acknowledged(9));
     }
 
     #[test]

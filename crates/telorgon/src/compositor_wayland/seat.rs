@@ -97,6 +97,31 @@ impl SeatState {
             self.keyboard_focus = None;
         }
     }
+
+    pub fn remove_surface(&mut self, surface: WaylandSurfaceId) {
+        if self
+            .pointer_focus
+            .is_some_and(|focus| focus.surface == surface)
+        {
+            self.pointer_focus = None;
+            self.cursor = CursorImage::TelorgonDefault;
+        }
+        if self
+            .keyboard_focus
+            .is_some_and(|focus| focus.surface == surface)
+        {
+            self.keyboard_focus = None;
+        }
+        if matches!(
+            self.cursor,
+            CursorImage::ClientSurface {
+                surface: cursor_surface,
+                ..
+            } if cursor_surface == surface
+        ) {
+            self.cursor = CursorImage::TelorgonDefault;
+        }
+    }
 }
 
 fn update_pressed(values: &mut Vec<u32>, value: u32, state: ButtonState) -> bool {
@@ -127,5 +152,34 @@ mod tests {
         assert!(!seat.set_button(0x110, ButtonState::Pressed));
         assert_eq!(seat.pressed_buttons(), &[0x110]);
         assert!(seat.set_button(0x110, ButtonState::Released));
+    }
+
+    #[test]
+    fn destroying_a_focused_surface_clears_focus_and_its_cursor() {
+        let client = ClientId::from_raw(1).unwrap();
+        let surface = WaylandSurfaceId::from_raw(7).unwrap();
+        let mut seat = SeatState::new("seat0", SeatCapabilities::default());
+        seat.pointer_focus = Some(PointerFocus {
+            client,
+            surface,
+            position: PointF::default(),
+            enter_serial: 1,
+        });
+        seat.keyboard_focus = Some(KeyboardFocus {
+            client,
+            surface,
+            enter_serial: 2,
+        });
+        seat.cursor = CursorImage::ClientSurface {
+            surface,
+            hotspot_x: 0,
+            hotspot_y: 0,
+        };
+
+        seat.remove_surface(surface);
+
+        assert!(seat.pointer_focus.is_none());
+        assert!(seat.keyboard_focus.is_none());
+        assert_eq!(seat.cursor, CursorImage::TelorgonDefault);
     }
 }
