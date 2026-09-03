@@ -84,7 +84,10 @@ use scene::{
     DesktopSceneKey,
 };
 use shm_copy::{ShmCopyCompletion, ShmCopyRequest, ShmCopyWorker};
-use state::{ConfigureScheduler, FinalResizeConfigure, PendingResizeConfigure, ResizeAnchor};
+use state::{
+    ConfigureScheduler, FinalResizeConfigure, PendingResizeConfigure, ResizeAnchor,
+    take_ready_deferred_shm_surface,
+};
 
 const MAX_DEFERRED_SHM_COPIES: usize = 64;
 
@@ -1106,7 +1109,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 completion,
             )?;
         }
-        while let Some(surface) = deferred_shm_order.pop_front() {
+        while let Some(surface) =
+            take_ready_deferred_shm_surface(&mut deferred_shm_order, &submitted_shm_surfaces)
+        {
             let request = deferred_shm_copies
                 .remove(&surface)
                 .ok_or_else(|| AppError::new("deferred SHM surface has no request"))?;
@@ -1115,7 +1120,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 deferred_shm_order.push_front(surface);
                 break;
             }
-            submitted_shm_surfaces.insert(surface);
+            if !submitted_shm_surfaces.insert(surface) {
+                return Err(AppError::new(
+                    "deferred SHM surface copy was already submitted",
+                ));
+            }
         }
         let runtime_now = MonotonicInstant::from_nanos(
             start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,

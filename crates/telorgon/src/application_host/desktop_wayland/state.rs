@@ -1,7 +1,28 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compositor_wayland::{ResizeEdge, WaylandSurfaceId, XdgConfigure};
 use crate::core::{PointI, SizeI};
+
+/// Removes the next deferred SHM surface that does not already have a copy in flight.
+///
+/// A submitted surface remains in the queue so its latest deferred revision can be retried after
+/// that surface's completion is observed. The bounded pass prevents an all-blocked queue from
+/// spinning while still allowing unrelated surfaces behind a blocked entry to make progress.
+pub(super) fn take_ready_deferred_shm_surface(
+    deferred: &mut VecDeque<WaylandSurfaceId>,
+    submitted: &BTreeSet<WaylandSurfaceId>,
+) -> Option<WaylandSurfaceId> {
+    let candidate_count = deferred.len();
+    for _ in 0..candidate_count {
+        let surface = deferred.pop_front()?;
+        if submitted.contains(&surface) {
+            deferred.push_back(surface);
+        } else {
+            return Some(surface);
+        }
+    }
+    None
+}
 
 /// The one configure that should be emitted for a surface at the end of an input turn.
 /// Replacing an entry is intentional: raw motion is compositor-local preview state, not a
@@ -154,6 +175,27 @@ mod tests {
 
     fn surface() -> WaylandSurfaceId {
         WaylandSurfaceId::from_raw(7).unwrap()
+    }
+
+    fn other_surface() -> WaylandSurfaceId {
+        WaylandSurfaceId::from_raw(8).unwrap()
+    }
+
+    #[test]
+    fn deferred_shm_copy_waits_for_its_own_submitted_copy() {
+        let mut deferred = VecDeque::from([surface(), other_surface()]);
+        let submitted = BTreeSet::from([surface()]);
+
+        assert_eq!(
+            take_ready_deferred_shm_surface(&mut deferred, &submitted),
+            Some(other_surface())
+        );
+        assert_eq!(deferred, VecDeque::from([surface()]));
+        assert_eq!(
+            take_ready_deferred_shm_surface(&mut deferred, &submitted),
+            None
+        );
+        assert_eq!(deferred, VecDeque::from([surface()]));
     }
 
     #[test]

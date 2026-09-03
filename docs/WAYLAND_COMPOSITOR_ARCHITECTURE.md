@@ -226,9 +226,11 @@ The operational managed path is entirely Telorgon-rendered:
    the input/protocol owner. That worker also prepares independent client-retained and scene-owned
    snapshots, so accepting a completed full image does not perform another whole-buffer copy on the
    owner. Each surface has at most one submitted full copy and one replaceable latest deferred
-   copy. Superseded deferred revisions are retired immediately, while `wl_buffer` release remains
-   delayed until every submitted read of that buffer is done. Different surfaces can still occupy
-   the bounded worker queue concurrently.
+   copy. Draining free worker capacity skips deferred surfaces whose earlier copy is still in
+   flight, while continuing past them so unrelated surfaces can make progress. Superseded deferred
+   revisions are retired immediately, while `wl_buffer` release remains delayed until every
+   submitted read of that buffer is done. Different surfaces can still occupy the bounded worker
+   queue concurrently.
 2. `telorgon-compositor-render` preserves little-endian ARGB/XRGB as native BGRA and ABGR/XBGR as
    native RGBA, with explicit alpha/color metadata; only RGB565 and geometry transformations need
    pixel conversion. Buffer transform/scale and viewporter crop/destination use bounded
