@@ -51,6 +51,7 @@ pub struct SeatState {
     pub cursor: CursorImage,
     pressed_keys: Vec<u32>,
     pressed_buttons: Vec<u32>,
+    keyboard_modifiers: (u32, u32, u32, u32),
 }
 
 impl SeatState {
@@ -63,6 +64,7 @@ impl SeatState {
             cursor: CursorImage::TelorgonDefault,
             pressed_keys: Vec::new(),
             pressed_buttons: Vec::new(),
+            keyboard_modifiers: (0, 0, 0, 0),
         }
     }
 
@@ -80,6 +82,20 @@ impl SeatState {
 
     pub fn pressed_buttons(&self) -> &[u32] {
         &self.pressed_buttons
+    }
+
+    pub fn keyboard_modifiers(&self) -> (u32, u32, u32, u32) {
+        self.keyboard_modifiers
+    }
+
+    pub fn set_keyboard_modifiers(
+        &mut self,
+        depressed: u32,
+        latched: u32,
+        locked: u32,
+        group: u32,
+    ) {
+        self.keyboard_modifiers = (depressed, latched, locked, group);
     }
 
     pub fn remove_client(&mut self, client: ClientId) {
@@ -181,5 +197,13 @@ mod tests {
         assert!(seat.pointer_focus.is_none());
         assert!(seat.keyboard_focus.is_none());
         assert_eq!(seat.cursor, CursorImage::TelorgonDefault);
+    }
+
+    #[test]
+    fn keyboard_modifiers_are_retained_for_the_next_focus_enter() {
+        let mut seat = SeatState::new("seat0", SeatCapabilities::default());
+        seat.set_keyboard_modifiers(1, 2, 4, 3);
+
+        assert_eq!(seat.keyboard_modifiers(), (1, 2, 4, 3));
     }
 }

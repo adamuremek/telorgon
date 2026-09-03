@@ -83,7 +83,9 @@ production-qualified.
 > surface rather than an accumulating commit FIFO. Interactive resize motion is coalesced before protocol
 > delivery to the latest scheduled state, with at most one resizing configure per
 > presented frame; committed/desired geometry stays separate, configure acknowledgement and window
-> geometry are latched to the applying surface commit, and stale buffers are compositor-scaled into
+> geometry are latched to the applying surface commit, configure acknowledgement survives
+> latest-wins image-copy replacement, frame callbacks drain only through the displayed image
+> revision, and stale buffers are compositor-scaled into
 > a live target for every resize edge. Capability-gated Vulkan DMA-BUF commits are materialized into
 > retained compositor textures with acquire/release sync-FD handling and no CPU pixel copy. The host also supports secure
 > session lock, interactive window-management policy, activation, constraints, and pointer/touch

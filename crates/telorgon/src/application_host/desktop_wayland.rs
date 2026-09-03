@@ -59,7 +59,8 @@ mod state;
 
 use client::{
     ClientWindow, PreparedClientImage, apply_surface_publication, discard_shm_copy,
-    finish_dma_buf_release, finish_shm_copy, retire_submitted_dma_buf, retire_unsubmitted_dma_buf,
+    finish_dma_buf_release, finish_shm_copy, observe_surface_configure_acknowledgement,
+    retire_submitted_dma_buf, retire_unsubmitted_dma_buf,
 };
 #[cfg(test)]
 use cursor_plane::{CursorCommitTracker, HARDWARE_CURSOR_BUFFER_COUNT};
@@ -879,39 +880,31 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             KeyDirection::Up
                         };
                         keyboard.update_key(keycode, direction);
-                        let keyboard_focused = wayland
-                            .core()
-                            .seats
-                            .get(&1)
-                            .and_then(|seat| seat.keyboard_focus)
-                            .is_some();
-                        if keyboard_focused {
-                            let serial = display.next_serial();
-                            wayland
-                                .keyboard_key(
-                                    1,
-                                    time,
-                                    keycode,
-                                    if pressed {
-                                        WaylandButtonState::Pressed
-                                    } else {
-                                        WaylandButtonState::Released
-                                    },
-                                    serial,
-                                )
-                                .map_err(app_error)?;
-                            let modifiers = keyboard.modifiers();
-                            wayland
-                                .keyboard_modifiers(
-                                    1,
-                                    serial,
-                                    modifiers.depressed,
-                                    modifiers.latched,
-                                    modifiers.locked,
-                                    modifiers.group,
-                                )
-                                .map_err(app_error)?;
-                        }
+                        let serial = display.next_serial();
+                        wayland
+                            .keyboard_key(
+                                1,
+                                time,
+                                keycode,
+                                if pressed {
+                                    WaylandButtonState::Pressed
+                                } else {
+                                    WaylandButtonState::Released
+                                },
+                                serial,
+                            )
+                            .map_err(app_error)?;
+                        let modifiers = keyboard.modifiers();
+                        wayland
+                            .keyboard_modifiers(
+                                1,
+                                serial,
+                                modifiers.depressed,
+                                modifiers.latched,
+                                modifiers.locked,
+                                modifiers.group,
+                            )
+                            .map_err(app_error)?;
                     }
                     LinuxInputEventKind::PointerAxis {
                         horizontal,
@@ -1228,6 +1221,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     let Some(role) = snapshot.role else {
                         continue;
                     };
+                    // Configure acknowledgement is commit state, not image-worker state. Observe
+                    // it before a newer latest-wins SHM publication can replace these pixels.
+                    observe_surface_configure_acknowledgement(&mut windows, &snapshot);
                     if !matches!(
                         role,
                         SurfaceRole::XdgToplevel
@@ -1344,22 +1340,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     * 4
                     });
                     let surface_copy_pending = pending_shm_surfaces.contains_key(&surface);
-                    if surface_copy_pending
-                        && direct_shm
-                        && metadata_matches
-                        && buffer_damage.is_none()
-                    {
-                        wayland
-                            .finish_explicit_release(surface, snapshot.revision, None)
-                            .map_err(app_error)?;
-                        if !pending_shm_buffers.contains_key(&attachment.buffer) {
-                            wayland
-                                .release_buffer(attachment.buffer)
-                                .map_err(app_error)?;
-                        }
-                        repaint = true;
-                        continue;
-                    }
                     let can_patch = direct_shm && metadata_matches && !surface_copy_pending;
                     let full_damage = buffer_damage == Some(full_rect(descriptor.size));
                     let prepared_image = if can_patch && !full_damage {
@@ -1879,7 +1859,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     && (window.role == SurfaceRole::SessionLock) == session_locked
                 {
                     wayland
-                        .surface_presented(*surface, time)
+                        .surface_presented(*surface, window.revision, time)
                         .map_err(app_error)?;
                 }
             }

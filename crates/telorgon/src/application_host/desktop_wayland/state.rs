@@ -45,25 +45,18 @@ impl FinalResizeConfigure {
         }
     }
 
-    /// Observes one surface commit and returns true only once the client has both acknowledged the
-    /// terminal configure and published content with its configured window extent.
-    ///
-    /// Some clients can acknowledge the latest configure while a previously rendered buffer is
-    /// still being committed. Remembering the acknowledgement lets the following matching commit
-    /// complete the transaction without allowing that stale buffer to replace compositor geometry.
-    pub fn observe_commit(
-        &mut self,
-        acknowledged: Option<XdgConfigure>,
-        committed_size: SizeI,
-    ) -> bool {
+    /// Retains acknowledgement independently from asynchronous image publication. A later SHM
+    /// commit can supersede the worker result that carried this acknowledgement, but it still
+    /// consumes the terminal configure and therefore completes the protocol transaction.
+    pub fn observe_acknowledgement(&mut self, acknowledged: Option<XdgConfigure>) {
         self.acknowledged |= self
             .serial
             .zip(acknowledged)
-            .is_some_and(|(serial, configure)| {
-                serial_was_superseded_by(serial, configure.serial)
-                    && configure.size == Some(self.size)
-            });
-        self.acknowledged && committed_size == self.size
+            .is_some_and(|(serial, configure)| serial_was_superseded_by(serial, configure.serial));
+    }
+
+    pub fn was_acknowledged(self) -> bool {
+        self.acknowledged
     }
 }
 
@@ -266,7 +259,7 @@ mod tests {
             width: 801,
             height: 603,
         };
-        assert!(!FinalResizeConfigure::pending(size).observe_commit(None, size));
+        assert!(!FinalResizeConfigure::pending(size).was_acknowledged());
     }
 
     #[test]
@@ -287,12 +280,15 @@ mod tests {
         let mut final_resize = FinalResizeConfigure::pending(size);
         final_resize.record_sent(size, 4);
 
-        assert!(!final_resize.observe_commit(Some(configure(3)), size));
-        assert!(final_resize.observe_commit(Some(configure(4)), size));
+        final_resize.observe_acknowledgement(Some(configure(3)));
+        assert!(!final_resize.was_acknowledged());
+        final_resize.observe_acknowledgement(Some(configure(4)));
+        assert!(final_resize.was_acknowledged());
 
         let mut newer = FinalResizeConfigure::pending(size);
         newer.record_sent(size, 4);
-        assert!(newer.observe_commit(Some(configure(5)), size));
+        newer.observe_acknowledgement(Some(configure(5)));
+        assert!(newer.was_acknowledged());
     }
 
     #[test]
@@ -313,23 +309,21 @@ mod tests {
         let mut final_resize = FinalResizeConfigure::pending(size);
         final_resize.record_sent(size, u32::MAX);
 
-        assert!(final_resize.observe_commit(Some(configure(1)), size));
+        final_resize.observe_acknowledgement(Some(configure(1)));
+        assert!(final_resize.was_acknowledged());
 
         let mut older = FinalResizeConfigure::pending(size);
         older.record_sent(size, u32::MAX);
-        assert!(!older.observe_commit(Some(configure(u32::MAX - 1)), size));
+        older.observe_acknowledgement(Some(configure(u32::MAX - 1)));
+        assert!(!older.was_acknowledged());
     }
 
     #[test]
-    fn stale_commit_cannot_replace_the_terminal_resize_geometry() {
+    fn acknowledgement_survives_a_superseded_image_publication() {
         use crate::compositor_wayland::{DecorationMode, ToplevelState};
 
         let final_size = SizeI {
             width: 960,
-            height: 640,
-        };
-        let stale_size = SizeI {
-            width: 720,
             height: 640,
         };
         let configure = XdgConfigure {
@@ -342,12 +336,14 @@ mod tests {
         let mut final_resize = FinalResizeConfigure::pending(final_size);
         final_resize.record_sent(final_size, configure.serial);
 
-        assert!(!final_resize.observe_commit(Some(configure), stale_size));
-        assert!(final_resize.observe_commit(None, final_size));
+        final_resize.observe_acknowledgement(Some(configure));
+        final_resize.observe_acknowledgement(None);
+
+        assert!(final_resize.was_acknowledged());
     }
 
     #[test]
-    fn newer_configure_for_another_size_cannot_complete_the_resize() {
+    fn newer_configure_supersedes_the_terminal_resize_for_cell_sized_clients() {
         use crate::compositor_wayland::{DecorationMode, ToplevelState};
 
         let final_size = SizeI {
@@ -367,7 +363,9 @@ mod tests {
         let mut final_resize = FinalResizeConfigure::pending(final_size);
         final_resize.record_sent(final_size, 12);
 
-        assert!(!final_resize.observe_commit(Some(configure), final_size));
+        final_resize.observe_acknowledgement(Some(configure));
+
+        assert!(final_resize.was_acknowledged());
     }
 
     #[test]

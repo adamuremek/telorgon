@@ -158,10 +158,11 @@ move grabs, border/corner and client-requested resize grabs, maximize/restore, f
 minimize, and close events. Multi-workspace policy and output-aware placement remain shell policy
 extensions rather than protocol-server concerns.
 
-Frame callbacks and presentation-time feedback are associated with the exact commit revision and
-emitted after a successful KMS commit rather than at `wl_surface.commit`. Presentation feedback uses
-`CLOCK_MONOTONIC`; the blocking presenter reports no hardware timing flags until page-flip timestamp
-proof is integrated.
+Frame callbacks and presentation-time feedback are associated with commit revisions and emitted
+only through the image revision included in a successful KMS commit, rather than at
+`wl_surface.commit`. A presented revision completes frame callbacks from superseded commits while
+superseded presentation feedback is discarded. Presentation feedback uses `CLOCK_MONOTONIC`; the
+blocking presenter reports no hardware timing flags until page-flip timestamp proof is integrated.
 Copied SHM buffers are released after the compositor has taken its copy. Explicit-sync acquire FDs
 are attached to a specific surface revision and release objects are completed only by the render
 path that consumed that revision.
@@ -246,8 +247,9 @@ The operational managed path is entirely Telorgon-rendered:
    into the committed surface coordinate space while that preview is active. Commit-latched XDG
    window geometry maps the source buffer while a stable compositor content-slot clip keeps
    client-side shadow margins out of resize-size, hit-test, and fixed-edge calculations. A final
-   configure acknowledgement is retained across commits, but it cannot retire the resize
-   transaction until the client publishes the configured window extent.
+   configure acknowledgement is captured before asynchronous image work can be superseded. The
+   applying publication retires the resize transaction at the client's committed window extent;
+   cell- and aspect-constrained clients may legally choose an extent below the configure maximum.
 4. Backend selection happens once in the desktop renderer assembly. The selected implementation
    owns its scene map and output state for the remainder of the run; neither backend calls the
    other. Vulkan applies deltas to `VulkanScene`, stages changed rows and per-placement uniforms,

@@ -12,6 +12,7 @@ use crate::wayland_server::{
     ClientRef, Display, Global, IncomingRequest, NativeProtocol, ProtocolCatalog, ResourceRef,
 };
 
+use crate::compositor_wayland::synchronization::take_surface_commits_through;
 use crate::compositor_wayland::{
     BufferAttachment, BufferDescriptor, BufferTransform, ClientId, ClientLimits, CompositorAction,
     CompositorCore, ObjectMetadata, ProtocolObjectId, ProtocolObjectKind, Region, ShmBuffer,
@@ -953,7 +954,7 @@ impl<'display> NativeCompositor<'display> {
     }
 
     pub fn keyboard_modifiers(
-        &self,
+        &mut self,
         seat: u32,
         serial: u32,
         depressed: u32,
@@ -1008,9 +1009,12 @@ impl<'display> NativeCompositor<'display> {
     pub fn surface_presented(
         &mut self,
         surface: WaylandSurfaceId,
+        through_revision: u64,
         time_milliseconds: u32,
     ) -> Result<(), NativeCompositorError> {
-        let identities = self.state.surface_presented(surface, time_milliseconds)?;
+        let identities =
+            self.state
+                .surface_presented(surface, through_revision, time_milliseconds)?;
         for identity in identities {
             if let Some(resource) =
                 unsafe { ResourceRef::from_raw(identity as *mut ffi::wl_resource) }
@@ -1375,25 +1379,41 @@ impl NativeState {
     fn surface_presented(
         &mut self,
         surface: WaylandSurfaceId,
+        through_revision: u64,
         time_milliseconds: u32,
     ) -> Result<Vec<usize>, NativeCompositorError> {
-        let revision = self
+        let current_revision = self
             .core
             .world
             .surface(surface)
             .ok_or_else(|| NativeCompositorError::new("unknown wl_surface"))?
             .snapshot()
             .revision;
-        let callbacks = self
-            .committed_callbacks
-            .remove(&(surface, revision))
-            .unwrap_or_default();
-        let feedbacks = self
-            .committed_presentation_feedbacks
-            .remove(&(surface, revision))
-            .unwrap_or_default();
-        let mut identities = Vec::with_capacity(callbacks.len() + feedbacks.len());
-        for object in callbacks {
+        if through_revision > current_revision {
+            return Err(NativeCompositorError::new(
+                "presented surface revision is newer than committed state",
+            ));
+        }
+        let callback_commits =
+            take_surface_commits_through(&mut self.committed_callbacks, surface, through_revision);
+        let feedback_commits = take_surface_commits_through(
+            &mut self.committed_presentation_feedbacks,
+            surface,
+            through_revision,
+        );
+        let callback_count = callback_commits
+            .iter()
+            .map(|(_, callbacks)| callbacks.len())
+            .sum::<usize>();
+        let feedback_count = feedback_commits
+            .iter()
+            .map(|(_, feedbacks)| feedbacks.len())
+            .sum::<usize>();
+        let mut identities = Vec::with_capacity(callback_count + feedback_count);
+        for object in callback_commits
+            .into_iter()
+            .flat_map(|(_, callbacks)| callbacks)
+        {
             let Some(identity) = self.resources.get(&object).copied() else {
                 continue;
             };
@@ -1412,7 +1432,26 @@ impl NativeState {
             )?;
             identities.push(identity);
         }
-        if !feedbacks.is_empty() {
+        let mut presented_feedbacks = Vec::new();
+        for (revision, feedbacks) in feedback_commits {
+            if revision == through_revision {
+                presented_feedbacks.extend(feedbacks);
+                continue;
+            }
+            for object in feedbacks {
+                let Some(identity) = self.resources.get(&object).copied() else {
+                    continue;
+                };
+                let Some(resource) =
+                    (unsafe { ResourceRef::from_raw(identity as *mut ffi::wl_resource) })
+                else {
+                    continue;
+                };
+                self.post_event(resource, "wp_presentation_feedback", "discarded", &mut [])?;
+                identities.push(identity);
+            }
+        }
+        if !presented_feedbacks.is_empty() {
             let timestamp = monotonic_timestamp()?;
             self.presentation_sequence = self.presentation_sequence.wrapping_add(1).max(1);
             let sequence = self.presentation_sequence;
@@ -1426,7 +1465,7 @@ impl NativeState {
                     u32::try_from(1_000_000_000_000_u64 / u64::from(millihertz)).unwrap_or(u32::MAX)
                 })
                 .unwrap_or(0);
-            for object in feedbacks {
+            for object in presented_feedbacks {
                 let Some(identity) = self.resources.get(&object).copied() else {
                     continue;
                 };
@@ -2075,6 +2114,9 @@ impl NativeState {
             .get(&seat_id)
             .ok_or_else(|| NativeCompositorError::new("unknown seat"))?
             .keyboard_focus;
+        if previous.map(|focus| focus.surface) == surface {
+            return Ok(());
+        }
         if let Some(previous) = previous {
             let surface_resource = self.surface_resource(previous.surface)?;
             for resource in self.resources_for_client(
@@ -2115,10 +2157,17 @@ impl NativeState {
                 .seats
                 .get(&seat_id)
                 .expect("seat checked")
-                .pressed_keys();
+                .pressed_keys()
+                .to_vec();
+            let modifiers = self
+                .core
+                .seats
+                .get(&seat_id)
+                .expect("seat checked")
+                .keyboard_modifiers();
             let mut keys = ffi::wl_array {
-                size: std::mem::size_of_val(keys),
-                alloc: std::mem::size_of_val(keys),
+                size: std::mem::size_of_val(keys.as_slice()),
+                alloc: std::mem::size_of_val(keys.as_slice()),
                 data: keys.as_ptr().cast_mut().cast::<c_void>(),
             };
             for resource in self.resources_for_client(
@@ -2137,6 +2186,7 @@ impl NativeState {
                         ffi::wl_argument { a: &mut keys },
                     ],
                 )?;
+                self.post_keyboard_modifiers(resource, serial, modifiers)?;
             }
             Some(crate::compositor_wayland::KeyboardFocus {
                 client,
@@ -2191,6 +2241,7 @@ impl NativeState {
         &self,
         resource: ResourceRef<'_>,
         seat_id: u32,
+        client: ClientId,
     ) -> Result<(), NativeCompositorError> {
         if let Some((keymap, size)) = self.keyboard_keymaps.get(&seat_id) {
             self.post_event(
@@ -2214,6 +2265,39 @@ impl NativeState {
                 &mut [ffi::wl_argument { i: 25 }, ffi::wl_argument { i: 600 }],
             )?;
         }
+        if let Some(focus) = self
+            .core
+            .seats
+            .get(&seat_id)
+            .ok_or_else(|| NativeCompositorError::new("unknown seat"))?
+            .keyboard_focus
+            .filter(|focus| focus.client == client)
+        {
+            let surface_resource = self.surface_resource(focus.surface)?;
+            let seat = self.core.seats.get(&seat_id).expect("seat checked");
+            let keys = seat.pressed_keys().to_vec();
+            let modifiers = seat.keyboard_modifiers();
+            let mut keys = ffi::wl_array {
+                size: std::mem::size_of_val(keys.as_slice()),
+                alloc: std::mem::size_of_val(keys.as_slice()),
+                data: keys.as_ptr().cast_mut().cast::<c_void>(),
+            };
+            self.post_event(
+                resource,
+                "wl_keyboard",
+                "enter",
+                &mut [
+                    ffi::wl_argument {
+                        u: focus.enter_serial,
+                    },
+                    ffi::wl_argument {
+                        o: surface_resource,
+                    },
+                    ffi::wl_argument { a: &mut keys },
+                ],
+            )?;
+            self.post_keyboard_modifiers(resource, focus.enter_serial, modifiers)?;
+        }
         Ok(())
     }
 
@@ -2225,13 +2309,18 @@ impl NativeState {
         state: crate::compositor_wayland::ButtonState,
         serial: u32,
     ) -> Result<(), NativeCompositorError> {
-        let focus = self
-            .core
-            .seats
-            .get(&seat_id)
-            .ok_or_else(|| NativeCompositorError::new("unknown seat"))?
-            .keyboard_focus
-            .ok_or_else(|| NativeCompositorError::new("keyboard has no focused surface"))?;
+        let focus = {
+            let seat = self
+                .core
+                .seats
+                .get_mut(&seat_id)
+                .ok_or_else(|| NativeCompositorError::new("unknown seat"))?;
+            seat.set_key(key, state);
+            seat.keyboard_focus
+        };
+        let Some(focus) = focus else {
+            return Ok(());
+        };
         self.core
             .serials
             .issue(
@@ -2241,11 +2330,6 @@ impl NativeState {
                 Some(focus.surface),
             )
             .map_err(error)?;
-        self.core
-            .seats
-            .get_mut(&seat_id)
-            .expect("seat checked")
-            .set_key(key, state);
         let wire_state = u32::from(matches!(
             state,
             crate::compositor_wayland::ButtonState::Pressed
@@ -2271,7 +2355,7 @@ impl NativeState {
 
     #[allow(clippy::too_many_arguments)]
     fn keyboard_modifiers(
-        &self,
+        &mut self,
         seat_id: u32,
         serial: u32,
         depressed: u32,
@@ -2279,31 +2363,45 @@ impl NativeState {
         locked: u32,
         group: u32,
     ) -> Result<(), NativeCompositorError> {
-        let focus = self
-            .core
-            .seats
-            .get(&seat_id)
-            .ok_or_else(|| NativeCompositorError::new("unknown seat"))?
-            .keyboard_focus
-            .ok_or_else(|| NativeCompositorError::new("keyboard has no focused surface"))?;
+        let focus = {
+            let seat = self
+                .core
+                .seats
+                .get_mut(&seat_id)
+                .ok_or_else(|| NativeCompositorError::new("unknown seat"))?;
+            seat.set_keyboard_modifiers(depressed, latched, locked, group);
+            seat.keyboard_focus
+        };
+        let Some(focus) = focus else {
+            return Ok(());
+        };
         for resource in self.resources_for_client(
             focus.client,
             |kind| matches!(kind, ResourceKind::Keyboard(candidate) if candidate == seat_id),
         )? {
-            self.post_event(
-                resource,
-                "wl_keyboard",
-                "modifiers",
-                &mut [
-                    ffi::wl_argument { u: serial },
-                    ffi::wl_argument { u: depressed },
-                    ffi::wl_argument { u: latched },
-                    ffi::wl_argument { u: locked },
-                    ffi::wl_argument { u: group },
-                ],
-            )?;
+            self.post_keyboard_modifiers(resource, serial, (depressed, latched, locked, group))?;
         }
         Ok(())
+    }
+
+    fn post_keyboard_modifiers(
+        &self,
+        resource: ResourceRef<'_>,
+        serial: u32,
+        modifiers: (u32, u32, u32, u32),
+    ) -> Result<(), NativeCompositorError> {
+        self.post_event(
+            resource,
+            "wl_keyboard",
+            "modifiers",
+            &mut [
+                ffi::wl_argument { u: serial },
+                ffi::wl_argument { u: modifiers.0 },
+                ffi::wl_argument { u: modifiers.1 },
+                ffi::wl_argument { u: modifiers.2 },
+                ffi::wl_argument { u: modifiers.3 },
+            ],
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2660,12 +2758,6 @@ impl NativeState {
         let capabilities = u32::from(seat.capabilities.pointer)
             | (u32::from(seat.capabilities.keyboard) << 1)
             | (u32::from(seat.capabilities.touch) << 2);
-        self.post_event(
-            resource,
-            "wl_seat",
-            "capabilities",
-            &mut [ffi::wl_argument { u: capabilities }],
-        )?;
         if resource.version() >= 2 {
             let name = protocol_string(&seat.name);
             self.post_event(
@@ -2675,6 +2767,12 @@ impl NativeState {
                 &mut [ffi::wl_argument { s: name.as_ptr() }],
             )?;
         }
+        self.post_event(
+            resource,
+            "wl_seat",
+            "capabilities",
+            &mut [ffi::wl_argument { u: capabilities }],
+        )?;
         Ok(())
     }
 
@@ -2913,7 +3011,7 @@ impl NativeState {
             true,
         )?;
         if matches!(kind, ResourceKind::Keyboard(_)) {
-            self.send_keyboard_initial(input_resource, seat)?;
+            self.send_keyboard_initial(input_resource, seat, context.client)?;
         }
         Ok(DispatchOutcome::default())
     }

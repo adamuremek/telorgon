@@ -65,6 +65,21 @@ pub(super) enum PreparedClientImage {
     },
 }
 
+pub(super) fn observe_surface_configure_acknowledgement(
+    windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    snapshot: &crate::compositor_wayland::SurfaceStateSnapshot,
+) {
+    if snapshot.role != Some(SurfaceRole::XdgToplevel) {
+        return;
+    }
+    if let Some(final_resize) = windows
+        .get_mut(&snapshot.surface)
+        .and_then(|window| window.resize_final.as_mut())
+    {
+        final_resize.observe_acknowledgement(snapshot.acknowledged_configure);
+    }
+}
+
 impl PreparedClientImage {
     pub(super) fn full(image: crate::render::ImageResource) -> Self {
         let retained_pixels = image.pixels.to_vec();
@@ -273,10 +288,11 @@ pub(super) fn apply_surface_publication(
     let mut reconciled_position = position;
     let mut resize_anchor = previous_window.and_then(|window| window.resize_anchor);
     let mut retained_resize_final = previous_window.and_then(|window| window.resize_final);
+    if let Some(final_resize) = retained_resize_final.as_mut() {
+        final_resize.observe_acknowledgement(snapshot.acknowledged_configure);
+    }
     let final_resize_committed = role == SurfaceRole::XdgToplevel
-        && retained_resize_final.as_mut().is_some_and(|final_resize| {
-            final_resize.observe_commit(snapshot.acknowledged_configure, committed_window_extent)
-        });
+        && retained_resize_final.is_some_and(FinalResizeConfigure::was_acknowledged);
     if final_resize_committed {
         if let Some(anchor) = resize_anchor.take() {
             reconciled_position = anchor.reconcile_position(position, committed_window_extent);

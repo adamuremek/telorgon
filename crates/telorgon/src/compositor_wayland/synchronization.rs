@@ -4,6 +4,20 @@ use std::num::NonZeroU64;
 
 use crate::compositor_wayland::{ProtocolObjectId, WaylandBufferId, WaylandSurfaceId};
 
+pub(crate) fn take_surface_commits_through<T>(
+    commits: &mut BTreeMap<(WaylandSurfaceId, u64), Vec<T>>,
+    surface: WaylandSurfaceId,
+    through_revision: u64,
+) -> Vec<(u64, Vec<T>)> {
+    let keys = commits
+        .range((surface, 0)..=(surface, through_revision))
+        .map(|(key, _)| *key)
+        .collect::<Vec<_>>();
+    keys.into_iter()
+        .filter_map(|key| commits.remove(&key).map(|objects| (key.1, objects)))
+        .collect()
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferUseId(NonZeroU64);
@@ -174,5 +188,24 @@ mod tests {
             .unwrap();
         assert_eq!(tracker.presented(id, None).unwrap(), None);
         assert!(tracker.presented(id, None).unwrap().is_some());
+    }
+
+    #[test]
+    fn committed_objects_are_drained_through_the_presented_revision_only() {
+        let surface = WaylandSurfaceId::from_raw(2).unwrap();
+        let other = WaylandSurfaceId::from_raw(3).unwrap();
+        let mut commits = BTreeMap::from([
+            ((surface, 4), vec![40, 41]),
+            ((surface, 6), vec![60]),
+            ((surface, 8), vec![80]),
+            ((other, 4), vec![400]),
+        ]);
+
+        assert_eq!(
+            take_surface_commits_through(&mut commits, surface, 6),
+            vec![(4, vec![40, 41]), (6, vec![60])]
+        );
+        assert_eq!(commits.get(&(surface, 8)), Some(&vec![80]));
+        assert_eq!(commits.get(&(other, 4)), Some(&vec![400]));
     }
 }
