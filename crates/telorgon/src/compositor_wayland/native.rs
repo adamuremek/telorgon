@@ -473,8 +473,12 @@ pub struct NativeCompositor<'display> {
 
 impl Drop for NativeCompositor<'_> {
     fn drop(&mut self) {
-        // libwayland retains the bind callback and its data pointer in each global. Destroy the
-        // globals while the bind contexts and the protocol descriptors in `state` are still live.
+        // Every resource context retains a pointer into `state`. Disconnect clients while that
+        // state is still alive so libwayland's resource-destroy callbacks cannot dereference it
+        // after this owner has been dropped. `Display::drop` may repeat this on an empty list.
+        unsafe { ffi::wl_display_destroy_clients(self.state.display.as_ptr()) };
+        // Libwayland also retains each bind callback and its data pointer in the corresponding
+        // global. Destroy the globals before releasing those callback contexts.
         self.globals.clear();
         self.bind_contexts.clear();
     }

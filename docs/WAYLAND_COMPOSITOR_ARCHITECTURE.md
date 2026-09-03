@@ -327,7 +327,8 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
 - Only one nonblocking atomic commit is outstanding per CRTC. Pointer events received while it is
   outstanding replace desired cursor position rather than enqueueing additional commits.
 - A libseat-managed DRM FD remains owned by the seat; KMS receives a duplicate.
-- Wayland globals are destroyed before bind contexts and native protocol descriptors.
+- Connected Wayland clients and their resources are destroyed while native protocol state is
+  still alive; globals are then destroyed before bind contexts and protocol descriptors.
 - No callback is allowed to unwind across a C ABI boundary.
 
 ## Source audit
