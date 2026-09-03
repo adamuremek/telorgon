@@ -61,4 +61,5 @@ pub use hosted::{
 };
 pub use readback::{PendingVulkanReadback, VulkanReadback};
 pub use scene::{VulkanScene, VulkanSceneMetrics};
+pub(crate) use target::VulkanMaterializationTarget;
 pub use target::{OffscreenVulkanTarget, VulkanTarget};

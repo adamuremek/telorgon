@@ -21,7 +21,9 @@ pub(crate) fn device_supports_linux_dma_buf(device: &VulkanDevice) -> bool {
     }
     #[cfg(target_os = "linux")]
     {
-        if device.hosted.is_none() || !device.inner.hosted_extensions.linux_dma_buf_complete() {
+        if !(device.inner.owned_dma_buf_imports
+            || device.inner.hosted_extensions.linux_dma_buf_complete())
+        {
             return false;
         }
         let info = vk::PhysicalDeviceExternalSemaphoreInfo::default()
@@ -870,7 +872,7 @@ mod linux {
     }
 
     impl VulkanDevice {
-        /// Returns the exact single-plane DMA-BUF tuples this hosted device can import for
+        /// Returns the exact single-plane DMA-BUF tuples this device can import for
         /// `usage`. An empty list is a valid result when the complete Linux interop extension set
         /// exists but no supported RGBA/BGRA tuple satisfies the requested usage.
         pub fn dma_buf_import_capabilities(
@@ -879,7 +881,7 @@ mod linux {
         ) -> RenderResult<Vec<VulkanDmaBufFormatCapability>> {
             if !super::device_supports_linux_dma_buf(self) {
                 return Err(unsupported(
-                    "hosted Vulkan device lacks the complete DMA-BUF/modifier/sync-FD contract",
+                    "Vulkan device lacks the complete DMA-BUF/modifier/sync-FD contract",
                 ));
             }
             if !usage.contains(vk::ImageUsageFlags::SAMPLED) {
@@ -952,7 +954,7 @@ mod linux {
             Ok(capabilities)
         }
 
-        /// Imports one Linux DMA-BUF generation into a hosted Vulkan device without a CPU copy.
+        /// Imports one Linux DMA-BUF generation into a Vulkan device without a CPU copy.
         ///
         /// # Safety
         ///
@@ -966,7 +968,7 @@ mod linux {
         ) -> RenderResult<VulkanExternalImageLease> {
             if !super::device_supports_linux_dma_buf(self) {
                 return Err(unsupported(
-                    "hosted Vulkan device lacks the complete DMA-BUF/modifier/sync-FD contract",
+                    "Vulkan device lacks the complete DMA-BUF/modifier/sync-FD contract",
                 ));
             }
             if import.protected {

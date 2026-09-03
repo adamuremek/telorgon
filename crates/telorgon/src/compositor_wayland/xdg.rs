@@ -54,7 +54,9 @@ pub struct XdgSurfaceState {
     configured: bool,
     pending: VecDeque<XdgConfigure>,
     last_acked: Option<XdgConfigure>,
-    window_geometry: Option<RectI>,
+    pending_acked: Option<XdgConfigure>,
+    pending_window_geometry: Option<RectI>,
+    current_window_geometry: Option<RectI>,
 }
 
 impl XdgSurfaceState {
@@ -64,7 +66,9 @@ impl XdgSurfaceState {
             configured: false,
             pending: VecDeque::new(),
             last_acked: None,
-            window_geometry: None,
+            pending_acked: None,
+            pending_window_geometry: None,
+            current_window_geometry: None,
         }
     }
 
@@ -102,6 +106,7 @@ impl XdgSurfaceState {
         self.pending.drain(..=index);
         self.configured = true;
         self.last_acked = Some(configure);
+        self.pending_acked = Some(configure);
         Ok(configure)
     }
 
@@ -117,7 +122,7 @@ impl XdgSurfaceState {
         if geometry.width <= 0 || geometry.height <= 0 {
             return Err(XdgError::InvalidWindowGeometry);
         }
-        self.window_geometry = Some(geometry);
+        self.pending_window_geometry = Some(geometry);
         Ok(())
     }
 
@@ -140,7 +145,18 @@ impl XdgSurfaceState {
     }
 
     pub fn window_geometry(&self) -> Option<RectI> {
-        self.window_geometry
+        self.current_window_geometry
+    }
+
+    /// Applies the xdg state associated with one `wl_surface.commit`.
+    ///
+    /// Only an acknowledgement issued since the preceding commit belongs to this commit. Window
+    /// geometry is persistent double-buffered state and therefore remains current until replaced.
+    pub fn commit_state(&mut self) -> (Option<XdgConfigure>, Option<RectI>) {
+        if let Some(geometry) = self.pending_window_geometry.take() {
+            self.current_window_geometry = Some(geometry);
+        }
+        (self.pending_acked.take(), self.current_window_geometry)
     }
 }
 
@@ -372,6 +388,35 @@ mod tests {
         surface.ack_configure(1).unwrap();
         surface.queue_configure(configure).unwrap();
         assert_eq!(surface.ack_configure(1).unwrap(), configure);
+    }
+
+    #[test]
+    fn acknowledgement_and_window_geometry_are_latched_by_the_next_commit_only() {
+        let mut surface = XdgSurfaceState::new(WaylandSurfaceId::from_raw(1).unwrap());
+        let configure = XdgConfigure {
+            serial: 9,
+            size: Some(SizeI {
+                width: 640,
+                height: 480,
+            }),
+            bounds: None,
+            states: ToplevelState::default(),
+            decoration: DecorationMode::ServerSide,
+        };
+        let geometry = RectI {
+            x: 4,
+            y: 8,
+            width: 632,
+            height: 464,
+        };
+        surface.queue_configure(configure).unwrap();
+        surface.ack_configure(configure.serial).unwrap();
+        surface.set_window_geometry(geometry).unwrap();
+
+        assert_eq!(surface.window_geometry(), None);
+        assert_eq!(surface.commit_state(), (Some(configure), Some(geometry)));
+        assert_eq!(surface.window_geometry(), Some(geometry));
+        assert_eq!(surface.commit_state(), (None, Some(geometry)));
     }
 
     #[test]

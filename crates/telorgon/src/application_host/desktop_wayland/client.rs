@@ -1,3 +1,4 @@
+use super::renderer::DmaBufRetirement;
 use super::*;
 
 pub(super) struct ClientWindow {
@@ -8,6 +9,7 @@ pub(super) struct ClientWindow {
     pub(super) server_decorated: bool,
     pub(super) position: PointI,
     pub(super) size: SizeI,
+    pub(super) window_geometry: RectI,
     pub(super) requested_size: SizeI,
     pub(super) resize_anchor: Option<ResizeAnchor>,
     pub(super) resize_final: Option<FinalResizeConfigure>,
@@ -30,6 +32,7 @@ enum PendingClientImageUpdate {
     Unchanged,
     Full(Arc<[u8]>),
     Region(RectI),
+    External(ImageId),
 }
 
 impl PendingClientImageUpdate {
@@ -38,6 +41,7 @@ impl PendingClientImageUpdate {
             Self::Full(pixels) => patch_client_pixels(Arc::make_mut(pixels), update),
             Self::Region(rect) => *rect = union_rect(*rect, update.rect),
             Self::Unchanged => *self = Self::Region(update.rect),
+            Self::External(_) => unreachable!("DMA-BUF content cannot receive an SHM patch"),
         }
     }
 }
@@ -53,6 +57,12 @@ pub(super) enum PreparedClientImage {
         retained_pixels: Vec<u8>,
     },
     Region(crate::render::ImageResourceUpdate),
+    External {
+        extent: SizeI,
+        pixel_format: ImagePixelFormat,
+        alpha_mode: ImageAlphaMode,
+        image: ImageId,
+    },
 }
 
 impl PreparedClientImage {
@@ -69,6 +79,7 @@ impl PreparedClientImage {
             Self::Unchanged { extent, .. } => *extent,
             Self::Full { image, .. } => image.extent,
             Self::Region(update) => update.extent,
+            Self::External { extent, .. } => *extent,
         }
     }
 
@@ -77,6 +88,7 @@ impl PreparedClientImage {
             Self::Unchanged { pixel_format, .. } => *pixel_format,
             Self::Full { image, .. } => image.pixel_format,
             Self::Region(update) => update.pixel_format,
+            Self::External { pixel_format, .. } => *pixel_format,
         }
     }
 
@@ -85,6 +97,7 @@ impl PreparedClientImage {
             Self::Unchanged { alpha_mode, .. } => *alpha_mode,
             Self::Full { image, .. } => image.alpha_mode,
             Self::Region(update) => update.alpha_mode,
+            Self::External { alpha_mode, .. } => *alpha_mode,
         }
     }
 }
@@ -108,6 +121,18 @@ impl ClientWindow {
                 patch_client_pixels(&mut self.pixels, &update);
                 self.pending_image_update.merge_region(&update);
             }
+            PreparedClientImage::External {
+                extent,
+                pixel_format,
+                alpha_mode,
+                image,
+            } => {
+                self.size = extent;
+                self.alpha_mode = alpha_mode;
+                self.pixel_format = pixel_format;
+                self.pixels.clear();
+                self.pending_image_update = PendingClientImageUpdate::External(image);
+            }
         }
     }
 
@@ -122,6 +147,10 @@ impl ClientWindow {
                     pixels: copy_client_region(&self.pixels, self.size, rect).into(),
                 }])
             }
+            PendingClientImageUpdate::External(image) => DesktopImageUpdate::External {
+                image,
+                content_version: self.revision,
+            },
         }
     }
 }
@@ -169,6 +198,17 @@ pub(super) fn apply_surface_publication(
     let image_extent = prepared_image.extent();
     let image_pixel_format = prepared_image.pixel_format();
     let image_alpha_mode = prepared_image.alpha_mode();
+    let window_geometry = if role == SurfaceRole::XdgToplevel {
+        snapshot
+            .window_geometry
+            .unwrap_or_else(|| full_rect(image_extent))
+    } else {
+        full_rect(image_extent)
+    };
+    let committed_window_extent = SizeI {
+        width: window_geometry.width,
+        height: window_geometry.height,
+    };
     let (parent, offset, position) = if role == SurfaceRole::Subsurface {
         let parent = wayland.core().subsurfaces.parent(surface);
         let offset = wayland
@@ -227,19 +267,19 @@ pub(super) fn apply_surface_publication(
     let previous_window = windows.get(&surface);
     let mut requested_size = retained_requested_size(
         previous_window.map(|window| window.requested_size),
-        image_extent,
+        committed_window_extent,
     );
     let mut reconciled_position = position;
     let mut resize_anchor = previous_window.and_then(|window| window.resize_anchor);
     let resize_final = previous_window.and_then(|window| window.resize_final);
     let final_resize_acked = role == SurfaceRole::XdgToplevel
         && resize_final.is_some_and(|final_resize| {
-            final_resize.was_acknowledged(wayland.core().xdg_surface(surface))
+            final_resize.was_committed_with(snapshot.acknowledged_configure)
         });
     let mut retained_resize_final = resize_final;
     if final_resize_acked && let Some(anchor) = resize_anchor.take() {
-        reconciled_position = anchor.reconcile_position(position, image_extent);
-        requested_size = image_extent;
+        reconciled_position = anchor.reconcile_position(position, committed_window_extent);
+        requested_size = committed_window_extent;
         retained_resize_final = None;
     }
     let (
@@ -271,6 +311,7 @@ pub(super) fn apply_surface_publication(
             window.role != role
                 || window.position != reconciled_position
                 || window.size != image_extent
+                || window.window_geometry != window_geometry
                 || window.minimized != minimized
                 || window.server_decorated != server_decorated
         });
@@ -280,6 +321,7 @@ pub(super) fn apply_surface_publication(
         window.offset = offset;
         window.server_decorated = server_decorated;
         window.position = reconciled_position;
+        window.window_geometry = window_geometry;
         window.requested_size = requested_size;
         window.restore_geometry = restore_geometry;
         window.maximized = maximized;
@@ -292,14 +334,22 @@ pub(super) fn apply_surface_publication(
         window.resize_final = retained_resize_final;
         window.apply_image(snapshot.revision, prepared_image);
     } else {
-        let PreparedClientImage::Full {
-            image,
-            retained_pixels,
-        } = prepared_image
-        else {
-            return Err(AppError::new(
-                "new surface publication did not provide a complete image",
-            ));
+        let (pending_image_update, pixels) = match prepared_image {
+            PreparedClientImage::Full {
+                image,
+                retained_pixels,
+            } => (
+                PendingClientImageUpdate::Full(image.pixels),
+                retained_pixels,
+            ),
+            PreparedClientImage::External { image, .. } => {
+                (PendingClientImageUpdate::External(image), Vec::new())
+            }
+            PreparedClientImage::Unchanged { .. } | PreparedClientImage::Region(_) => {
+                return Err(AppError::new(
+                    "new surface publication did not provide a complete image",
+                ));
+            }
         };
         windows.insert(
             surface,
@@ -310,7 +360,8 @@ pub(super) fn apply_surface_publication(
                 offset,
                 server_decorated,
                 position: reconciled_position,
-                size: image.extent,
+                size: image_extent,
+                window_geometry,
                 requested_size,
                 restore_geometry,
                 maximized,
@@ -323,8 +374,8 @@ pub(super) fn apply_surface_publication(
                 resize_final: retained_resize_final,
                 alpha_mode: image_alpha_mode,
                 pixel_format: image_pixel_format,
-                pending_image_update: PendingClientImageUpdate::Full(image.pixels),
-                pixels: retained_pixels,
+                pending_image_update,
+                pixels,
             },
         );
     }
@@ -354,24 +405,14 @@ pub(super) fn finish_shm_copy(
     pending_surfaces: &mut BTreeMap<WaylandSurfaceId, usize>,
     completion: ShmCopyCompletion,
 ) -> AppResult<bool> {
-    let pending = pending_buffers
-        .get_mut(&completion.buffer)
-        .ok_or_else(|| AppError::new("completed SHM buffer copy was not tracked"))?;
-    *pending = pending
-        .checked_sub(1)
-        .ok_or_else(|| AppError::new("completed SHM buffer copy count underflow"))?;
-    if *pending == 0 {
-        pending_buffers.remove(&completion.buffer);
-    }
-    let pending = pending_surfaces
-        .get_mut(&completion.snapshot.surface)
-        .ok_or_else(|| AppError::new("completed SHM surface copy was not tracked"))?;
-    *pending = pending
-        .checked_sub(1)
-        .ok_or_else(|| AppError::new("completed SHM surface copy count underflow"))?;
-    if *pending == 0 {
-        pending_surfaces.remove(&completion.snapshot.surface);
-    }
+    retire_pending_shm_use(
+        wayland,
+        pending_buffers,
+        pending_surfaces,
+        completion.snapshot.surface,
+        completion.snapshot.revision,
+        completion.buffer,
+    )?;
     let current = wayland
         .core()
         .world
@@ -398,10 +439,96 @@ pub(super) fn finish_shm_copy(
             image,
         )?;
     }
-    if !pending_buffers.contains_key(&completion.buffer) {
+    Ok(apply)
+}
+
+pub(super) fn discard_shm_copy(
+    wayland: &mut NativeCompositor<'_>,
+    pending_buffers: &mut BTreeMap<crate::compositor_wayland::WaylandBufferId, usize>,
+    pending_surfaces: &mut BTreeMap<WaylandSurfaceId, usize>,
+    request: ShmCopyRequest,
+) -> AppResult<()> {
+    retire_pending_shm_use(
+        wayland,
+        pending_buffers,
+        pending_surfaces,
+        request.snapshot.surface,
+        request.snapshot.revision,
+        request.buffer(),
+    )
+}
+
+fn retire_pending_shm_use(
+    wayland: &mut NativeCompositor<'_>,
+    pending_buffers: &mut BTreeMap<crate::compositor_wayland::WaylandBufferId, usize>,
+    pending_surfaces: &mut BTreeMap<WaylandSurfaceId, usize>,
+    surface: WaylandSurfaceId,
+    revision: u64,
+    buffer: crate::compositor_wayland::WaylandBufferId,
+) -> AppResult<()> {
+    let pending = pending_buffers
+        .get_mut(&buffer)
+        .ok_or_else(|| AppError::new("completed SHM buffer copy was not tracked"))?;
+    *pending = pending
+        .checked_sub(1)
+        .ok_or_else(|| AppError::new("completed SHM buffer copy count underflow"))?;
+    if *pending == 0 {
+        pending_buffers.remove(&buffer);
+    }
+    let pending = pending_surfaces
+        .get_mut(&surface)
+        .ok_or_else(|| AppError::new("completed SHM surface copy was not tracked"))?;
+    *pending = pending
+        .checked_sub(1)
+        .ok_or_else(|| AppError::new("completed SHM surface copy count underflow"))?;
+    if *pending == 0 {
+        pending_surfaces.remove(&surface);
+    }
+    wayland
+        .finish_explicit_release(surface, revision, None)
+        .map_err(app_error)?;
+    if !pending_buffers.contains_key(&buffer) {
+        wayland.release_buffer(buffer).map_err(app_error)?;
+    }
+    Ok(())
+}
+
+pub(super) fn finish_dma_buf_release(
+    wayland: &mut NativeCompositor<'_>,
+    retirement: DmaBufRetirement,
+    fence: Option<OwnedFd>,
+) -> AppResult<()> {
+    wayland
+        .finish_explicit_release(retirement.surface, retirement.revision, fence)
+        .map_err(app_error)?;
+    Ok(())
+}
+
+pub(super) fn retire_unsubmitted_dma_buf(
+    wayland: &mut NativeCompositor<'_>,
+    pending_buffers: &mut BTreeMap<crate::compositor_wayland::WaylandBufferId, usize>,
+    retirement: DmaBufRetirement,
+) -> AppResult<()> {
+    finish_dma_buf_release(wayland, retirement, None)?;
+    retire_submitted_dma_buf(wayland, pending_buffers, retirement)
+}
+
+pub(super) fn retire_submitted_dma_buf(
+    wayland: &mut NativeCompositor<'_>,
+    pending_buffers: &mut BTreeMap<crate::compositor_wayland::WaylandBufferId, usize>,
+    retirement: DmaBufRetirement,
+) -> AppResult<()> {
+    let pending = pending_buffers
+        .get_mut(&retirement.buffer)
+        .ok_or_else(|| AppError::new("completed DMA-BUF use was not tracked"))?;
+    *pending = pending
+        .checked_sub(1)
+        .ok_or_else(|| AppError::new("completed DMA-BUF use count underflow"))?;
+    if *pending == 0 {
+        pending_buffers.remove(&retirement.buffer);
         wayland
-            .release_buffer(completion.buffer)
+            .release_buffer(retirement.buffer)
             .map_err(app_error)?;
     }
-    Ok(apply)
+    Ok(())
 }

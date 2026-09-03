@@ -55,6 +55,11 @@ pub(super) enum DesktopImageUpdate {
     Unchanged,
     Full(Arc<[u8]>),
     Regions(Vec<DesktopImageRegion>),
+    /// The Vulkan backend has prepared a compositor-owned retained texture under this ID.
+    External {
+        image: ImageId,
+        content_version: u64,
+    },
 }
 
 pub(super) enum DesktopLayerContent {
@@ -74,8 +79,11 @@ pub(super) enum DesktopLayerContent {
 pub(super) struct DesktopLayer {
     pub key: DesktopLayerKey,
     pub content: DesktopLayerContent,
-    pub extent: SizeI,
-    pub position: PointI,
+    /// Extent of the retained scene or committed client buffer.
+    pub source_extent: SizeI,
+    /// Compositor-controlled output rectangle. This may differ from `source_extent` while a
+    /// client is catching up with an interactive resize.
+    pub target: RectI,
     /// A compositor-space clip used to constrain stale committed buffers during live resize.
     pub clip: Option<RectI>,
     /// Invisible placements retain their backend scene but contribute no output geometry.
@@ -94,8 +102,13 @@ impl DesktopLayer {
         Self {
             key,
             content: DesktopLayerContent::Retained { scene, deltas },
-            extent,
-            position,
+            source_extent: extent,
+            target: RectI {
+                x: position.x,
+                y: position.y,
+                width: extent.width,
+                height: extent.height,
+            },
             clip: None,
             visible,
         }
@@ -107,8 +120,8 @@ impl DesktopLayer {
         scene: DesktopSceneKey,
         content_version: u64,
         update: DesktopImageUpdate,
-        extent: SizeI,
-        position: PointI,
+        source_extent: SizeI,
+        target: RectI,
         clip: Option<RectI>,
         alpha_mode: ImageAlphaMode,
         pixel_format: ImagePixelFormat,
@@ -123,8 +136,8 @@ impl DesktopLayer {
                 alpha_mode,
                 pixel_format,
             },
-            extent,
-            position,
+            source_extent,
+            target,
             clip,
             visible,
         }
@@ -161,6 +174,7 @@ struct ImageScene {
     source: RenderScene,
     source_version: u64,
     content_version: u64,
+    image: ImageId,
     extent: SizeI,
     alpha_mode: ImageAlphaMode,
     pixel_format: ImagePixelFormat,
@@ -183,6 +197,7 @@ impl ImageScene {
             source,
             source_version: 0,
             content_version: 0,
+            image: ImageId(1),
             extent: SizeI::default(),
             alpha_mode: ImageAlphaMode::Straight,
             pixel_format: ImagePixelFormat::Rgba8,
@@ -202,24 +217,34 @@ impl ImageScene {
             || self.pixel_format != pixel_format;
         let source_changed = self.source_version != source_version;
         if self.content_version == 0 || metadata_changed {
-            let DesktopImageUpdate::Full(pixels) = update else {
-                return None;
-            };
-            self.content_version = self.content_version.wrapping_add(1).max(1);
             self.source.extent = size_f(extent);
             self.source.damage.full = true;
             self.source.damage.rects.clear();
-            self.source
-                .set_image_resource(ImageResource {
-                    image: ImageId(1),
-                    content_version: self.content_version,
-                    extent,
-                    color_encoding: ImageColorEncoding::Srgb,
-                    alpha_mode,
-                    pixel_format,
-                    pixels: Arc::clone(pixels),
-                })
-                .expect("validated desktop image resource");
+            match update {
+                DesktopImageUpdate::Full(pixels) => {
+                    self.content_version = self.content_version.wrapping_add(1).max(1);
+                    self.image = ImageId(1);
+                    self.source
+                        .set_image_resource(ImageResource {
+                            image: self.image,
+                            content_version: self.content_version,
+                            extent,
+                            color_encoding: ImageColorEncoding::Srgb,
+                            alpha_mode,
+                            pixel_format,
+                            pixels: Arc::clone(pixels),
+                        })
+                        .expect("validated desktop image resource");
+                }
+                DesktopImageUpdate::External {
+                    image,
+                    content_version,
+                } => {
+                    self.image = *image;
+                    self.content_version = *content_version;
+                }
+                DesktopImageUpdate::Unchanged | DesktopImageUpdate::Regions(_) => return None,
+            }
             self.extent = extent;
             self.alpha_mode = alpha_mode;
             self.pixel_format = pixel_format;
@@ -231,9 +256,10 @@ impl ImageScene {
                 DesktopImageUpdate::Unchanged => return None,
                 DesktopImageUpdate::Full(pixels) => {
                     self.content_version = self.content_version.wrapping_add(1).max(1);
+                    self.image = ImageId(1);
                     self.source
                         .set_image_resource(ImageResource {
-                            image: ImageId(1),
+                            image: self.image,
                             content_version: self.content_version,
                             extent,
                             color_encoding: ImageColorEncoding::Srgb,
@@ -248,7 +274,7 @@ impl ImageScene {
                         self.content_version = self.content_version.wrapping_add(1).max(1);
                         self.source
                             .update_image_resource_region(ImageResourceUpdate {
-                                image: ImageId(1),
+                                image: self.image,
                                 content_version: self.content_version,
                                 extent,
                                 rect: region.rect,
@@ -260,6 +286,15 @@ impl ImageScene {
                             })
                             .expect("validated desktop image region");
                     }
+                }
+                DesktopImageUpdate::External {
+                    image,
+                    content_version,
+                } => {
+                    self.image = *image;
+                    self.content_version = *content_version;
+                    self.source.damage.full = true;
+                    self.source.damage.rects.clear();
                 }
             }
         }
@@ -277,7 +312,7 @@ impl ImageScene {
             NodeId::new(1, 1),
             ImageInstance {
                 node: NodeId::new(1, 1),
-                image: ImageId(1),
+                image: self.image,
                 tint: None,
                 rect: bounds,
                 view_bounds: bounds,
@@ -292,7 +327,7 @@ impl ImageScene {
             index: 0,
             batch: BatchKey {
                 pipeline: PipelineKind::Image,
-                resource: 1,
+                resource: self.image.0,
                 clip: ClipId(0),
                 blend: if alpha_mode == ImageAlphaMode::Opaque {
                     BlendMode::Opaque
@@ -433,7 +468,7 @@ impl DesktopComposition {
                     if let Some(delta) = source.synchronize(
                         content_version,
                         &update,
-                        layer.extent,
+                        layer.source_extent,
                         alpha_mode,
                         pixel_format,
                     ) {
@@ -443,12 +478,7 @@ impl DesktopComposition {
                 }
             };
             live_scenes.insert(scene);
-            let target = RectI {
-                x: layer.position.x,
-                y: layer.position.y,
-                width: layer.extent.width,
-                height: layer.extent.height,
-            };
+            let target = layer.target;
             let bounds = layer
                 .visible
                 .then_some(target)
@@ -567,7 +597,11 @@ impl DesktopComposition {
 }
 
 fn valid_layer(layer: &DesktopLayer) -> bool {
-    if layer.extent.width <= 0 || layer.extent.height <= 0 {
+    if layer.source_extent.width <= 0
+        || layer.source_extent.height <= 0
+        || layer.target.width <= 0
+        || layer.target.height <= 0
+    {
         return false;
     }
     match &layer.content {
@@ -575,7 +609,8 @@ fn valid_layer(layer: &DesktopLayer) -> bool {
         DesktopLayerContent::Image { update, .. } => match update {
             DesktopImageUpdate::Unchanged => true,
             DesktopImageUpdate::Full(pixels) => {
-                pixels.len() >= layer.extent.width as usize * layer.extent.height as usize * 4
+                pixels.len()
+                    >= layer.source_extent.width as usize * layer.source_extent.height as usize * 4
             }
             DesktopImageUpdate::Regions(regions) => {
                 !regions.is_empty()
@@ -585,13 +620,17 @@ fn valid_layer(layer: &DesktopLayer) -> bool {
                             && rect.y >= 0
                             && rect.width > 0
                             && rect.height > 0
-                            && rect.right() <= layer.extent.width
-                            && rect.bottom() <= layer.extent.height
+                            && rect.right() <= layer.source_extent.width
+                            && rect.bottom() <= layer.source_extent.height
                             && region.row_bytes >= rect.width as usize * 4
                             && region.pixels.len()
                                 >= region.row_bytes.saturating_mul(rect.height as usize)
                     })
             }
+            DesktopImageUpdate::External {
+                image,
+                content_version,
+            } => image.0 != 0 && *content_version != 0,
         },
     }
 }
@@ -679,6 +718,18 @@ mod tests {
     use super::*;
 
     fn image_layer(position: PointI, update: DesktopImageUpdate) -> DesktopLayer {
+        image_layer_at(
+            RectI {
+                x: position.x,
+                y: position.y,
+                width: 100,
+                height: 80,
+            },
+            update,
+        )
+    }
+
+    fn image_layer_at(target: RectI, update: DesktopImageUpdate) -> DesktopLayer {
         DesktopLayer::image(
             DesktopLayerKey::Surface(9),
             DesktopSceneKey::Surface(9),
@@ -688,12 +739,53 @@ mod tests {
                 width: 100,
                 height: 80,
             },
-            position,
+            target,
             None,
             ImageAlphaMode::Opaque,
             ImagePixelFormat::Rgba8,
             true,
         )
+    }
+
+    #[test]
+    fn committed_image_can_be_scaled_to_a_live_resize_target_without_content_update() {
+        let extent = SizeI {
+            width: 800,
+            height: 600,
+        };
+        let mut composition = DesktopComposition::new(extent);
+        let _ = composition.synchronize(
+            extent,
+            vec![image_layer(
+                PointI { x: 300, y: 220 },
+                DesktopImageUpdate::Full(vec![255; 100 * 80 * 4].into()),
+            )],
+        );
+
+        let target = RectI {
+            x: 260,
+            y: 190,
+            width: 140,
+            height: 110,
+        };
+        let frame = composition
+            .synchronize(
+                extent,
+                vec![image_layer_at(target, DesktopImageUpdate::Unchanged)],
+            )
+            .unwrap();
+
+        assert!(frame.updates.is_empty());
+        assert_eq!(frame.placements[0].target, target);
+        assert_eq!(
+            frame.damage,
+            Some(RectI {
+                x: 260,
+                y: 190,
+                width: 140,
+                height: 110,
+            })
+        );
     }
 
     #[test]

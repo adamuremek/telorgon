@@ -10,6 +10,7 @@ use software::SoftwareDesktopRenderer;
 use vulkan::VulkanDesktopRenderer;
 
 pub(super) use vulkan::VulkanCompletion;
+pub(super) use vulkan::{DmaBufPublication, DmaBufQueueResult, DmaBufRelease, DmaBufRetirement};
 #[cfg(test)]
 pub(super) use vulkan::{
     VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT, VULKAN_STAGING_MIN_BYTES_PER_SLOT,
@@ -17,8 +18,13 @@ pub(super) use vulkan::{
 };
 
 pub(super) enum DesktopRenderResult {
-    Vulkan,
-    Software { damage: RectI },
+    Vulkan {
+        releases: Vec<DmaBufRelease>,
+        discarded: Vec<DmaBufRetirement>,
+    },
+    Software {
+        damage: RectI,
+    },
 }
 
 /// The only point where the Linux desktop chooses a rendering implementation.
@@ -50,6 +56,35 @@ impl DesktopRenderer {
         matches!(self, Self::Vulkan(_))
     }
 
+    pub(super) fn dma_buf_formats(&self) -> Vec<crate::compositor_wayland::DmaBufFormat> {
+        match self {
+            Self::Vulkan(renderer) => renderer.dma_buf_formats(),
+            Self::Software(_) => Vec::new(),
+        }
+    }
+
+    pub(super) fn queue_dma_buf(
+        &mut self,
+        publication: DmaBufPublication,
+    ) -> AppResult<DmaBufQueueResult> {
+        match self {
+            Self::Vulkan(renderer) => renderer.queue_dma_buf(publication),
+            Self::Software(_) => Err(crate::application_host::AppError::new(
+                "DMA-BUF publication reached the software desktop renderer",
+            )),
+        }
+    }
+
+    pub(super) fn cancel_dma_buf_surface(
+        &mut self,
+        surface: crate::compositor_wayland::WaylandSurfaceId,
+    ) -> Option<DmaBufRetirement> {
+        match self {
+            Self::Vulkan(renderer) => renderer.cancel_dma_buf_surface(surface),
+            Self::Software(_) => None,
+        }
+    }
+
     pub(super) fn completion_event_fd(&self) -> Option<i32> {
         match self {
             Self::Vulkan(renderer) => Some(renderer.completion_event_fd()),
@@ -71,8 +106,11 @@ impl DesktopRenderer {
     ) -> AppResult<DesktopRenderResult> {
         match self {
             Self::Vulkan(renderer) => {
-                renderer.render(target_index, frame)?;
-                Ok(DesktopRenderResult::Vulkan)
+                let result = renderer.render(target_index, frame)?;
+                Ok(DesktopRenderResult::Vulkan {
+                    releases: result.releases,
+                    discarded: result.discarded,
+                })
             }
             Self::Software(renderer) => renderer
                 .render(target_index, frame)

@@ -458,23 +458,11 @@ pub(super) fn prepare_desktop_layers(
                 ));
             }
         }
-        let content_offset = window_content_offset(window, config);
-        let preview_position = PointI {
-            x: position.x + content_offset.x,
-            y: position.y + content_offset.y,
-        };
-        let mut content_position = preview_position;
-        if let Some(anchor) = window.resize_anchor {
-            let offset = anchor.committed_buffer_offset(window.requested_size, window.size);
-            content_position.x = content_position.x.saturating_add(offset.x);
-            content_position.y = content_position.y.saturating_add(offset.y);
-        }
-        let preview_clip = (window.role == SurfaceRole::XdgToplevel).then_some(RectI {
-            x: preview_position.x,
-            y: preview_position.y,
-            width: window.requested_size.width,
-            height: window.requested_size.height,
-        });
+        // Keep the last committed buffer attached to the compositor-controlled window rectangle.
+        // The retained scene backends scale `window.size` into this target while the client draws
+        // and commits its next size, so chrome and content move together with the pointer.
+        let preview_target = surface_target_rect(window, position, config);
+        let preview_clip = (window.role == SurfaceRole::XdgToplevel).then_some(preview_target);
         layers.push(DesktopLayer::image(
             DesktopLayerKey::Surface(surface.get()),
             DesktopSceneKey::Surface(surface.get()),
@@ -485,7 +473,7 @@ pub(super) fn prepare_desktop_layers(
                 DesktopImageUpdate::Unchanged
             },
             window.size,
-            content_position,
+            preview_target,
             preview_clip,
             window.alpha_mode,
             window.pixel_format,
@@ -510,9 +498,11 @@ pub(super) fn prepare_desktop_layers(
                 DesktopImageUpdate::Unchanged
             },
             icon.size,
-            PointI {
+            RectI {
                 x: drag_position.x.round() as i32,
                 y: drag_position.y.round() as i32,
+                width: icon.size.width,
+                height: icon.size.height,
             },
             None,
             icon.alpha_mode,
@@ -548,9 +538,11 @@ pub(super) fn prepare_desktop_layers(
                 cursor_image_signature(cursor),
                 DesktopImageUpdate::Full(Arc::from(cursor.rgba.as_slice())),
                 cursor.size,
-                PointI {
+                RectI {
                     x: pointer_position.x.round() as i32 - cursor.hotspot.x,
                     y: pointer_position.y.round() as i32 - cursor.hotspot.y,
+                    width: cursor.size.width,
+                    height: cursor.size.height,
                 },
                 None,
                 if cursor.premultiplied {

@@ -131,6 +131,7 @@ pub(super) fn focus_toplevel(
     display: &Display,
     wayland: &mut NativeCompositor<'_>,
     windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
     surface: Option<WaylandSurfaceId>,
 ) -> AppResult<()> {
     let surface = surface
@@ -152,17 +153,13 @@ pub(super) fn focus_toplevel(
             .surface(previous)
             .is_some_and(|surface| surface.snapshot().role == Some(SurfaceRole::XdgToplevel))
     {
-        wayland
-            .configure_toplevel(
+        if let Some(window) = windows.get(&previous) {
+            configure_scheduler.schedule_state(
                 previous,
-                windows.get(&previous).map(|window| window.requested_size),
-                windows
-                    .get(&previous)
-                    .map_or_else(ToplevelState::default, |window| {
-                        window_toplevel_states(window, false, false)
-                    }),
-            )
-            .map_err(app_error)?;
+                window.requested_size,
+                window.resize_anchor.is_some() && window.resize_final.is_none(),
+            );
+        }
     }
     wayland
         .set_keyboard_focus(1, surface, display.next_serial())
@@ -174,19 +171,13 @@ pub(super) fn focus_toplevel(
             .surface(surface)
             .is_some_and(|surface| surface.snapshot().role == Some(SurfaceRole::XdgToplevel))
     {
-        wayland
-            .configure_toplevel(
+        if let Some(window) = windows.get(&surface) {
+            configure_scheduler.schedule_state(
                 surface,
-                windows.get(&surface).map(|window| window.requested_size),
-                windows.get(&surface).map_or(
-                    ToplevelState {
-                        activated: true,
-                        ..ToplevelState::default()
-                    },
-                    |window| window_toplevel_states(window, true, false),
-                ),
-            )
-            .map_err(app_error)?;
+                window.requested_size,
+                window.resize_anchor.is_some() && window.resize_final.is_none(),
+            );
+        }
     }
     Ok(())
 }
@@ -447,13 +438,14 @@ pub(super) fn hit_test_surface(
         .filter_map(|surface| windows.get(surface).map(|window| (*surface, window)))
         .find(|(_, window)| {
             let origin = window_content_origin(window, config);
+            let target = window_content_target_extent(window);
             window.role != SurfaceRole::Cursor
                 && !window.minimized
                 && (window.role == SurfaceRole::SessionLock) == session_locked
                 && position.x >= origin.x as f32
                 && position.y >= origin.y as f32
-                && position.x < (origin.x + window.size.width) as f32
-                && position.y < (origin.y + window.size.height) as f32
+                && position.x < (origin.x + target.width) as f32
+                && position.y < (origin.y + target.height) as f32
         })
         .map(|(surface, _)| surface)
 }

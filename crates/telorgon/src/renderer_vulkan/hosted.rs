@@ -644,6 +644,7 @@ impl VulkanDevice {
             profiler_timestamp_period_ns: properties.limits.timestamp_period,
             ownership: DeviceOwnership::Hosted,
             owned_dma_buf_targets: false,
+            owned_dma_buf_imports: false,
             hosted_extensions: descriptor.extensions,
         });
         Ok(Self {
@@ -704,12 +705,15 @@ impl VulkanDevice {
             #[cfg(target_os = "linux")]
             composite_descriptor_pool: None,
             staging: Arc::clone(&arena.staging),
+            staging_bytes_used: 0,
             buffers: Vec::new(),
             images: Vec::new(),
             external_images: Vec::new(),
             rendered: false,
             #[cfg(feature = "instrumentation")]
             profiler_query_pool: None,
+            #[cfg(feature = "instrumentation")]
+            profiler_timestamp_mask: 0,
             #[cfg(feature = "instrumentation")]
             profiler_timestamps_complete: false,
         };

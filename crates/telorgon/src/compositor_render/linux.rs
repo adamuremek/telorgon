@@ -23,6 +23,12 @@ pub fn imported_image_id(buffer: WaylandBufferId) -> ImageId {
     ImageId(buffer.get())
 }
 
+/// DMA-BUF materialization uses a stable per-scene slot distinct from the uploaded-image slot.
+/// Desktop surface scenes are independent, so this ID does not need to encode the wl_buffer ID.
+pub fn dma_buf_image_id() -> ImageId {
+    ImageId(u32::MAX)
+}
+
 pub fn shm_image_resource(
     buffer: WaylandBufferId,
     content_version: u64,
@@ -352,6 +358,36 @@ impl DmaBufImporter {
             .collect()
     }
 
+    pub fn image_metadata(
+        &self,
+        image: &DmaBufImage,
+    ) -> Result<(ImagePixelFormat, ImageAlphaMode), CompositorRenderError> {
+        let plane = image.descriptor.planes.first().ok_or_else(|| {
+            CompositorRenderError::new("DMA-BUF image does not contain a plane descriptor")
+        })?;
+        let capability = self
+            .capabilities
+            .iter()
+            .find(|capability| {
+                capability.drm_fourcc == image.descriptor.format
+                    && capability.drm_modifier == plane.modifier
+                    && capability.plane_count == 1
+            })
+            .ok_or_else(|| {
+                CompositorRenderError::new("DMA-BUF tuple was not advertised by this Vulkan device")
+            })?;
+        let pixel_format = match capability.format {
+            vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => ImagePixelFormat::Rgba8,
+            vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => ImagePixelFormat::Bgra8,
+            _ => {
+                return Err(CompositorRenderError::new(
+                    "DMA-BUF capability has an unsupported Vulkan pixel format",
+                ));
+            }
+        };
+        Ok((pixel_format, capability.alpha_mode))
+    }
+
     /// Imports and binds one committed DMA-BUF generation without copying its pixels.
     ///
     /// The protocol runtime has validated the descriptor and owns every FD. The selected Vulkan
@@ -366,7 +402,7 @@ impl DmaBufImporter {
         image: DmaBufImage,
         acquire: Option<OwnedFd>,
         damage: Vec<RectI>,
-    ) -> Result<(), CompositorRenderError> {
+    ) -> Result<u64, CompositorRenderError> {
         if content_version == 0 || image.planes.len() != 1 || image.descriptor.planes.len() != 1 {
             return Err(CompositorRenderError::new(
                 "DMA-BUF import requires one plane and a nonzero content version",
@@ -425,11 +461,9 @@ impl DmaBufImporter {
             lease_generation: *generation,
             color_encoding: capability.color_encoding,
             alpha_mode: capability.alpha_mode,
-            origin: if image.descriptor.flags.y_invert {
-                VulkanExternalImageOrigin::BottomLeft
-            } else {
-                VulkanExternalImageOrigin::TopLeft
-            },
+            // The desktop materialization scene applies the DMA-BUF Y_INVERT flag together with
+            // wl_surface transform/scale and viewporter geometry.
+            origin: VulkanExternalImageOrigin::TopLeft,
             initial_use: HostedImageUse::General,
             final_use: HostedImageUse::General,
             acquire,
@@ -439,8 +473,9 @@ impl DmaBufImporter {
         let lease: VulkanExternalImageLease =
             unsafe { device.import_dma_buf(import) }.map_err(render_error)?;
         scene
-            .bind_external_image(imported_image_id(buffer), lease)
-            .map_err(render_error)
+            .bind_external_image(dma_buf_image_id(), lease)
+            .map_err(render_error)?;
+        Ok(*generation)
     }
 }
 

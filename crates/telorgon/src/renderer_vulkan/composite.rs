@@ -63,11 +63,12 @@ struct SceneCommit {
 }
 
 impl VulkanDevice {
-    /// Records ordered retained scenes into one Vulkan render pass and one owned submission.
+    /// Records ordered retained scenes into one Vulkan render pass within an owned frame.
     ///
     /// Scene resources remain independent (including glyph atlases), while placements share the
-    /// output attachment and command stream. This is the direct compositor path used by the Linux
-    /// desktop host; it never invokes or consumes the software renderer.
+    /// output attachment and command stream. An owned frame may record multiple composite passes
+    /// for distinct targets before submission. This is the direct compositor path used by the
+    /// Linux desktop host; it never invokes or consumes the software renderer.
     pub fn render_composite<'frame>(
         &self,
         scenes: &mut [VulkanCompositeScene<'_>],
@@ -82,12 +83,6 @@ impl VulkanDevice {
             return Err(RenderError::new(
                 RenderErrorKind::HostContract,
                 "Vulkan composite frame, target, and backend must belong to one device",
-            ));
-        }
-        if frame.core.rendered {
-            return Err(RenderError::new(
-                RenderErrorKind::HostContract,
-                "Vulkan records one target per owned frame",
             ));
         }
         if scenes
@@ -157,6 +152,7 @@ impl VulkanDevice {
         let mut plans = Vec::with_capacity(scenes.len());
         let mut commits = Vec::with_capacity(scenes.len());
         let mut external_barriers = 0_u32;
+        let external_start = frame.core.external_images.len();
         for (index, scene) in scenes.iter_mut().enumerate() {
             if used[index] {
                 external_barriers = external_barriers
@@ -174,7 +170,11 @@ impl VulkanDevice {
             }
         }
 
-        let mut staging_bytes = Vec::new();
+        // Composite passes use freshly allocated descriptor sets. Keeping one absolute staging
+        // cursor likewise lets an owned command buffer populate several independent targets
+        // before its final desktop pass without later CPU writes changing earlier commands.
+        let staging_start = frame.core.staging_bytes_used;
+        let mut staging_bytes = vec![0_u8; staging_start];
         let mut prepared = Vec::with_capacity(placements.len());
         let texture_counts = placements
             .iter()
@@ -226,7 +226,11 @@ impl VulkanDevice {
                 "updated Vulkan desktop scene has no visible placement",
             ));
         }
-        frame.core.staging.write(&staging_bytes)?;
+        frame
+            .core
+            .staging
+            .write_at(staging_start as u64, &staging_bytes[staging_start..])?;
+        frame.core.staging_bytes_used = staging_bytes.len();
 
         let mut buffer_copies = 0_u32;
         let mut upload_barriers = 0_u32;
@@ -252,7 +256,7 @@ impl VulkanDevice {
             vk::PipelineStageFlags2::TRANSFER,
         );
 
-        transition_external_images_to_sampled(frame.core);
+        transition_external_images_to_sampled(frame.core, external_start);
         let mut initial_barrier = target_to_color(target.image, target.initial_state);
         if target.initial_queue_family != vk::QUEUE_FAMILY_IGNORED {
             initial_barrier.src_queue_family_index = target.initial_queue_family;
@@ -393,7 +397,7 @@ impl VulkanDevice {
                 PROFILER_TIMESTAMP_RENDER_END,
                 vk::PipelineStageFlags2::ALL_GRAPHICS,
             );
-            release_external_images(frame.core);
+            release_external_images(frame.core, external_start);
             if target.final_state != VulkanImageState::COLOR_ATTACHMENT {
                 let mut final_barrier = color_to_final(target.image, target.final_state);
                 if target.final_queue_family != vk::QUEUE_FAMILY_IGNORED {
@@ -585,14 +589,18 @@ fn write_descriptors(
     writes.len() as u32
 }
 
-fn transition_external_images_to_sampled(core: &mut super::frame::FrameCore) {
-    if core.external_images.is_empty() {
+fn transition_external_images_to_sampled(
+    core: &mut super::frame::FrameCore,
+    external_start: usize,
+) {
+    if core.external_images.len() <= external_start {
         return;
     }
     let sampled = fragment_sampled_state();
     let barriers = core
         .external_images
         .iter()
+        .skip(external_start)
         .map(|image| {
             let mut initial = image.initial_use.state();
             if matches!(image.acquire, VulkanExternalAcquire::BinarySemaphore(_))
@@ -617,14 +625,15 @@ fn transition_external_images_to_sampled(core: &mut super::frame::FrameCore) {
     }
 }
 
-unsafe fn release_external_images(core: &mut super::frame::FrameCore) {
-    if core.external_images.is_empty() {
+unsafe fn release_external_images(core: &mut super::frame::FrameCore, external_start: usize) {
+    if core.external_images.len() <= external_start {
         return;
     }
     let sampled = fragment_sampled_state();
     let barriers = core
         .external_images
         .iter()
+        .skip(external_start)
         .map(|image| {
             let mut final_state = image.final_use.state();
             if matches!(image.release, VulkanExternalRelease::BinarySemaphore(_))

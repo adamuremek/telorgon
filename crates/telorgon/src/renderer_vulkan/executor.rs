@@ -117,6 +117,7 @@ impl RenderBackend for VulkanDevice {
         }
         validate_retained_scene(scene)?;
 
+        let external_start = frame.core.external_images.len();
         let external_barriers = {
             #[cfg(feature = "instrumentation")]
             let _span = crate::profiler::span!("barriers.record");
@@ -139,6 +140,7 @@ impl RenderBackend for VulkanDevice {
             frame.core.staging.write(&staged.bytes)?;
             staged
         };
+        frame.core.staging_bytes_used = staged.bytes.len();
         let descriptor_writes = {
             #[cfg(feature = "instrumentation")]
             let _span = crate::profiler::span!("descriptors.bind");
@@ -161,12 +163,13 @@ impl RenderBackend for VulkanDevice {
             vk::PipelineStageFlags2::TRANSFER,
         );
 
-        if !frame.core.external_images.is_empty() {
+        if frame.core.external_images.len() > external_start {
             let sampled = fragment_sampled_state();
             let barriers = frame
                 .core
                 .external_images
                 .iter()
+                .skip(external_start)
                 .map(|image| {
                     let mut initial = image.initial_use.state();
                     if matches!(image.acquire, VulkanExternalAcquire::BinarySemaphore(_))
@@ -330,12 +333,13 @@ impl RenderBackend for VulkanDevice {
                 PROFILER_TIMESTAMP_RENDER_END,
                 vk::PipelineStageFlags2::ALL_GRAPHICS,
             );
-            if !frame.core.external_images.is_empty() {
+            if frame.core.external_images.len() > external_start {
                 let sampled = fragment_sampled_state();
                 let barriers = frame
                     .core
                     .external_images
                     .iter()
+                    .skip(external_start)
                     .map(|image| {
                         let mut final_state = image.final_use.state();
                         if matches!(image.release, VulkanExternalRelease::BinarySemaphore(_))
@@ -690,9 +694,9 @@ pub(crate) fn begin_external_image_uses(
     if external.is_empty() {
         return Ok(0);
     }
-    if frame.device.hosted.is_none() {
+    if frame.device.hosted.is_none() && !frame.device.external_image_capabilities().linux_dma_buf {
         return Err(unsupported(
-            "external image leases currently require command-only hosted Vulkan",
+            "external image leases require hosted Vulkan or owned Linux DMA-BUF interop",
         ));
     }
     let mut waits = frame

@@ -89,6 +89,7 @@ pub(crate) struct DeviceInner {
     pub(crate) ownership: DeviceOwnership,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) owned_dma_buf_targets: bool,
+    pub(crate) owned_dma_buf_imports: bool,
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub(crate) hosted_extensions: crate::renderer_vulkan::hosted::HostedDeviceExtensions,
 }
@@ -259,8 +260,16 @@ impl VulkanDevice {
                 CStr::from_ptr(extension.extension_name.as_ptr()) == required
             })
         });
+        #[cfg(target_os = "linux")]
+        let owned_dma_buf_imports = owned_dma_buf_targets
+            && device_extensions.iter().any(|extension| unsafe {
+                CStr::from_ptr(extension.extension_name.as_ptr())
+                    == ash::khr::external_semaphore_fd::NAME
+            });
         #[cfg(not(target_os = "linux"))]
         let owned_dma_buf_targets = false;
+        #[cfg(not(target_os = "linux"))]
+        let owned_dma_buf_imports = false;
         let mut features12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut features13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut maintenance_features =
@@ -346,6 +355,10 @@ impl VulkanDevice {
             extension_names.push(ash::ext::external_memory_dma_buf::NAME.as_ptr());
             extension_names.push(ash::ext::image_drm_format_modifier::NAME.as_ptr());
             extension_names.push(ash::ext::queue_family_foreign::NAME.as_ptr());
+        }
+        #[cfg(target_os = "linux")]
+        if owned_dma_buf_imports {
+            extension_names.push(ash::khr::external_semaphore_fd::NAME.as_ptr());
         }
         let mut enabled13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
@@ -537,6 +550,7 @@ impl VulkanDevice {
             profiler_timestamp_period_ns,
             ownership: DeviceOwnership::Owned,
             owned_dma_buf_targets,
+            owned_dma_buf_imports,
             hosted_extensions: crate::renderer_vulkan::hosted::HostedDeviceExtensions::default(),
         });
         let frames = FrameSlots::create(

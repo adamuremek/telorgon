@@ -141,6 +141,12 @@ pub(super) fn flush_resize_configures(
         let Some(window) = windows.get(&surface) else {
             continue;
         };
+        let activated = wayland
+            .core()
+            .seats
+            .get(&1)
+            .and_then(|seat| seat.keyboard_focus)
+            .is_some_and(|focus| focus.surface == surface);
         // XDG configures are superseding state, not a request/response lockstep. Waiting for every
         // earlier ack can deadlock behind a same-size state-only configure; the client's ack of a
         // newer serial validly retires every older configure.
@@ -156,15 +162,16 @@ pub(super) fn flush_resize_configures(
             .configure_toplevel(
                 surface,
                 Some(size),
-                window_toplevel_states(window, true, resizing),
+                window_toplevel_states(window, activated, resizing),
             )
             .map_err(app_error)?;
-        if !resizing
-            && let Some(final_resize) = windows
+        if !resizing {
+            if let Some(final_resize) = windows
                 .get_mut(&surface)
                 .and_then(|window| window.resize_final.as_mut())
-        {
-            final_resize.record_sent(size, serial);
+            {
+                final_resize.record_sent(size, serial);
+            }
         }
         if resizing {
             *resize_budget_available = false;
@@ -176,8 +183,8 @@ pub(super) fn flush_resize_configures(
 }
 
 pub(super) fn set_window_maximized(
-    wayland: &mut NativeCompositor<'_>,
     windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
     surface: WaylandSurfaceId,
     maximized: bool,
     work_area: RectI,
@@ -210,19 +217,13 @@ pub(super) fn set_window_maximized(
             window.requested_size = size;
         }
     }
-    wayland
-        .configure_toplevel(
-            surface,
-            Some(window.requested_size),
-            window_toplevel_states(window, true, false),
-        )
-        .map_err(app_error)?;
+    configure_scheduler.schedule_final(surface, window.requested_size);
     Ok(())
 }
 
 pub(super) fn set_window_fullscreen(
-    wayland: &mut NativeCompositor<'_>,
     windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
+    configure_scheduler: &mut ConfigureScheduler,
     surface: WaylandSurfaceId,
     fullscreen: bool,
     output: SizeI,
@@ -249,13 +250,7 @@ pub(super) fn set_window_fullscreen(
             window.requested_size = size;
         }
     }
-    wayland
-        .configure_toplevel(
-            surface,
-            Some(window.requested_size),
-            window_toplevel_states(window, true, false),
-        )
-        .map_err(app_error)?;
+    configure_scheduler.schedule_final(surface, window.requested_size);
     Ok(())
 }
 

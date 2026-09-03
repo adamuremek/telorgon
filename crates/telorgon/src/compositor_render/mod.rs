@@ -10,8 +10,8 @@ mod linux;
 
 #[cfg(target_os = "linux")]
 pub use linux::{
-    DmaBufImporter, imported_image_id, shm_image_metadata, shm_image_resource, shm_image_update,
-    transform_surface_image,
+    DmaBufImporter, dma_buf_image_id, imported_image_id, shm_image_metadata, shm_image_resource,
+    shm_image_update, transform_surface_image,
 };
 
 pub const NATIVE_WAYLAND_RENDER_IMPORT_AVAILABLE: bool = cfg!(target_os = "linux");

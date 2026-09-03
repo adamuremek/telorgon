@@ -1,5 +1,5 @@
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
@@ -57,7 +57,10 @@ mod scene;
 mod shm_copy;
 mod state;
 
-use client::{ClientWindow, PreparedClientImage, apply_surface_publication, finish_shm_copy};
+use client::{
+    ClientWindow, PreparedClientImage, apply_surface_publication, discard_shm_copy,
+    finish_dma_buf_release, finish_shm_copy, retire_submitted_dma_buf, retire_unsubmitted_dma_buf,
+};
 #[cfg(test)]
 use cursor_plane::{CursorCommitTracker, HARDWARE_CURSOR_BUFFER_COUNT};
 use cursor_plane::{HardwareCursor, PendingKmsCommit};
@@ -69,7 +72,7 @@ use input::*;
 use interaction::*;
 use layers::*;
 use pointer_visual::*;
-use renderer::{DesktopRenderResult, DesktopRenderer};
+use renderer::{DesktopRenderResult, DesktopRenderer, DmaBufPublication};
 #[cfg(test)]
 use renderer::{
     VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT, VULKAN_STAGING_MIN_BYTES_PER_SLOT,
@@ -227,6 +230,15 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             ),
         )
         .map_err(app_error)?;
+    let dma_buf_formats = desktop_renderer.dma_buf_formats();
+    if !dma_buf_formats.is_empty() {
+        wayland
+            .add_linux_dmabuf(&display, dma_buf_formats)
+            .map_err(app_error)?;
+        wayland
+            .add_explicit_synchronization(&display)
+            .map_err(app_error)?;
+    }
     let _socket = match config.socket_name.as_deref() {
         Some(name) => {
             display.add_socket(name).map_err(app_error)?;
@@ -395,7 +407,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut pending_shm_buffers =
         BTreeMap::<crate::compositor_wayland::WaylandBufferId, usize>::new();
     let mut pending_shm_surfaces = BTreeMap::<WaylandSurfaceId, usize>::new();
-    let mut deferred_shm_copies = VecDeque::<ShmCopyRequest>::new();
+    let mut pending_dma_bufs = BTreeMap::<crate::compositor_wayland::WaylandBufferId, usize>::new();
+    let mut submitted_shm_surfaces = BTreeSet::<WaylandSurfaceId>::new();
+    let mut deferred_shm_copies = BTreeMap::<WaylandSurfaceId, ShmCopyRequest>::new();
+    let mut deferred_shm_order = VecDeque::<WaylandSurfaceId>::new();
     let mut stacking_order = Vec::<WaylandSurfaceId>::new();
     let mut session_locked = false;
     let mut pending_session_lock = None;
@@ -723,7 +738,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 &config,
                                 &icon_layers,
                             );
-                            focus_toplevel(&display, &mut wayland, &windows, Some(surface))?;
+                            focus_toplevel(
+                                &display,
+                                &mut wayland,
+                                &windows,
+                                &mut configure_scheduler,
+                                Some(surface),
+                            )?;
                             match hit {
                                 DecorationHit::Titlebar => {
                                     window_interaction = WindowInteraction::begin_move(
@@ -749,8 +770,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                         .get(&surface)
                                         .is_some_and(|window| !window.maximized);
                                     set_window_maximized(
-                                        &mut wayland,
                                         &mut windows,
+                                        &mut configure_scheduler,
                                         surface,
                                         maximized,
                                         work_area,
@@ -804,6 +825,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     &display,
                                     &mut wayland,
                                     &windows,
+                                    &mut configure_scheduler,
                                     seat_pointer_focus,
                                 )?;
                             }
@@ -1060,6 +1082,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         }
         for completion in shm_copy_worker.drain() {
             other_work_seen = true;
+            let completed_surface = completion.snapshot.surface;
+            if !submitted_shm_surfaces.remove(&completed_surface) {
+                return Err(AppError::new(
+                    "completed SHM surface copy was not submitted",
+                ));
+            }
             repaint |= finish_shm_copy(
                 &display,
                 &mut wayland,
@@ -1074,11 +1102,16 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 completion,
             )?;
         }
-        while let Some(request) = deferred_shm_copies.pop_front() {
+        while let Some(surface) = deferred_shm_order.pop_front() {
+            let request = deferred_shm_copies
+                .remove(&surface)
+                .ok_or_else(|| AppError::new("deferred SHM surface has no request"))?;
             if let Some(request) = shm_copy_worker.try_submit(request)? {
-                deferred_shm_copies.push_front(request);
+                deferred_shm_copies.insert(surface, request);
+                deferred_shm_order.push_front(surface);
                 break;
             }
+            submitted_shm_surfaces.insert(surface);
         }
         let runtime_now = MonotonicInstant::from_nanos(
             start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
@@ -1156,6 +1189,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         {
             for completion in desktop_renderer.drain_completions() {
                 completion.result.map_err(AppError::new)?;
+                for retirement in completion.dma_bufs {
+                    retire_submitted_dma_buf(&mut wayland, &mut pending_dma_bufs, retirement)?;
+                }
                 frame_slots[completion.slot_index]
                     .gpu_completed()
                     .map_err(app_error)?;
@@ -1196,15 +1232,86 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         continue;
                     };
                     let viewport = wayland.viewport(surface);
-                    let BufferDescriptor::Shm(descriptor) = wayland
+                    let descriptor = wayland
                         .core()
                         .buffer(attachment.buffer)
-                        .ok_or_else(|| AppError::new("surface references an unknown buffer"))?
-                    else {
-                        return Err(AppError::new(
-                            "desktop SHM publication received a non-SHM buffer",
-                        ));
+                        .cloned()
+                        .ok_or_else(|| AppError::new("surface references an unknown buffer"))?;
+                    if matches!(descriptor, BufferDescriptor::DmaBuf(_)) {
+                        if let Some(request) = deferred_shm_copies.remove(&surface) {
+                            deferred_shm_order.retain(|candidate| *candidate != surface);
+                            discard_shm_copy(
+                                &mut wayland,
+                                &mut pending_shm_buffers,
+                                &mut pending_shm_surfaces,
+                                request,
+                            )?;
+                        }
+                        let image = wayland.read_dma_buf(attachment.buffer).map_err(app_error)?;
+                        let acquire = wayland.take_acquire_fence(surface, snapshot.revision);
+                        let queued = desktop_renderer.queue_dma_buf(DmaBufPublication {
+                            surface,
+                            revision: snapshot.revision,
+                            buffer: attachment.buffer,
+                            image,
+                            acquire,
+                            buffer_scale: snapshot.buffer_scale,
+                            buffer_transform: snapshot.buffer_transform,
+                            viewport,
+                        })?;
+                        let pending = pending_dma_bufs.entry(attachment.buffer).or_default();
+                        *pending = pending
+                            .checked_add(1)
+                            .ok_or_else(|| AppError::new("pending DMA-BUF use count overflow"))?;
+                        if let Some(replaced) = queued.replaced {
+                            retire_unsubmitted_dma_buf(
+                                &mut wayland,
+                                &mut pending_dma_bufs,
+                                replaced,
+                            )?;
+                        }
+                        apply_surface_publication(
+                            &display,
+                            &mut wayland,
+                            &mut windows,
+                            &mut stacking_order,
+                            &mut next_window_offset,
+                            work_area,
+                            session_locked,
+                            &mut pointer_scene_dirty,
+                            &snapshot,
+                            PreparedClientImage::External {
+                                extent: queued.extent,
+                                pixel_format: queued.pixel_format,
+                                alpha_mode: queued.alpha_mode,
+                                image: queued.image,
+                            },
+                        )?;
+                        repaint = true;
+                        continue;
+                    }
+                    let BufferDescriptor::Shm(descriptor) = descriptor else {
+                        unreachable!("buffer descriptor variant checked above")
                     };
+                    if let Some(retirement) = desktop_renderer.cancel_dma_buf_surface(surface) {
+                        retire_unsubmitted_dma_buf(
+                            &mut wayland,
+                            &mut pending_dma_bufs,
+                            retirement,
+                        )?;
+                    }
+                    // This newer SHM publication supersedes any older full-copy request still
+                    // waiting in this surface's mailbox. If this one also needs a worker copy it
+                    // is inserted below as the new latest value.
+                    if let Some(request) = deferred_shm_copies.remove(&surface) {
+                        deferred_shm_order.retain(|candidate| *candidate != surface);
+                        discard_shm_copy(
+                            &mut wayland,
+                            &mut pending_shm_buffers,
+                            &mut pending_shm_surfaces,
+                            request,
+                        )?;
+                    }
                     let direct_shm = snapshot.buffer_scale == 1
                         && snapshot.buffer_transform == BufferTransform::Normal
                         && viewport.is_none();
@@ -1219,6 +1326,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         window.size == descriptor.size
                             && window.pixel_format == native_pixel_format
                             && window.alpha_mode == native_alpha_mode
+                            && window.pixels.len()
+                                == descriptor.size.width as usize
+                                    * descriptor.size.height as usize
+                                    * 4
                     });
                     let surface_copy_pending = pending_shm_surfaces.contains_key(&surface);
                     if surface_copy_pending
@@ -1226,6 +1337,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         && metadata_matches
                         && buffer_damage.is_none()
                     {
+                        wayland
+                            .finish_explicit_release(surface, snapshot.revision, None)
+                            .map_err(app_error)?;
                         if !pending_shm_buffers.contains_key(&attachment.buffer) {
                             wayland
                                 .release_buffer(attachment.buffer)
@@ -1270,11 +1384,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 .map_err(app_error)?,
                         );
                         let buffer = request.buffer();
-                        let deferred = if deferred_shm_copies.is_empty() {
-                            shm_copy_worker.try_submit(request)?
-                        } else {
-                            Some(request)
-                        };
+                        let request_surface = request.snapshot.surface;
                         let pending = pending_shm_buffers.entry(buffer).or_default();
                         *pending = pending.checked_add(1).ok_or_else(|| {
                             AppError::new("pending SHM buffer use count overflow")
@@ -1283,13 +1393,36 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         *pending = pending.checked_add(1).ok_or_else(|| {
                             AppError::new("pending SHM surface use count overflow")
                         })?;
-                        if let Some(request) = deferred {
+                        if submitted_shm_surfaces.contains(&request_surface)
+                            || deferred_shm_copies.contains_key(&request_surface)
+                            || !deferred_shm_copies.is_empty()
+                        {
+                            let replaced = deferred_shm_copies.insert(request_surface, request);
+                            if replaced.is_none() {
+                                if deferred_shm_copies.len() > MAX_DEFERRED_SHM_COPIES {
+                                    return Err(AppError::new(
+                                        "deferred SHM copy mailbox exceeded its hard bound",
+                                    ));
+                                }
+                                deferred_shm_order.push_back(request_surface);
+                            } else if let Some(replaced) = replaced {
+                                discard_shm_copy(
+                                    &mut wayland,
+                                    &mut pending_shm_buffers,
+                                    &mut pending_shm_surfaces,
+                                    replaced,
+                                )?;
+                            }
+                        } else if let Some(request) = shm_copy_worker.try_submit(request)? {
                             if deferred_shm_copies.len() >= MAX_DEFERRED_SHM_COPIES {
                                 return Err(AppError::new(
-                                    "deferred SHM copy queue exceeded its hard bound",
+                                    "deferred SHM copy mailbox exceeded its hard bound",
                                 ));
                             }
-                            deferred_shm_copies.push_back(request);
+                            deferred_shm_copies.insert(request_surface, request);
+                            deferred_shm_order.push_back(request_surface);
+                        } else {
+                            submitted_shm_surfaces.insert(request_surface);
                         }
                         continue;
                     };
@@ -1306,11 +1439,30 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         prepared_image,
                     )?;
                     wayland
+                        .finish_explicit_release(surface, snapshot.revision, None)
+                        .map_err(app_error)?;
+                    wayland
                         .release_buffer(attachment.buffer)
                         .map_err(app_error)?;
                     repaint = true;
                 }
                 CompositorAction::WithdrawSurface(surface) => {
+                    if let Some(retirement) = desktop_renderer.cancel_dma_buf_surface(surface) {
+                        retire_unsubmitted_dma_buf(
+                            &mut wayland,
+                            &mut pending_dma_bufs,
+                            retirement,
+                        )?;
+                    }
+                    if let Some(request) = deferred_shm_copies.remove(&surface) {
+                        deferred_shm_order.retain(|candidate| *candidate != surface);
+                        discard_shm_copy(
+                            &mut wayland,
+                            &mut pending_shm_buffers,
+                            &mut pending_shm_surfaces,
+                            request,
+                        )?;
+                    }
                     if wayland
                         .core()
                         .seats
@@ -1357,7 +1509,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         }
                         stacking_order.retain(|candidate| *candidate != surface);
                         stacking_order.push(surface);
-                        focus_toplevel(&display, &mut wayland, &windows, Some(surface))?;
+                        focus_toplevel(
+                            &display,
+                            &mut wayland,
+                            &windows,
+                            &mut configure_scheduler,
+                            Some(surface),
+                        )?;
                         pointer_scene_dirty = true;
                         repaint = true;
                     }
@@ -1385,8 +1543,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 }
                 CompositorAction::MaximizeToplevel { surface, maximized } => {
                     set_window_maximized(
-                        &mut wayland,
                         &mut windows,
+                        &mut configure_scheduler,
                         surface,
                         maximized,
                         work_area,
@@ -1401,8 +1559,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     output: _,
                 } => {
                     set_window_fullscreen(
-                        &mut wayland,
                         &mut windows,
+                        &mut configure_scheduler,
                         surface,
                         fullscreen,
                         extent,
@@ -1872,7 +2030,24 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 .begin_render(frame_id)
                 .map_err(app_error)?;
             match desktop_renderer.render(scanout_index, frame)? {
-                DesktopRenderResult::Vulkan => {
+                DesktopRenderResult::Vulkan {
+                    releases,
+                    discarded,
+                } => {
+                    for release in releases {
+                        finish_dma_buf_release(
+                            &mut wayland,
+                            release.retirement,
+                            Some(release.fence),
+                        )?;
+                    }
+                    for retirement in discarded {
+                        retire_unsubmitted_dma_buf(
+                            &mut wayland,
+                            &mut pending_dma_bufs,
+                            retirement,
+                        )?;
+                    }
                     frame_slots[scanout_index]
                         .gpu_submitted()
                         .map_err(app_error)?;

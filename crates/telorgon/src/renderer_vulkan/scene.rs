@@ -17,6 +17,7 @@ use crate::render::{
 use ash::vk;
 use bytemuck::Zeroable;
 
+use crate::renderer_vulkan::VulkanMaterializationTarget;
 use crate::renderer_vulkan::descriptor::MAX_TEXTURE_SETS;
 use crate::renderer_vulkan::device::DeviceInner;
 use crate::renderer_vulkan::external_image::{ExternalImageInner, VulkanExternalImageLease};
@@ -510,6 +511,61 @@ impl VulkanScene {
     /// Removes the logical binding. Submitted frames retain their own pins until host completion.
     pub fn remove_external_image(&mut self, image: ImageId) -> bool {
         let removed = self.external_images.remove(&image).is_some();
+        if removed {
+            self.rebuild_texture_slots();
+        }
+        removed
+    }
+
+    /// Binds a compositor-owned image that is populated earlier in the same command buffer.
+    /// Submitted frames retain their own `Arc`, so rebinding cannot retire an in-flight texture.
+    pub(crate) fn bind_materialized_image(
+        &mut self,
+        image: ImageId,
+        target: &VulkanMaterializationTarget,
+        alpha_mode: ImageAlphaMode,
+    ) -> RenderResult<()> {
+        let retained = target.image();
+        if retained.device_id() != self.device_id {
+            return Err(RenderError::new(
+                RenderErrorKind::HostContract,
+                "materialized image belongs to another Vulkan device",
+            ));
+        }
+        let extent = target.extent();
+        let generation = self
+            .image_resources
+            .get(&image)
+            .map_or(1, |resource| resource.texture.generation.saturating_add(1));
+        self.external_images.remove(&image);
+        self.image_resources.insert(
+            image,
+            VulkanImageResource {
+                extent,
+                color_encoding: ImageColorEncoding::Linear,
+                alpha_mode,
+                pixel_format: ImagePixelFormat::Rgba8,
+                pixels: Vec::new(),
+                pending: Vec::new(),
+                texture: RetainedTexture {
+                    image: Some(retained),
+                    retired: Vec::new(),
+                    extent,
+                    format: vk::Format::R8G8B8A8_UNORM,
+                    generation,
+                    initialized: true,
+                },
+            },
+        );
+        self.rebuild_external_instances(image);
+        self.rebuild_texture_slots();
+        Ok(())
+    }
+
+    /// Removes a compositor-owned materialization after a scene returns to uploaded pixels.
+    /// In-flight submissions keep their own image pin.
+    pub(crate) fn remove_materialized_image(&mut self, image: ImageId) -> bool {
+        let removed = self.image_resources.remove(&image).is_some();
         if removed {
             self.rebuild_texture_slots();
         }

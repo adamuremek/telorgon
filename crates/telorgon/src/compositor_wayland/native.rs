@@ -5756,6 +5756,14 @@ impl NativeState {
             }
         }
         let outcome = self.surface_mut(surface)?.commit().map_err(error)?;
+        if let Some((acknowledged_configure, window_geometry)) = self
+            .core
+            .xdg_surface_mut(surface)
+            .map(|xdg_surface| xdg_surface.commit_state())
+        {
+            self.surface_mut(surface)?
+                .apply_xdg_commit_state(acknowledged_configure, window_geometry);
+        }
         if let Some(icon) = self.pending_toplevel_icons.remove(&surface) {
             match icon {
                 PendingToplevelIcon::Reset => {

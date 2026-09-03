@@ -141,9 +141,9 @@ an implementation roadmap, not as a support claim.
 The compositor enforces per-client object limits and ownership, permanent surface roles, xdg
 configure/ack ordering, buffer-before-configure rejection, lossless retention of every
 unacknowledged configure, SHM pool bounds, DMA-BUF plane/tuple validation, and client-scoped
-single-use input serials. Interactive resize separately coalesces raw pointer motion before it
-enters that protocol queue, permits at most one outstanding resize configure, and budgets resizing
-configures to one per presented frame. Surface state is
+single-use input serials. Interactive resize separately coalesces raw pointer motion to the latest
+scheduled state before it enters that protocol queue and budgets resizing configures to one per
+presented frame; a newer acknowledged serial validly supersedes older queued configures. Surface state is
 double-buffered. Damage, opaque/input regions, scale, transform, offset, frame callbacks, buffer
 attachments, and subsurface relationships flow through the commit model.
 
@@ -223,9 +223,10 @@ The operational managed path is entirely Telorgon-rendered:
    full-surface damage take a bounded FIFO worker path so full pixel I/O and conversion do not stall
    the input/protocol owner. That worker also prepares independent client-retained and scene-owned
    snapshots, so accepting a completed full image does not perform another whole-buffer copy on the
-   owner. The owner applies completed revisions in order, delays `wl_buffer` release until every
-   queued read of that buffer is done, and ignores superseded images only when a later queued full
-   copy covers them.
+   owner. Each surface has at most one submitted full copy and one replaceable latest deferred
+   copy. Superseded deferred revisions are retired immediately, while `wl_buffer` release remains
+   delayed until every submitted read of that buffer is done. Different surfaces can still occupy
+   the bounded worker queue concurrently.
 2. `telorgon-compositor-render` preserves little-endian ARGB/XRGB as native BGRA and ABGR/XBGR as
    native RGBA, with explicit alpha/color metadata; only RGB565 and geometry transformations need
    pixel conversion. Buffer transform/scale and viewporter crop/destination use bounded
@@ -238,8 +239,11 @@ The operational managed path is entirely Telorgon-rendered:
    new bounds. Hidden/minimized producers keep their retained identity without contributing a draw,
    and a hidden client revision is not consumed before its queued pixels are delivered. Focus-state
    changes reconcile the existing window-frame component root instead of recreating its runtime. A
-   committed buffer that is stale during resize is clipped to the desired content rectangle and is
-   never stretched.
+   committed buffer that is stale during resize is linearly scaled into the compositor-owned live
+   target rectangle. Source pixels and placement geometry remain independent, so all eight resize
+   edges track the pointer without waiting for a client commit. Pointer coordinates are mapped back
+   into the committed surface coordinate space while that preview is active. Commit-latched XDG
+   window geometry keeps client-side shadow margins out of resize-size and fixed-edge calculations.
 4. Backend selection happens once in the desktop renderer assembly. The selected implementation
    owns its scene map and output state for the remainder of the run; neither backend calls the
    other. Vulkan applies deltas to `VulkanScene`, stages changed rows and per-placement uniforms,
@@ -258,11 +262,18 @@ The operational managed path is entirely Telorgon-rendered:
    Cursor-only motion coalesces to the newest position and commits without repainting the primary
    plane; it does not use the legacy cursor ioctls or asynchronous page-flip flag.
 
-`telorgon-compositor-render::DmaBufImporter` is the zero-copy Vulkan client-buffer bridge. It exposes
+`telorgon-compositor-render::DmaBufImporter` is the Vulkan client-buffer import bridge. It exposes
 only exact single-plane format/modifier tuples queried from the selected `VulkanDevice`, validates
 allocation bounds, consumes an optional acquire sync FD, creates a generation-scoped
 external-image lease, and binds it into `VulkanScene`. The external-image path can export the
 matching release requirement.
+
+The managed KMS host advertises those tuples only when the owned Vulkan device also supports the
+complete sync-FD contract. A committed client DMA-BUF is sampled once into a compositor-owned
+retained Vulkan texture in the same submission as desktop composition. That submission waits on
+the acquire fence, signals and exports the per-commit release fence, and keeps `wl_buffer` busy until
+GPU completion. Subsequent scanout-buffer updates sample only the retained texture, so the linear
+client lease is never reused and no client pixels cross the CPU.
 
 The managed KMS path also has an owned Vulkan scanout route. All three primary GBM buffers are
 imported with their explicit modifier and row layout as Vulkan color targets. Telorgon renders the
@@ -271,9 +282,10 @@ ordered retained-scene placements into the selected target, transfers queue owne
 the serialized atomic KMS scheduler. `Renderer::Vulkan` requires this route and fails startup if it
 cannot be created. `Renderer::Auto` attempts it before any frame is rendered and otherwise constructs
 the separate mapped software assembly; it never switches or combines backends mid-run.
-`Renderer::Software` constructs only the mapped software route. SHM content is currently copied into
-backend-owned retained image resources; end-to-end managed-KMS DMA-BUF binding remains a separate
-zero-copy integration step.
+`Renderer::Software` constructs only the mapped software route. SHM content is copied into
+backend-owned retained image resources. Vulkan additionally accepts the capability-gated DMA-BUF
+materialization route described above; direct long-lived sampling of client-owned buffers is not
+used because one client generation may need to update several retained scanout targets.
 
 The GBM/KMS bindings are Telorgon-owned and use the original libgbm/libdrm ABIs. Scanout allocation,
 mapping, modifier-aware framebuffer creation, connector/encoder/CRTC/plane discovery, primary and
@@ -286,9 +298,9 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
 - Incoming protocol FDs become `OwnedFd` immediately; duplicated FDs have one documented owner.
 - SHM reads use positional I/O and never mutate a client's shared file offset.
 - The SHM worker owns only duplicated files and immutable snapshots. Wayland state/application and
-  `wl_buffer.release` remain owner-thread operations; the request mailbox and deferred FIFO have
-  explicit hard bounds. Full client and scene snapshots are prepared on that worker and transferred
-  to the owner without another whole-image copy.
+  `wl_buffer.release` remain owner-thread operations; the submitted queue and per-surface latest
+  mailbox have explicit hard bounds. Full client and scene snapshots are prepared on that worker
+  and transferred to the owner without another whole-image copy.
 - A direct SHM regional update carries tightly packed native-order rows through the desktop scene;
   a renderer may not reinterpret damage as permission to discard pixels outside that rectangle.
 - Renderer-neutral scene identity is distinct from placement identity. Removing a placement may not
@@ -298,6 +310,8 @@ general overlays, color management, VRR, HDR, and hardware qualification are sti
   a transfer-source/transfer-destination image copy before applying regional staging bytes. Both
   images remain completion-pinned, and only an unpinned retired image may re-enter the pool.
 - A DMA-BUF buffer owns all plane FDs until duplicated into a generation-scoped renderer lease.
+  The owned renderer consumes that lease exactly once to populate a retained texture, exports its
+  release sync FD after submission, and delays core buffer release until completion.
 - Explicit acquire/release state is keyed by `(surface, commit revision)`, not merely by surface.
 - Vulkan explicit modifier imports use `VkSubresourceLayout::size == 0`, as required by the Vulkan
   specification, while allocation size is retained separately for bounds checking.
@@ -365,6 +379,20 @@ assemblies, and portable source-boundary tests reject backend types in neutral d
 cross-references between the Vulkan and software assemblies. Hardware timing and visual
 qualification remain user-run gaps; profiler spans distinguish Vulkan composite work from software
 raster work and distinguish worker-full from owner-regional SHM copies.
+
+### Live-resize scheduling audit
+
+Android platform/base commit `1cdfff555f4a21f71ccc978290e2e212e2f8b168` was inspected at
+`FluidResizeTaskPositioner`, `VeiledResizeTaskPositioner`, `ResizeVeil`, and `SurfaceControl` for the
+separation between pointer-driven container geometry and application buffer production. Flutter
+commit `51fd9afadf309ba5337320bd3653f5345c156cb9` was inspected for acquire-latest external-texture
+replacement, import, and bounded reuse. Qt Declarative commit
+`3e2d6bd456a8e850bcf641de77d1d5d8bc8419ef` was inspected at `QQuickWindow` and the threaded scene
+graph loop for independent UI/event and render progress. wgpu commit
+`d99c241a3b9dcc0f6674d990d007d79e94d39862` was inspected for owned Vulkan presentation and
+DMA-BUF lifetime boundaries. The resulting Telorgon rule is that pointer motion updates placement
+immediately, protocol configures and full copies coalesce, and no focus transition is permitted to
+stand in for an XDG commit acknowledgement. No reference code or abstraction was copied.
 
 ### Atomic cursor-plane audit
 
@@ -443,5 +471,5 @@ The current path is **operational by integration and compile evidence, but not
 production-qualified**. A Linux TTY/hardware run is still required for socket/client conformance,
 atomic modesetting and page-flip behavior, libseat transitions, input devices, multiple GPUs,
 multiple outputs, failure recovery, and performance. The largest remaining gaps are
-multi-output/hotplug, zero-copy managed-KMS DMA-BUF surface binding, page-flip timestamps,
+multi-output/hotplug, direct retained client DMA-BUF sampling, page-flip timestamps,
 input-method/text-input integration, and newer DMA-BUF feedback/syncobj protocol generations.

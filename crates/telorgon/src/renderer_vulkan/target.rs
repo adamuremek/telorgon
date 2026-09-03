@@ -29,6 +29,70 @@ impl VulkanImageState {
                 | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE.as_raw(),
         ),
     };
+
+    pub(crate) const SHADER_READ: Self = Self {
+        layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+        access: vk::AccessFlags2::SHADER_SAMPLED_READ,
+    };
+}
+
+/// A compositor-owned texture populated by rendering one imported client image generation.
+/// It becomes an ordinary retained sampled image after that submission completes.
+pub(crate) struct VulkanMaterializationTarget {
+    image: std::sync::Arc<AllocatedImage>,
+    info: RenderTargetInfo,
+}
+
+impl VulkanMaterializationTarget {
+    pub(crate) fn new(device: &VulkanDevice, extent: SizeI) -> RenderResult<Self> {
+        if extent.width <= 0 || extent.height <= 0 {
+            return Err(unsupported(
+                "Vulkan materialization target extent must be nonzero",
+            ));
+        }
+        let image = std::sync::Arc::new(AllocatedImage::new_color_target(
+            device.inner.clone(),
+            vk::Extent2D {
+                width: extent.width as u32,
+                height: extent.height as u32,
+            },
+            vk::Format::R8G8B8A8_UNORM,
+            "Telorgon DMA-BUF materialization target",
+        )?);
+        Ok(Self {
+            image,
+            info: RenderTargetInfo {
+                color_space: ColorSpace::Linear,
+                alpha_mode: AlphaMode::Premultiplied,
+                ..RenderTargetInfo::full(extent)
+            },
+        })
+    }
+
+    pub(crate) fn target(&self) -> VulkanTarget<'_> {
+        VulkanTarget {
+            device_id: self.image.device_id(),
+            image: self.image.raw(),
+            view: self.image.view(),
+            format: self.image.format,
+            extent: self.image.extent,
+            info: self.info,
+            initial_state: VulkanImageState::UNDEFINED,
+            final_state: VulkanImageState::SHADER_READ,
+            initial_queue_family: vk::QUEUE_FAMILY_IGNORED,
+            final_queue_family: vk::QUEUE_FAMILY_IGNORED,
+            _borrow: PhantomData,
+        }
+    }
+
+    pub(crate) fn image(&self) -> std::sync::Arc<AllocatedImage> {
+        std::sync::Arc::clone(&self.image)
+    }
+
+    pub(crate) fn extent(&self) -> SizeI {
+        self.info.extent
+    }
 }
 
 pub struct OffscreenVulkanTarget {

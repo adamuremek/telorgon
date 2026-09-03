@@ -92,12 +92,16 @@ pub(crate) struct FrameCore {
     #[cfg(target_os = "linux")]
     pub(crate) composite_descriptor_pool: Option<vk::DescriptorPool>,
     pub(crate) staging: Arc<AllocatedBuffer>,
+    /// Bytes already assigned in the reusable staging stream by earlier render passes.
+    pub(crate) staging_bytes_used: usize,
     pub(crate) buffers: Vec<Arc<AllocatedBuffer>>,
     pub(crate) images: Vec<Arc<AllocatedImage>>,
     pub(crate) external_images: Vec<Arc<ExternalImageInner>>,
     pub(crate) rendered: bool,
     #[cfg(feature = "instrumentation")]
     pub(crate) profiler_query_pool: Option<vk::QueryPool>,
+    #[cfg(feature = "instrumentation")]
+    pub(crate) profiler_timestamp_mask: u32,
     #[cfg(feature = "instrumentation")]
     pub(crate) profiler_timestamps_complete: bool,
 }
@@ -108,6 +112,11 @@ impl FrameCore {
         let Some(pool) = self.profiler_query_pool else {
             return;
         };
+        let bit = 1_u32.checked_shl(query).unwrap_or(0);
+        if bit == 0 || self.profiler_timestamp_mask & bit != 0 {
+            return;
+        }
+        self.profiler_timestamp_mask |= bit;
         unsafe {
             self.device
                 .inner
@@ -139,6 +148,7 @@ pub struct VulkanRecordedFrame {
     slot_index: Option<usize>,
     pub(crate) buffers: Vec<Arc<AllocatedBuffer>>,
     pub(crate) images: Vec<Arc<AllocatedImage>>,
+    pub(crate) external_images: Vec<Arc<ExternalImageInner>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -169,13 +179,16 @@ pub struct SubmissionReceipt {
     completion: CompletionPoint,
     buffers: Vec<Arc<AllocatedBuffer>>,
     images: Vec<Arc<AllocatedImage>>,
+    external_images: Vec<Arc<ExternalImageInner>>,
     completed: bool,
 }
 
 struct RetiredSubmission {
     completion_value: u64,
+    frame_id: u64,
     _buffers: Vec<Arc<AllocatedBuffer>>,
     _images: Vec<Arc<AllocatedImage>>,
+    external_images: Vec<Arc<ExternalImageInner>>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -526,7 +539,10 @@ impl FrameSlots {
         let mut index = 0;
         while index < retired.len() {
             if retired[index].completion_value <= completed {
-                retired.swap_remove(index);
+                let completed = retired.swap_remove(index);
+                for external in &completed.external_images {
+                    external.complete_use(completed.frame_id);
+                }
             } else {
                 index += 1;
             }
@@ -615,12 +631,15 @@ impl FrameSlots {
                 #[cfg(target_os = "linux")]
                 composite_descriptor_pool: Some(slot.composite_descriptor_pool),
                 staging: Arc::clone(&slot.staging),
+                staging_bytes_used: 0,
                 buffers: Vec::new(),
                 images: Vec::new(),
                 external_images: Vec::new(),
                 rendered: false,
                 #[cfg(feature = "instrumentation")]
                 profiler_query_pool,
+                #[cfg(feature = "instrumentation")]
+                profiler_timestamp_mask: 0,
                 #[cfg(feature = "instrumentation")]
                 profiler_timestamps_complete: false,
             },
@@ -686,10 +705,12 @@ impl FrameSlots {
     fn retire(
         &self,
         completion_value: u64,
+        frame_id: u64,
         buffers: Vec<Arc<AllocatedBuffer>>,
         images: Vec<Arc<AllocatedImage>>,
+        external_images: Vec<Arc<ExternalImageInner>>,
     ) {
-        if buffers.is_empty() && images.is_empty() {
+        if buffers.is_empty() && images.is_empty() && external_images.is_empty() {
             return;
         }
         let mut retired = self
@@ -698,8 +719,10 @@ impl FrameSlots {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         retired.push(RetiredSubmission {
             completion_value,
+            frame_id,
             _buffers: buffers,
             _images: images,
+            external_images,
         });
     }
 }
@@ -775,33 +798,33 @@ impl<'device> VulkanRecordingFrame<'device> {
             .core
             .take()
             .ok_or_else(|| internal("Vulkan frame was already finished"))?;
-        if !core.external_images.is_empty() {
-            for external in &core.external_images {
-                external.cancel_use(core.frame_id);
-            }
-            return Err(RenderError::new(
-                RenderErrorKind::HostContract,
-                "external image leases require command-only hosted submission",
-            ));
-        }
-        unsafe {
+        if let Err(result) = unsafe {
             self.device
                 .inner
                 .raw
                 .end_command_buffer(core.command_buffer)
+        } {
+            for external in &core.external_images {
+                external.cancel_use(core.frame_id);
+            }
+            return Err(vk_error("failed to finish Vulkan command buffer", result));
         }
-        .map_err(|result| vk_error("failed to finish Vulkan command buffer", result))?;
         let slot_index = self
             .slot_index
             .take()
             .ok_or_else(|| internal("Vulkan frame slot was already released"))?;
-        self.frames.finish_recording(
+        if let Err(error) = self.frames.finish_recording(
             slot_index,
             self.frame_id,
             core.descriptor_bindings,
             #[cfg(feature = "instrumentation")]
             core.profiler_timestamps_complete,
-        )?;
+        ) {
+            for external in &core.external_images {
+                external.cancel_use(core.frame_id);
+            }
+            return Err(error);
+        }
         Ok(VulkanRecordedFrame {
             device: self.device.inner.clone(),
             frames: Arc::clone(&self.frames),
@@ -811,12 +834,18 @@ impl<'device> VulkanRecordingFrame<'device> {
             slot_index: Some(slot_index),
             buffers: core.buffers,
             images: core.images,
+            external_images: core.external_images,
         })
     }
 }
 
 impl Drop for VulkanRecordingFrame<'_> {
     fn drop(&mut self) {
+        if let Some(core) = &self.core {
+            for external in &core.external_images {
+                external.cancel_use(core.frame_id);
+            }
+        }
         if let Some(slot_index) = self.slot_index.take() {
             self.frames.release_unsubmitted(
                 slot_index,
@@ -837,7 +866,8 @@ impl VulkanRecordedFrame {
     }
 
     pub fn submit(self) -> RenderResult<SubmissionReceipt> {
-        submit_recorded(self, &[], &[], None)
+        let (waits, signals) = owned_external_semaphores(&self.external_images);
+        submit_recorded(self, &waits, &signals, None)
     }
 
     pub(crate) fn submit_with_binary_semaphores(
@@ -845,14 +875,19 @@ impl VulkanRecordedFrame {
         wait: vk::Semaphore,
         signal: vk::Semaphore,
     ) -> RenderResult<SubmissionReceipt> {
-        let waits = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(wait)
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .value(0)];
-        let signals = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(signal)
-            .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)
-            .value(0)];
+        let (mut waits, mut signals) = owned_external_semaphores(&self.external_images);
+        waits.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(wait)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .value(0),
+        );
+        signals.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(signal)
+                .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)
+                .value(0),
+        );
         submit_recorded(self, &waits, &signals, None)
     }
 
@@ -869,20 +904,28 @@ impl VulkanRecordedFrame {
                 "external timeline signal must be greater than its wait value",
             ));
         }
-        let waits = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(semaphore)
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
-            .value(wait_value)];
-        let signals = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(semaphore)
-            .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)
-            .value(signal_value)];
+        let (mut waits, mut signals) = owned_external_semaphores(&self.external_images);
+        waits.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                .value(wait_value),
+        );
+        signals.push(
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(semaphore)
+                .stage_mask(vk::PipelineStageFlags2::ALL_GRAPHICS)
+                .value(signal_value),
+        );
         submit_recorded(self, &waits, &signals, Some(memory))
     }
 }
 
 impl Drop for VulkanRecordedFrame {
     fn drop(&mut self) {
+        for external in &self.external_images {
+            external.cancel_use(self.frame_id);
+        }
         if let Some(slot_index) = self.slot_index.take() {
             self.frames
                 .release_unsubmitted(slot_index, self.frame_id, None);
@@ -919,6 +962,9 @@ impl SubmissionReceipt {
             }
         })?;
         self.completed = true;
+        for external in &self.external_images {
+            external.complete_use(self.completion.frame_id);
+        }
         self.frames.maintain()?;
         Ok(())
     }
@@ -938,9 +984,29 @@ impl SubmissionReceipt {
         let complete = value >= self.completion.value;
         self.completed = complete;
         if complete {
+            for external in &self.external_images {
+                external.complete_use(self.completion.frame_id);
+            }
             self.frames.maintain()?;
         }
         Ok(complete)
+    }
+
+    /// Exports the release sync FDs for submitted Linux DMA-BUF reads.
+    ///
+    /// Submission has already established the binary semaphore signals. Each generation can be
+    /// exported exactly once and the returned FDs transfer to the protocol owner.
+    #[cfg(target_os = "linux")]
+    pub fn export_dma_buf_release_sync_fds(
+        &self,
+    ) -> RenderResult<Vec<crate::renderer_vulkan::VulkanDmaBufReleaseSyncFd>> {
+        let mut releases = Vec::new();
+        for external in &self.external_images {
+            if let Some(release) = unsafe { external.export_release_sync_fd() }? {
+                releases.push(release);
+            }
+        }
+        Ok(releases)
     }
 }
 
@@ -949,11 +1015,14 @@ impl Drop for SubmissionReceipt {
         if self.completed {
             self.buffers.clear();
             self.images.clear();
+            self.external_images.clear();
         } else {
             self.frames.retire(
                 self.completion.value,
+                self.completion.frame_id,
                 std::mem::take(&mut self.buffers),
                 std::mem::take(&mut self.images),
+                std::mem::take(&mut self.external_images),
             );
         }
     }
@@ -1049,8 +1118,42 @@ fn submit_recorded(
         },
         buffers: std::mem::take(&mut frame.buffers),
         images: std::mem::take(&mut frame.images),
+        external_images: std::mem::take(&mut frame.external_images),
         completed: false,
     })
+}
+
+fn owned_external_semaphores(
+    images: &[Arc<ExternalImageInner>],
+) -> (
+    Vec<vk::SemaphoreSubmitInfo<'static>>,
+    Vec<vk::SemaphoreSubmitInfo<'static>>,
+) {
+    use crate::renderer_vulkan::external_image::{VulkanExternalAcquire, VulkanExternalRelease};
+
+    let waits = images
+        .iter()
+        .filter_map(|image| match image.acquire {
+            VulkanExternalAcquire::BinarySemaphore(semaphore) => Some(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore)
+                    .stage_mask(vk::PipelineStageFlags2::FRAGMENT_SHADER),
+            ),
+            VulkanExternalAcquire::CommandStream => None,
+        })
+        .collect();
+    let signals = images
+        .iter()
+        .filter_map(|image| match image.release {
+            VulkanExternalRelease::BinarySemaphore(semaphore) => Some(
+                vk::SemaphoreSubmitInfo::default()
+                    .semaphore(semaphore)
+                    .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+            ),
+            VulkanExternalRelease::CommandStream => None,
+        })
+        .collect();
+    (waits, signals)
 }
 
 #[cfg(all(test, feature = "instrumentation"))]

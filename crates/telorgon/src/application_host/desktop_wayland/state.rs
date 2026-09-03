@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::compositor_wayland::{ResizeEdge, WaylandSurfaceId, XdgSurfaceState};
+use crate::compositor_wayland::{ResizeEdge, WaylandSurfaceId, XdgConfigure};
 use crate::core::{PointI, SizeI};
 
 /// The one configure that should be emitted for a surface at the end of an input turn.
@@ -21,7 +21,7 @@ pub(super) struct ConfigureScheduler {
 /// The terminal configure for one interactive resize.
 ///
 /// The size is known when the pointer grab ends, but the protocol serial does not exist until the
-/// scheduler emits the configure. Keeping both prevents an unrelated activation configure with the
+/// scheduler emits the configure. Keeping both prevents an older activation configure with the
 /// same size from being mistaken for the end of the resize transaction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct FinalResizeConfigure {
@@ -40,34 +40,37 @@ impl FinalResizeConfigure {
         }
     }
 
-    pub fn was_acknowledged(self, xdg_surface: Option<&XdgSurfaceState>) -> bool {
-        self.serial.is_some_and(|serial| {
-            xdg_surface.is_some_and(|xdg_surface| xdg_surface.configure_was_acknowledged(serial))
-        })
+    pub fn was_committed_with(self, acknowledged: Option<XdgConfigure>) -> bool {
+        self.serial
+            .zip(acknowledged)
+            .is_some_and(|(serial, configure)| serial_was_superseded_by(serial, configure.serial))
     }
 }
 
+/// Wayland serials are unsigned and may wrap. Protocol traffic cannot span half the serial space,
+/// so a wrapping subtraction in the lower half identifies the same or a newer serial.
+fn serial_was_superseded_by(serial: u32, acknowledged: u32) -> bool {
+    acknowledged.wrapping_sub(serial) < (1_u32 << 31)
+}
+
 impl ConfigureScheduler {
-    pub fn schedule_resize(&mut self, surface: WaylandSurfaceId, size: SizeI) {
+    pub fn schedule_state(&mut self, surface: WaylandSurfaceId, size: SizeI, resizing: bool) {
         self.pending.insert(
             surface,
             PendingResizeConfigure {
                 surface,
                 size,
-                resizing: true,
+                resizing,
             },
         );
     }
 
+    pub fn schedule_resize(&mut self, surface: WaylandSurfaceId, size: SizeI) {
+        self.schedule_state(surface, size, true);
+    }
+
     pub fn schedule_final(&mut self, surface: WaylandSurfaceId, size: SizeI) {
-        self.pending.insert(
-            surface,
-            PendingResizeConfigure {
-                surface,
-                size,
-                resizing: false,
-            },
-        );
+        self.schedule_state(surface, size, false);
     }
 
     pub fn cancel(&mut self, surface: WaylandSurfaceId) {
@@ -113,21 +116,6 @@ impl ResizeAnchor {
                 self.fixed_bottom.saturating_sub(committed_size.height)
             } else {
                 preview_position.y
-            },
-        }
-    }
-
-    pub fn committed_buffer_offset(self, preview_size: SizeI, committed_size: SizeI) -> PointI {
-        PointI {
-            x: if resizes_left(self.edge) {
-                preview_size.width.saturating_sub(committed_size.width)
-            } else {
-                0
-            },
-            y: if resizes_top(self.edge) {
-                preview_size.height.saturating_sub(committed_size.height)
-            } else {
-                0
             },
         }
     }
@@ -258,35 +246,52 @@ mod tests {
             width: 801,
             height: 603,
         };
-        assert!(!FinalResizeConfigure::pending(size).was_acknowledged(None));
+        assert!(!FinalResizeConfigure::pending(size).was_committed_with(None));
     }
 
     #[test]
-    fn only_the_emitted_final_serial_can_complete_a_resize() {
-        use crate::compositor_wayland::{DecorationMode, ToplevelState, XdgConfigure};
+    fn the_final_or_a_newer_acked_configure_can_complete_a_resize() {
+        use crate::compositor_wayland::{DecorationMode, ToplevelState};
 
-        let surface = surface();
         let size = SizeI {
             width: 801,
             height: 603,
         };
-        let mut xdg = XdgSurfaceState::new(surface);
-        for serial in [4, 5] {
-            xdg.queue_configure(XdgConfigure {
-                serial,
-                size: Some(size),
-                bounds: None,
-                states: ToplevelState::default(),
-                decoration: DecorationMode::ServerSide,
-            })
-            .unwrap();
-        }
+        let configure = |serial| XdgConfigure {
+            serial,
+            size: Some(size),
+            bounds: None,
+            states: ToplevelState::default(),
+            decoration: DecorationMode::ServerSide,
+        };
         let mut final_resize = FinalResizeConfigure::pending(size);
         final_resize.record_sent(size, 4);
 
-        assert!(!final_resize.was_acknowledged(Some(&xdg)));
-        xdg.ack_configure(5).unwrap();
-        assert!(final_resize.was_acknowledged(Some(&xdg)));
+        assert!(!final_resize.was_committed_with(Some(configure(3))));
+        assert!(final_resize.was_committed_with(Some(configure(4))));
+        assert!(final_resize.was_committed_with(Some(configure(5))));
+    }
+
+    #[test]
+    fn final_configure_comparison_handles_serial_wraparound() {
+        use crate::compositor_wayland::{DecorationMode, ToplevelState};
+
+        let size = SizeI {
+            width: 801,
+            height: 603,
+        };
+        let configure = |serial| XdgConfigure {
+            serial,
+            size: Some(size),
+            bounds: None,
+            states: ToplevelState::default(),
+            decoration: DecorationMode::ServerSide,
+        };
+        let mut final_resize = FinalResizeConfigure::pending(size);
+        final_resize.record_sent(size, u32::MAX);
+
+        assert!(final_resize.was_committed_with(Some(configure(1))));
+        assert!(!final_resize.was_committed_with(Some(configure(u32::MAX - 1))));
     }
 
     #[test]
@@ -308,19 +313,6 @@ mod tests {
                 },
             ),
             PointI { x: 68, y: 56 }
-        );
-        assert_eq!(
-            anchor.committed_buffer_offset(
-                SizeI {
-                    width: 850,
-                    height: 650,
-                },
-                SizeI {
-                    width: 832,
-                    height: 624,
-                },
-            ),
-            PointI { x: 18, y: 26 }
         );
     }
 }

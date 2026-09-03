@@ -2,7 +2,7 @@ use std::fmt;
 
 use crate::core::{PointI, RectI};
 
-use crate::compositor_wayland::{Region, WaylandBufferId, WaylandSurfaceId};
+use crate::compositor_wayland::{Region, WaylandBufferId, WaylandSurfaceId, XdgConfigure};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum BufferTransform {
@@ -54,6 +54,10 @@ pub struct SurfaceStateSnapshot {
     pub input_region: Option<Region>,
     pub buffer_scale: i32,
     pub buffer_transform: BufferTransform,
+    /// The last xdg configure acknowledged since the preceding surface commit, if any.
+    pub acknowledged_configure: Option<XdgConfigure>,
+    /// Persistent xdg window geometry after applying pending double-buffered state.
+    pub window_geometry: Option<RectI>,
 }
 
 #[derive(Clone, Debug)]
@@ -77,6 +81,8 @@ impl SurfaceState {
             input_region: None,
             buffer_scale: 1,
             buffer_transform: BufferTransform::Normal,
+            acknowledged_configure: None,
+            window_geometry: None,
         };
         Self {
             surface,
@@ -181,6 +187,7 @@ impl SurfaceState {
         self.current.damage = pending.damage;
         self.revision = revision;
         self.current.revision = revision;
+        self.current.acknowledged_configure = None;
         self.current.role = self.role;
         let current_buffer = self.current.attachment.map(|attachment| attachment.buffer);
         Ok(CommitOutcome {
@@ -191,6 +198,15 @@ impl SurfaceState {
             current_buffer,
             mapped: current_buffer.is_some(),
         })
+    }
+
+    pub fn apply_xdg_commit_state(
+        &mut self,
+        acknowledged_configure: Option<XdgConfigure>,
+        window_geometry: Option<RectI>,
+    ) {
+        self.current.acknowledged_configure = acknowledged_configure;
+        self.current.window_geometry = window_geometry;
     }
 
     pub fn snapshot(&self) -> &SurfaceStateSnapshot {
