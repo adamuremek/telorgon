@@ -80,13 +80,16 @@ production-qualified.
 > and renderer updates. Full SHM reads/conversions use a single bounded FIFO worker with owner-thread
 > completion and buffer release; independent retained/scene snapshots are prepared there so the
 > completion path performs no whole-image copy on the input owner. Full-copy work is latest-wins per
-> surface rather than an accumulating commit FIFO. Interactive resize motion is coalesced before protocol
-> delivery to the latest scheduled state, with at most one resizing configure per
-> presented frame; committed/desired geometry stays separate, configure acknowledgement and window
+> surface rather than an accumulating commit FIFO. Interactive resize uses an opaque solid-color
+> preview with pointer-driven frame geometry, a start-state configure, and a final-size configure on
+> release. New SHM copies for the veiled surface tree pause in a latest-wins mailbox during the drag;
+> committed/desired geometry stays separate, configure acknowledgement and window
 > geometry are latched to the applying surface commit, configure acknowledgement survives
-> latest-wins image-copy replacement, frame callbacks drain only through the displayed image
-> revision, and stale buffers are compositor-scaled into
-> a live target for every resize edge. Capability-gated Vulkan DMA-BUF commits are materialized into
+> latest-wins image-copy replacement, window presentation feedback uses frame-owned revisions,
+> and client content returns at native size only after the final applying publication.
+> Post-release frame-callback hints permit redraw progress without claiming hidden content was shown;
+> actual presentation later discards superseded feedback.
+> See [solid resize preview](WAYLAND_RESIZE_PREVIEW.md). Capability-gated Vulkan DMA-BUF commits are materialized into
 > retained compositor textures with acquire/release sync-FD handling and no CPU pixel copy. A protocol
 > acquire fence is preferred; otherwise the host exports the DMA-BUF reservation object's implicit
 > writer fences into the same Vulkan wait path. The host also supports secure

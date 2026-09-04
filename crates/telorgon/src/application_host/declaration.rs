@@ -8,7 +8,7 @@ use crate::assets::{
     PointerThemeOverrides,
 };
 use crate::compose::{Component, ErasedComponent, RuntimeTarget};
-use crate::core::SizeI;
+use crate::core::{ColorRgba8, SizeI};
 use crate::runtime::CompositionDriver;
 use crate::window_chrome::{ShellActionId, WindowChromeModel};
 
@@ -34,6 +34,10 @@ pub struct LinuxDesktopConfig {
     pub output_scale: i32,
     pub window_border: i32,
     pub titlebar_height: i32,
+    /// Opaque content veil during interactive resize and while awaiting the final client image.
+    /// Only the preview geometry changes during the drag; the client receives its final size on
+    /// release. Alpha must be 255 so stale content and resize gaps cannot show through.
+    pub resize_preview_color: ColorRgba8,
     pub pointer_extent: SizeI,
 }
 
@@ -46,6 +50,12 @@ impl Default for LinuxDesktopConfig {
             output_scale: 1,
             window_border: 4,
             titlebar_height: 32,
+            resize_preview_color: ColorRgba8 {
+                r: 38,
+                g: 42,
+                b: 48,
+                a: 255,
+            },
             pointer_extent: SizeI {
                 width: 32,
                 height: 32,
@@ -65,6 +75,7 @@ impl LinuxDesktopConfig {
             || self.output_scale <= 0
             || self.window_border < 0
             || self.titlebar_height < 0
+            || self.resize_preview_color.a != 255
             || self.pointer_extent.width <= 0
             || self.pointer_extent.height <= 0
         {
@@ -1094,6 +1105,22 @@ fn validate_application_name(name: &str) -> AppResult<()> {
 mod tests {
     use super::*;
     use crate::compose::{ComponentFields, View, text};
+
+    #[test]
+    fn resize_preview_color_is_configurable_but_must_hide_stale_content() {
+        let mut config = LinuxDesktopConfig::default();
+        config.drm_device = std::env::current_dir().unwrap().join("card0");
+        assert_eq!(config.resize_preview_color.a, 255);
+        config.resize_preview_color = ColorRgba8 {
+            r: 20,
+            g: 40,
+            b: 60,
+            a: 255,
+        };
+        assert!(config.validate().is_ok());
+        config.resize_preview_color.a = 128;
+        assert!(config.validate().is_err());
+    }
 
     struct Root;
 

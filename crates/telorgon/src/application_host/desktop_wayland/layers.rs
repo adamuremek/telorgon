@@ -395,6 +395,7 @@ pub(super) fn prepare_desktop_layers(
         })
         .collect::<BTreeMap<_, _>>();
     for surface in stacking_order {
+        let veiled = resize_veil_owner(windows, *surface).is_some();
         let Some(window) = windows.get_mut(surface) else {
             continue;
         };
@@ -458,29 +459,32 @@ pub(super) fn prepare_desktop_layers(
                 ));
             }
         }
-        // Keep the last committed buffer attached to the compositor-controlled window rectangle.
-        // The retained scene backends scale `window.size` into this target while the client draws
-        // and commits its next size, so chrome and content move together with the pointer. Clip the
-        // mapped buffer to the stable content slot; XDG window-geometry margins are source mapping,
-        // not extra compositor window area.
-        let preview_target = surface_target_rect(window, position, config);
-        let preview_clip = (window.role == SurfaceRole::XdgToplevel)
-            .then(|| window_content_rect(window, position, config));
+        // The live resize preview is a solid retained primitive. Keep the image scene and its
+        // pending pixels intact, but do not upload or draw them underneath the opaque veil.
+        if visible && window.role == SurfaceRole::XdgToplevel && veiled {
+            layers.push(DesktopLayer::solid(
+                DesktopLayerKey::ResizeVeil(surface.get()),
+                DesktopSceneKey::ResizeVeil,
+                config.resize_preview_color,
+                window_content_rect(window, position, config),
+            ));
+        }
+        let placement = surface_placement(window, position, config);
         layers.push(DesktopLayer::image(
             DesktopLayerKey::Surface(surface.get()),
             DesktopSceneKey::Surface(surface.get()),
             window.revision,
-            if visible {
+            if visible && !veiled {
                 window.take_image_update()
             } else {
                 DesktopImageUpdate::Unchanged
             },
             window.size,
-            preview_target,
-            preview_clip,
+            placement.target,
+            placement.clip,
             window.alpha_mode,
             window.pixel_format,
-            visible,
+            visible && !veiled,
         ));
     }
 

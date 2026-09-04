@@ -243,15 +243,21 @@ The operational managed path is entirely Telorgon-rendered:
    new bounds. Hidden/minimized producers keep their retained identity without contributing a draw,
    and a hidden client revision is not consumed before its queued pixels are delivered. Focus-state
    changes reconcile the existing window-frame component root instead of recreating its runtime. A
-   committed buffer that is stale during resize is linearly scaled into the compositor-owned live
-   target rectangle. Source pixels and placement geometry remain independent, so all eight resize
-   edges track the pointer without waiting for a client commit. Pointer coordinates are mapped back
-   into the committed surface coordinate space while that preview is active. Commit-latched XDG
-   window geometry maps the source buffer while a stable compositor content-slot clip keeps
-   client-side shadow margins out of resize-size, hit-test, and fixed-edge calculations. A final
+   client resize uses an opaque solid-color veil instead of stretching stale content or exposing
+   empty resize bands. All eight edges track the pointer using compositor-owned frame/veil geometry;
+   the client receives its current committed extent with the initial resizing hint and its final
+   requested extent on release, not a stream of intermediate sizes. The client surface tree is hidden
+   and new SHM copies are paused behind a bounded latest-wins mailbox during the drag. Work submitted
+   before the drag may finish. After release, copies and frame callbacks resume; the veil remains
+   until the applying client publication acknowledges the final configure. Hidden content is never
+   reported as presented. Client images use native surface-coordinate sizes with commit-latched XDG
+   geometry offsets and clipping; client-side shadow margins stay out of resize-size, hit-test, and
+   fixed-edge calculations. A final
    configure acknowledgement is captured before asynchronous image work can be superseded. The
    applying publication retires the resize transaction at the client's committed window extent;
    cell- and aspect-constrained clients may legally choose an extent below the configure maximum.
+   See [solid resize preview](WAYLAND_RESIZE_PREVIEW.md) for configuration, buffer ownership,
+   callback pacing, reference audit, and remaining hardware qualification.
 4. Backend selection happens once in the desktop renderer assembly. The selected implementation
    owns its scene map and output state for the remainder of the run; neither backend calls the
    other. Vulkan applies deltas to `VulkanScene`, stages changed rows and per-placement uniforms,

@@ -18,6 +18,29 @@ pub(crate) fn take_surface_commits_through<T>(
         .collect()
 }
 
+/// Completes feedback only on presentation. Callback-only wakes leave feedback pending until an
+/// actual frame is displayed or supersedes it, including older frames still in flight at the wake.
+pub(crate) fn take_surface_feedbacks_through<T>(
+    commits: &mut BTreeMap<(WaylandSurfaceId, u64), Vec<T>>,
+    surface: WaylandSurfaceId,
+    through_revision: u64,
+    visible: bool,
+) -> (Vec<T>, Vec<T>) {
+    if !visible {
+        return (Vec::new(), Vec::new());
+    }
+    let mut presented = Vec::new();
+    let mut discarded = Vec::new();
+    for (revision, feedbacks) in take_surface_commits_through(commits, surface, through_revision) {
+        if visible && revision == through_revision {
+            presented.extend(feedbacks);
+        } else {
+            discarded.extend(feedbacks);
+        }
+    }
+    (presented, discarded)
+}
+
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct BufferUseId(NonZeroU64);
@@ -173,6 +196,38 @@ impl std::error::Error for BufferUseError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn callback_only_wake_preserves_feedback_until_actual_presentation() {
+        let surface = WaylandSurfaceId::from_raw(2).unwrap();
+        let other = WaylandSurfaceId::from_raw(3).unwrap();
+        let mut commits = BTreeMap::from([
+            ((surface, 4), vec![40]),
+            ((surface, 6), vec![60]),
+            ((surface, 8), vec![80]),
+            ((other, 4), vec![400]),
+        ]);
+        assert_eq!(
+            take_surface_feedbacks_through(&mut commits, surface, 6, false),
+            (vec![], vec![])
+        );
+        assert_eq!(commits.get(&(surface, 8)), Some(&vec![80]));
+        assert_eq!(commits.get(&(other, 4)), Some(&vec![400]));
+        assert_eq!(
+            take_surface_feedbacks_through(&mut commits, surface, 8, true),
+            (vec![80], vec![40, 60])
+        );
+    }
+
+    #[test]
+    fn visible_feedback_reports_only_the_displayed_revision() {
+        let surface = WaylandSurfaceId::from_raw(2).unwrap();
+        let mut commits = BTreeMap::from([((surface, 4), vec![40]), ((surface, 6), vec![60])]);
+        assert_eq!(
+            take_surface_feedbacks_through(&mut commits, surface, 6, true),
+            (vec![60], vec![40])
+        );
+    }
 
     #[test]
     fn a_buffer_is_released_only_after_every_output_finishes() {

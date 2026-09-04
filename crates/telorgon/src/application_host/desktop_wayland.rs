@@ -58,9 +58,10 @@ mod shm_copy;
 mod state;
 
 use client::{
-    ClientWindow, PreparedClientImage, apply_surface_publication, discard_shm_copy,
-    finish_dma_buf_release, finish_shm_copy, observe_surface_configure_acknowledgement,
-    retire_submitted_dma_buf, retire_unsubmitted_dma_buf,
+    ClientWindow, PreparedClientImage, apply_surface_publication, discard_replaced_shm_copy,
+    discard_shm_copy, finish_dma_buf_release, finish_shm_copy,
+    observe_surface_configure_acknowledgement, resize_veil_owner, retire_submitted_dma_buf,
+    retire_unsubmitted_dma_buf,
 };
 #[cfg(test)]
 use cursor_plane::{CursorCommitTracker, HARDWARE_CURSOR_BUFFER_COUNT};
@@ -86,7 +87,7 @@ use scene::{
 use shm_copy::{ShmCopyCompletion, ShmCopyRequest, ShmCopyWorker};
 use state::{
     ConfigureScheduler, FinalResizeConfigure, PendingResizeConfigure, ResizeAnchor,
-    take_ready_deferred_shm_surface,
+    SurfacePlacement, take_ready_deferred_shm_surface,
 };
 
 const MAX_DEFERRED_SHM_COPIES: usize = 64;
@@ -194,6 +195,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .collect::<Vec<_>>();
     let mut desktop_renderer = DesktopRenderer::new(renderer, &scanout_buffers, extent)?;
     let mut desktop_scene = DesktopComposition::new(extent);
+    let mut frame_surface_revisions = vec![Vec::<(u32, u64)>::new(); frame_slots.len()];
     let cursor_plane = topology.planes.iter().find(|candidate| {
         candidate.possible_crtcs_mask & (1_u32.checked_shl(crtc_index as u32).unwrap_or(0)) != 0
             && candidate.formats.contains(&DRM_FORMAT_ARGB8888)
@@ -440,6 +442,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
 
     loop {
         let mut presentation_completed = false;
+        let mut presented_surface_revisions = Vec::new();
         let mut pointer_motion_seen = false;
         let mut cursor_position_dirty = false;
         let mut pointer_primary_dirty = false;
@@ -567,7 +570,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             if let Some(interaction) = window_interaction {
                                 apply_window_interaction(
                                     &mut windows,
-                                    &mut configure_scheduler,
                                     interaction,
                                     pointer_position,
                                     extent,
@@ -659,7 +661,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             if let Some(interaction) = window_interaction {
                                 apply_window_interaction(
                                     &mut windows,
-                                    &mut configure_scheduler,
                                     interaction,
                                     pointer_position,
                                     extent,
@@ -864,6 +865,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 &mut configure_scheduler,
                                 interaction,
                             );
+                            pointer_scene_dirty = true;
+                            repaint = true;
                             set_decoration_pointer_cursor(
                                 &mut wayland,
                                 &frame_layers,
@@ -1109,8 +1112,16 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 completion,
             )?;
         }
+        // Do not spend pixel-copy/conversion work on a surface hidden by an active resize veil.
+        // One replaceable request retains its buffer lease; unrelated surfaces can still run.
+        let mut blocked_shm_surfaces = submitted_shm_surfaces.clone();
+        blocked_shm_surfaces.extend(windows.keys().copied().filter(|surface| {
+            resize_veil_owner(&windows, *surface)
+                .and_then(|owner| windows.get(&owner))
+                .is_some_and(ClientWindow::resizing)
+        }));
         while let Some(surface) =
-            take_ready_deferred_shm_surface(&mut deferred_shm_order, &submitted_shm_surfaces)
+            take_ready_deferred_shm_surface(&mut deferred_shm_order, &blocked_shm_surfaces)
         {
             let request = deferred_shm_copies
                 .remove(&surface)
@@ -1125,6 +1136,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     "deferred SHM surface copy was already submitted",
                 ));
             }
+            blocked_shm_surfaces.insert(surface);
         }
         let runtime_now = MonotonicInstant::from_nanos(
             start.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64,
@@ -1156,6 +1168,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             .map_err(app_error)?;
                     }
                     presentation_completed = true;
+                    presented_surface_revisions
+                        .extend(std::mem::take(&mut frame_surface_revisions[completed_slot]));
                     #[cfg(feature = "profiler")]
                     if let Some(event_time_us) = frame_pointer_event_us[completed_slot].take() {
                         record_pointer_event_latency(
@@ -1326,15 +1340,20 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     // This newer SHM publication supersedes any older full-copy request still
                     // waiting in this surface's mailbox. If this one also needs a worker copy it
                     // is inserted below as the new latest value.
-                    if let Some(request) = deferred_shm_copies.remove(&surface) {
-                        deferred_shm_order.retain(|candidate| *candidate != surface);
-                        discard_shm_copy(
-                            &mut wayland,
-                            &mut pending_shm_buffers,
-                            &mut pending_shm_surfaces,
-                            request,
-                        )?;
-                    }
+                    let replaced_deferred_copy =
+                        if let Some(request) = deferred_shm_copies.remove(&surface) {
+                            deferred_shm_order.retain(|candidate| *candidate != surface);
+                            discard_replaced_shm_copy(
+                                &mut wayland,
+                                &mut pending_shm_buffers,
+                                &mut pending_shm_surfaces,
+                                request,
+                                attachment.buffer,
+                            )?;
+                            true
+                        } else {
+                            false
+                        };
                     let direct_shm = snapshot.buffer_scale == 1
                         && snapshot.buffer_transform == BufferTransform::Normal
                         && viewport.is_none();
@@ -1355,7 +1374,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     * 4
                     });
                     let surface_copy_pending = pending_shm_surfaces.contains_key(&surface);
-                    let can_patch = direct_shm && metadata_matches && !surface_copy_pending;
+                    let resize_copy_paused = resize_veil_owner(&windows, surface)
+                        .and_then(|owner| windows.get(&owner))
+                        .is_some_and(ClientWindow::resizing);
+                    let can_patch = direct_shm
+                        && metadata_matches
+                        && !surface_copy_pending
+                        && !replaced_deferred_copy
+                        && !resize_copy_paused;
                     let full_damage = buffer_damage == Some(full_rect(descriptor.size));
                     let prepared_image = if can_patch && !full_damage {
                         match buffer_damage {
@@ -1400,10 +1426,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         *pending = pending.checked_add(1).ok_or_else(|| {
                             AppError::new("pending SHM surface use count overflow")
                         })?;
-                        if submitted_shm_surfaces.contains(&request_surface)
-                            || deferred_shm_copies.contains_key(&request_surface)
-                            || !deferred_shm_copies.is_empty()
-                        {
+                        if resize_copy_paused || submitted_shm_surfaces.contains(&request_surface) {
+                            #[cfg(feature = "profiler")]
+                            if resize_copy_paused {
+                                crate::profiler::record_instant(
+                                    "compositor.resize.shm_copy_deferred",
+                                );
+                            }
                             let replaced = deferred_shm_copies.insert(request_surface, request);
                             if replaced.is_none() {
                                 if deferred_shm_copies.len() > MAX_DEFERRED_SHM_COPIES {
@@ -1547,6 +1576,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             edge,
                             pointer_position,
                         );
+                        repaint = true;
                     }
                 }
                 CompositorAction::MaximizeToplevel { surface, maximized } => {
@@ -1641,6 +1671,23 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 CompositorAction::ImportBuffer(_)
                 | CompositorAction::ReleaseBuffer(_)
                 | CompositorAction::DisconnectClient(_) => {}
+            }
+        }
+
+        // Resume frame-callback-paced clients after release even when the veil itself no longer
+        // changes (so there may be no new KMS frame). Hidden intermediate images are not presented;
+        // do not misreport presentation feedback while asking the client for its final redraw.
+        let callback_time = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
+        for (surface, window) in &windows {
+            if window.revision != 0
+                && !window.minimized
+                && resize_veil_owner(&windows, *surface)
+                    .and_then(|owner| windows.get(&owner))
+                    .is_some_and(|owner| owner.resize_final.is_some())
+            {
+                wayland
+                    .surface_occluded_frame_ready(*surface, window.revision, callback_time)
+                    .map_err(app_error)?;
             }
         }
 
@@ -1772,6 +1819,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     }
                     first_modeset = false;
                     presentation_completed = true;
+                    presented_surface_revisions
+                        .extend(std::mem::take(&mut frame_surface_revisions[slot_index]));
                     #[cfg(feature = "profiler")]
                     if let Some(event_time_us) = frame_pointer_event_us[slot_index].take() {
                         record_pointer_event_latency(
@@ -1868,11 +1917,23 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     .map_err(app_error)?;
             }
             let time = u32::try_from(start.elapsed().as_millis()).unwrap_or(u32::MAX);
-            for (surface, window) in &windows {
-                if window.revision != 0
-                    && !window.minimized
-                    && (window.role == SurfaceRole::SessionLock) == session_locked
-                {
+            for (surface, revision) in presented_surface_revisions {
+                let Some(surface) = WaylandSurfaceId::from_raw(surface) else {
+                    continue;
+                };
+                if wayland.core().world.surface(surface).is_some() {
+                    wayland
+                        .surface_presented(surface, revision, time)
+                        .map_err(app_error)?;
+                }
+            }
+            // Cursor surfaces have a separate composited/hardware-plane image lifecycle. Preserve
+            // their existing primary-frame pacing; window/drag-image revisions above are frame-owned.
+            for (surface, window) in windows
+                .iter()
+                .filter(|(_, window)| window.role == SurfaceRole::Cursor)
+            {
+                if window.revision != 0 && !session_locked {
                     wayland
                         .surface_presented(*surface, window.revision, time)
                         .map_err(app_error)?;
@@ -2033,6 +2094,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 continue;
             };
             let frame_id = next_frame_id;
+            frame_surface_revisions[scanout_index] = frame.surface_revisions.clone();
             next_frame_id = next_frame_id.wrapping_add(1).max(1);
             frame_slots[scanout_index]
                 .begin_render(frame_id)

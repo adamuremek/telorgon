@@ -5,6 +5,8 @@ fn neutral_desktop_modules_do_not_depend_on_a_renderer() {
         include_str!("layers.rs"),
         include_str!("pointer_visual.rs"),
         include_str!("scene.rs"),
+        include_str!("state.rs"),
+        include_str!("geometry.rs"),
     ];
     for source in modules {
         for forbidden in [

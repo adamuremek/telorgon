@@ -118,6 +118,21 @@ impl PreparedClientImage {
 }
 
 impl ClientWindow {
+    pub(super) fn resizing(&self) -> bool {
+        self.resize_anchor.is_some() && self.resize_final.is_none()
+    }
+
+    pub(super) fn configure_size(&self) -> SizeI {
+        if self.resizing() {
+            SizeI {
+                width: self.window_geometry.width,
+                height: self.window_geometry.height,
+            }
+        } else {
+            self.requested_size
+        }
+    }
+
     fn apply_image(&mut self, revision: u64, image: PreparedClientImage) {
         self.revision = self.revision.max(revision);
         match image {
@@ -153,7 +168,7 @@ impl ClientWindow {
 
     pub(super) fn take_image_update(&mut self) -> DesktopImageUpdate {
         match std::mem::take(&mut self.pending_image_update) {
-            PendingClientImageUpdate::Unchanged => DesktopImageUpdate::Unchanged,
+            PendingClientImageUpdate::Unchanged => DesktopImageUpdate::Reused,
             PendingClientImageUpdate::Full(pixels) => DesktopImageUpdate::Full(pixels),
             PendingClientImageUpdate::Region(rect) => {
                 DesktopImageUpdate::Regions(vec![DesktopImageRegion {
@@ -168,6 +183,22 @@ impl ClientWindow {
             },
         }
     }
+}
+
+/// A veil covers the entire client surface tree, not just its root buffer.
+pub(super) fn resize_veil_owner(
+    windows: &BTreeMap<WaylandSurfaceId, ClientWindow>,
+    surface: WaylandSurfaceId,
+) -> Option<WaylandSurfaceId> {
+    let mut candidate = surface;
+    for _ in 0..=windows.len() {
+        let window = windows.get(&candidate)?;
+        if window.role == SurfaceRole::XdgToplevel {
+            return window.resize_anchor.is_some().then_some(candidate);
+        }
+        candidate = window.parent?;
+    }
+    None
 }
 
 fn patch_client_pixels(target: &mut [u8], update: &crate::render::ImageResourceUpdate) {
@@ -330,6 +361,9 @@ pub(super) fn apply_surface_publication(
                 || window.position != reconciled_position
                 || window.size != image_extent
                 || window.window_geometry != window_geometry
+                || window.requested_size != requested_size
+                || window.resize_anchor != resize_anchor
+                || window.resize_final != retained_resize_final
                 || window.minimized != minimized
                 || window.server_decorated != server_decorated
         });
@@ -439,6 +473,7 @@ pub(super) fn finish_shm_copy(
         completion.snapshot.surface,
         completion.snapshot.revision,
         completion.buffer,
+        true,
     )?;
     let current = wayland
         .core()
@@ -483,6 +518,28 @@ pub(super) fn discard_shm_copy(
         request.snapshot.surface,
         request.snapshot.revision,
         request.buffer(),
+        true,
+    )
+}
+
+pub(super) fn discard_replaced_shm_copy(
+    wayland: &mut NativeCompositor<'_>,
+    pending_buffers: &mut BTreeMap<crate::compositor_wayland::WaylandBufferId, usize>,
+    pending_surfaces: &mut BTreeMap<WaylandSurfaceId, usize>,
+    request: ShmCopyRequest,
+    replacement_buffer: crate::compositor_wayland::WaylandBufferId,
+) -> AppResult<()> {
+    // Recommitting the same wl_buffer does not permit release before the replacement read ends.
+    // The new publication will either release synchronously or install its own pending use.
+    let release_buffer = request.buffer() != replacement_buffer;
+    retire_pending_shm_use(
+        wayland,
+        pending_buffers,
+        pending_surfaces,
+        request.snapshot.surface,
+        request.snapshot.revision,
+        request.buffer(),
+        release_buffer,
     )
 }
 
@@ -493,6 +550,7 @@ fn retire_pending_shm_use(
     surface: WaylandSurfaceId,
     revision: u64,
     buffer: crate::compositor_wayland::WaylandBufferId,
+    release_buffer: bool,
 ) -> AppResult<()> {
     let pending = pending_buffers
         .get_mut(&buffer)
@@ -515,7 +573,7 @@ fn retire_pending_shm_use(
     wayland
         .finish_explicit_release(surface, revision, None)
         .map_err(app_error)?;
-    if !pending_buffers.contains_key(&buffer) {
+    if release_buffer && !pending_buffers.contains_key(&buffer) {
         wayland.release_buffer(buffer).map_err(app_error)?;
     }
     Ok(())

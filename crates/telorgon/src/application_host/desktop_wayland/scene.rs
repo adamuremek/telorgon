@@ -15,6 +15,7 @@ pub(super) enum DesktopLayerKey {
     Background,
     Frame(u32),
     Surface(u32),
+    ResizeVeil(u32),
     LegacyControl(u32, u8),
     LegacyControlSource(u8),
     Widget(u32),
@@ -35,6 +36,7 @@ pub(super) enum DesktopSceneKey {
     Background,
     Frame(u32),
     Surface(u32),
+    ResizeVeil,
     LegacyControl(u8),
     Widget(u32),
     DragIcon(u32),
@@ -52,7 +54,10 @@ pub(super) struct DesktopImageRegion {
 
 #[derive(Clone)]
 pub(super) enum DesktopImageUpdate {
+    /// No publication is being delivered (for example, a hidden producer keeps queued pixels).
     Unchanged,
+    /// A committed publication explicitly reuses the already delivered pixels.
+    Reused,
     Full(Arc<[u8]>),
     Regions(Vec<DesktopImageRegion>),
     /// The Vulkan backend has prepared a compositor-owned retained texture under this ID.
@@ -63,6 +68,10 @@ pub(super) enum DesktopImageUpdate {
 }
 
 pub(super) enum DesktopLayerContent {
+    Solid {
+        scene: DesktopSceneKey,
+        color: ColorRgba8,
+    },
     Retained {
         scene: DesktopSceneKey,
         deltas: Vec<RenderSceneDelta>,
@@ -81,8 +90,8 @@ pub(super) struct DesktopLayer {
     pub content: DesktopLayerContent,
     /// Extent of the retained scene or committed client buffer.
     pub source_extent: SizeI,
-    /// Compositor-controlled output rectangle. This may differ from `source_extent` while a
-    /// client is catching up with an interactive resize.
+    /// Compositor-controlled output rectangle. Generic placements support scaling, but Wayland
+    /// client placements preserve `source_extent` and use clipping during interactive resize.
     pub target: RectI,
     /// A compositor-space clip used to constrain stale committed buffers during live resize.
     pub clip: Option<RectI>,
@@ -91,6 +100,25 @@ pub(super) struct DesktopLayer {
 }
 
 impl DesktopLayer {
+    pub(super) fn solid(
+        key: DesktopLayerKey,
+        scene: DesktopSceneKey,
+        color: ColorRgba8,
+        target: RectI,
+    ) -> Self {
+        Self {
+            key,
+            content: DesktopLayerContent::Solid { scene, color },
+            source_extent: SizeI {
+                width: 1,
+                height: 1,
+            },
+            target,
+            clip: None,
+            visible: true,
+        }
+    }
+
     pub(super) fn retained(
         key: DesktopLayerKey,
         scene: DesktopSceneKey,
@@ -166,6 +194,8 @@ pub(super) struct DesktopFrame {
     pub live_scenes: BTreeSet<DesktopSceneKey>,
     pub updates: Vec<DesktopSceneUpdate>,
     pub placements: Vec<DesktopPlacement>,
+    /// Client revisions actually included in this frame, carried to its KMS completion.
+    pub surface_revisions: Vec<(u32, u64)>,
     /// `None` means the complete output; `Some` is a retained-output damage rectangle.
     pub damage: Option<RectI>,
 }
@@ -243,7 +273,9 @@ impl ImageScene {
                     self.image = *image;
                     self.content_version = *content_version;
                 }
-                DesktopImageUpdate::Unchanged | DesktopImageUpdate::Regions(_) => return None,
+                DesktopImageUpdate::Unchanged
+                | DesktopImageUpdate::Reused
+                | DesktopImageUpdate::Regions(_) => return None,
             }
             self.extent = extent;
             self.alpha_mode = alpha_mode;
@@ -254,6 +286,11 @@ impl ImageScene {
                 // queued in `ClientWindow`. Do not acknowledge that revision until the queued
                 // pixels are actually handed to this retained image scene.
                 DesktopImageUpdate::Unchanged => return None,
+                DesktopImageUpdate::Reused => {
+                    // A same-size, damage-free final configure commit still advances the
+                    // displayed revision and its callbacks, without uploading any client pixels.
+                    self.source.damage.full = true;
+                }
                 DesktopImageUpdate::Full(pixels) => {
                     self.content_version = self.content_version.wrapping_add(1).max(1);
                     self.image = ImageId(1);
@@ -412,6 +449,7 @@ pub(super) struct DesktopComposition {
     extent: SizeI,
     image_scenes: BTreeMap<DesktopSceneKey, ImageScene>,
     retained_scenes: BTreeMap<DesktopSceneKey, RetainedSceneAdapter>,
+    solid_scenes: BTreeMap<DesktopSceneKey, RenderScene>,
     placements: BTreeMap<DesktopLayerKey, PlacementState>,
     order: Vec<DesktopLayerKey>,
 }
@@ -422,6 +460,7 @@ impl DesktopComposition {
             extent,
             image_scenes: BTreeMap::new(),
             retained_scenes: BTreeMap::new(),
+            solid_scenes: BTreeMap::new(),
             placements: BTreeMap::new(),
             order: Vec::new(),
         }
@@ -444,6 +483,24 @@ impl DesktopComposition {
 
         for layer in layers.into_iter().filter(valid_layer) {
             let scene = match layer.content {
+                DesktopLayerContent::Solid { scene, color } => {
+                    let source = self.solid_scenes.entry(scene).or_default();
+                    if source.background != color || source.extent.width == 0.0 {
+                        source.extent = SizeF {
+                            width: 1.0,
+                            height: 1.0,
+                        };
+                        source.background = color;
+                        source.damage.full = true;
+                    }
+                    if let Some(delta) = source.take_delta() {
+                        updates
+                            .entry(scene)
+                            .or_default()
+                            .push(self.retained_scenes.entry(scene).or_default().adapt(delta));
+                    }
+                    scene
+                }
                 DesktopLayerContent::Retained { scene, deltas } => {
                     if !deltas.is_empty() {
                         let adapter = self.retained_scenes.entry(scene).or_default();
@@ -564,6 +621,7 @@ impl DesktopComposition {
         self.image_scenes.retain(|key, _| live_scenes.contains(key));
         self.retained_scenes
             .retain(|key, _| live_scenes.contains(key));
+        self.solid_scenes.retain(|key, _| live_scenes.contains(key));
         self.placements = next_states;
         self.order = next_order;
 
@@ -583,6 +641,21 @@ impl DesktopComposition {
             }
         }
         let damage = damage.map(|damage| intersect(damage, output).unwrap_or(output));
+        let surface_revisions = placements
+            .iter()
+            .filter_map(|placement| {
+                let surface = match placement.key {
+                    DesktopLayerKey::Surface(surface) | DesktopLayerKey::DragIcon(surface) => {
+                        surface
+                    }
+                    _ => return None,
+                };
+                self.image_scenes
+                    .get(&placement.scene)
+                    .filter(|scene| scene.source_version != 0)
+                    .map(|scene| (surface, scene.source_version))
+            })
+            .collect();
         Some(DesktopFrame {
             extent,
             live_scenes,
@@ -591,6 +664,7 @@ impl DesktopComposition {
                 .map(|(key, deltas)| DesktopSceneUpdate { key, deltas })
                 .collect(),
             placements,
+            surface_revisions,
             damage: if damage == Some(output) { None } else { damage },
         })
     }
@@ -605,9 +679,9 @@ fn valid_layer(layer: &DesktopLayer) -> bool {
         return false;
     }
     match &layer.content {
-        DesktopLayerContent::Retained { .. } => true,
+        DesktopLayerContent::Retained { .. } | DesktopLayerContent::Solid { .. } => true,
         DesktopLayerContent::Image { update, .. } => match update {
-            DesktopImageUpdate::Unchanged => true,
+            DesktopImageUpdate::Unchanged | DesktopImageUpdate::Reused => true,
             DesktopImageUpdate::Full(pixels) => {
                 pixels.len()
                     >= layer.source_extent.width as usize * layer.source_extent.height as usize * 4
@@ -717,6 +791,189 @@ fn intersect(left: RectI, right: RectI) -> Option<RectI> {
 mod tests {
     use super::*;
 
+    fn veil(target: RectI, color: ColorRgba8) -> DesktopLayer {
+        DesktopLayer::solid(
+            DesktopLayerKey::ResizeVeil(9),
+            DesktopSceneKey::ResizeVeil,
+            color,
+            target,
+        )
+    }
+
+    #[test]
+    fn resize_veil_moves_without_client_uploads_and_reveals_only_the_final_image() {
+        let extent = SizeI {
+            width: 800,
+            height: 600,
+        };
+        let position = PointI { x: 100, y: 90 };
+        let color = ColorRgba8 {
+            r: 38,
+            g: 42,
+            b: 48,
+            a: 255,
+        };
+        let mut composition = DesktopComposition::new(extent);
+        composition
+            .synchronize(
+                extent,
+                vec![image_layer(
+                    position,
+                    DesktopImageUpdate::Full(vec![255; 100 * 80 * 4].into()),
+                )],
+            )
+            .unwrap();
+        let preview = |width, height| RectI {
+            x: position.x,
+            y: position.y,
+            width,
+            height,
+        };
+        let hidden = || {
+            let mut layer = image_layer(position, DesktopImageUpdate::Unchanged);
+            layer.visible = false;
+            layer
+        };
+        let first = composition
+            .synchronize(extent, vec![veil(preview(100, 80), color), hidden()])
+            .unwrap();
+        assert_eq!(first.updates.len(), 1);
+        assert_eq!(first.updates[0].key, DesktopSceneKey::ResizeVeil);
+        let delta = &first.updates[0].deltas[0];
+        assert!(delta.image_resources.is_empty());
+        assert_eq!(delta.boxes[0].values[0].background, Some(color));
+        assert!(first.live_scenes.contains(&DesktopSceneKey::Surface(9)));
+        assert_eq!(first.placements.len(), 1);
+        assert!(first.surface_revisions.is_empty());
+
+        let moved = composition
+            .synchronize(extent, vec![veil(preview(150, 110), color), hidden()])
+            .unwrap();
+        assert!(
+            moved.updates.is_empty(),
+            "pointer motion must change placement only"
+        );
+        assert_eq!(moved.placements[0].target, preview(150, 110));
+        assert!(
+            composition
+                .synchronize(extent, vec![veil(preview(150, 110), color), hidden()])
+                .is_none()
+        );
+
+        let final_extent = SizeI {
+            width: 144,
+            height: 104,
+        }; // cell-snapped legal response
+        let final_layer = DesktopLayer::image(
+            DesktopLayerKey::Surface(9),
+            DesktopSceneKey::Surface(9),
+            2,
+            DesktopImageUpdate::Full(vec![128; 144 * 104 * 4].into()),
+            final_extent,
+            preview(144, 104),
+            None,
+            ImageAlphaMode::Opaque,
+            ImagePixelFormat::Rgba8,
+            true,
+        );
+        let final_frame = composition.synchronize(extent, vec![final_layer]).unwrap();
+        assert_eq!(final_frame.placements.len(), 1);
+        assert_eq!(final_frame.surface_revisions, vec![(9, 2)]);
+        assert_eq!(final_frame.placements[0].scene, DesktopSceneKey::Surface(9));
+        assert_eq!(final_frame.updates.len(), 1);
+        assert_eq!(final_frame.updates[0].deltas[0].image_resources.len(), 1);
+        assert!(
+            !final_frame
+                .live_scenes
+                .contains(&DesktopSceneKey::ResizeVeil)
+        );
+    }
+
+    #[test]
+    fn solid_color_changes_keep_scene_epochs_monotonic() {
+        let extent = SizeI {
+            width: 200,
+            height: 150,
+        };
+        let target = RectI {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 80,
+        };
+        let mut composition = DesktopComposition::new(extent);
+        let first = composition
+            .synchronize(
+                extent,
+                vec![veil(
+                    target,
+                    ColorRgba8 {
+                        r: 30,
+                        g: 40,
+                        b: 50,
+                        a: 255,
+                    },
+                )],
+            )
+            .unwrap();
+        let second = composition
+            .synchronize(
+                extent,
+                vec![veil(
+                    target,
+                    ColorRgba8 {
+                        r: 60,
+                        g: 70,
+                        b: 80,
+                        a: 255,
+                    },
+                )],
+            )
+            .unwrap();
+        assert!(second.updates[0].deltas[0].epoch > first.updates[0].deltas[0].epoch);
+        assert!(second.updates[0].deltas[0].image_resources.is_empty());
+    }
+
+    #[test]
+    fn damage_free_publication_advances_displayed_revision_without_uploading_pixels() {
+        let extent = SizeI {
+            width: 800,
+            height: 600,
+        };
+        let position = PointI { x: 20, y: 30 };
+        let mut composition = DesktopComposition::new(extent);
+        let first = composition
+            .synchronize(
+                extent,
+                vec![image_layer(
+                    position,
+                    DesktopImageUpdate::Full(vec![255; 100 * 80 * 4].into()),
+                )],
+            )
+            .unwrap();
+        let mut reused = image_layer(position, DesktopImageUpdate::Reused);
+        if let DesktopLayerContent::Image {
+            content_version, ..
+        } = &mut reused.content
+        {
+            *content_version = 2;
+        }
+        let second = composition.synchronize(extent, vec![reused]).unwrap();
+        assert_eq!(
+            first.surface_revisions,
+            vec![(9, 1)],
+            "queued frames must retain their own revision"
+        );
+        assert_eq!(second.surface_revisions, vec![(9, 2)]);
+        assert!(
+            second
+                .updates
+                .iter()
+                .flat_map(|update| &update.deltas)
+                .all(|delta| delta.image_resources.is_empty())
+        );
+    }
+
     fn image_layer(position: PointI, update: DesktopImageUpdate) -> DesktopLayer {
         image_layer_at(
             RectI {
@@ -748,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn committed_image_can_be_scaled_to_a_live_resize_target_without_content_update() {
+    fn explicit_placement_scaling_does_not_require_a_content_update() {
         let extent = SizeI {
             width: 800,
             height: 600,

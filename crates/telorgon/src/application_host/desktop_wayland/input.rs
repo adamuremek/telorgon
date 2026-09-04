@@ -156,8 +156,8 @@ pub(super) fn focus_toplevel(
         if let Some(window) = windows.get(&previous) {
             configure_scheduler.schedule_state(
                 previous,
-                window.requested_size,
-                window.resize_anchor.is_some() && window.resize_final.is_none(),
+                window.configure_size(),
+                window.resizing(),
             );
         }
     }
@@ -172,11 +172,7 @@ pub(super) fn focus_toplevel(
             .is_some_and(|surface| surface.snapshot().role == Some(SurfaceRole::XdgToplevel))
     {
         if let Some(window) = windows.get(&surface) {
-            configure_scheduler.schedule_state(
-                surface,
-                window.requested_size,
-                window.resize_anchor.is_some() && window.resize_final.is_none(),
-            );
+            configure_scheduler.schedule_state(surface, window.configure_size(), window.resizing());
         }
     }
     Ok(())
@@ -213,6 +209,22 @@ pub(super) fn hit_test_decoration(
         let Some(window) = windows.get(surface) else {
             continue;
         };
+        if window.role == SurfaceRole::XdgToplevel && !window.minimized {
+            let content = window_content_rect(window, window.position, config);
+            if position.x >= content.x as f32
+                && position.x < content.right() as f32
+                && position.y >= content.y as f32
+                && position.y < content.bottom() as f32
+            {
+                // A veil is compositor content, not a hit target for a lower window's controls.
+                if window.resize_anchor.is_some() {
+                    return Some((*surface, DecorationHit::Frame));
+                }
+                if !window_is_decorated(window) {
+                    return None;
+                }
+            }
+        }
         if window.role != SurfaceRole::XdgToplevel
             || window.minimized
             || !window_is_decorated(window)
@@ -236,7 +248,7 @@ pub(super) fn hit_test_decoration(
             };
             let role = chrome.hit_test(point.x, point.y);
             if role.is_none() && chrome.content.bounds.contains(point) {
-                continue;
+                return None;
             }
             let hit = match role {
                 Some(crate::WindowChromeRole::DragRegion)
@@ -313,6 +325,7 @@ pub(super) fn hit_test_decoration(
             }
             return Some((*surface, DecorationHit::Titlebar));
         }
+        return None;
     }
     None
 }
@@ -436,6 +449,9 @@ pub(super) fn hit_test_surface(
         .iter()
         .rev()
         .filter_map(|surface| windows.get(surface).map(|window| (*surface, window)))
+        .filter(|(surface, _)| {
+            resize_veil_owner(windows, *surface).is_none_or(|owner| owner == *surface)
+        })
         .find(|(_, window)| {
             let target = window_content_rect(window, window.position, config);
             window.role != SurfaceRole::Cursor
@@ -445,6 +461,12 @@ pub(super) fn hit_test_surface(
                 && position.y >= target.y as f32
                 && position.x < target.right() as f32
                 && position.y < target.bottom() as f32
+        })
+        // The first window owns its whole live slot, including resize padding. Do not send
+        // out-of-buffer coordinates to it or let padding click through to a lower window.
+        .filter(|(surface, window)| {
+            resize_veil_owner(windows, *surface).is_none()
+                && surface_placement(window, window.position, config).contains(position)
         })
         .map(|(surface, _)| surface)
 }

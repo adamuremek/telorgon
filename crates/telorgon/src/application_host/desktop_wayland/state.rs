@@ -1,21 +1,21 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::compositor_wayland::{ResizeEdge, WaylandSurfaceId, XdgConfigure};
-use crate::core::{PointI, SizeI};
+use crate::core::{PointF, PointI, RectI, SizeI};
 
-/// Removes the next deferred SHM surface that does not already have a copy in flight.
+/// Removes the next deferred SHM surface that has neither an in-flight copy nor a resize pause.
 ///
 /// A submitted surface remains in the queue so its latest deferred revision can be retried after
 /// that surface's completion is observed. The bounded pass prevents an all-blocked queue from
 /// spinning while still allowing unrelated surfaces behind a blocked entry to make progress.
 pub(super) fn take_ready_deferred_shm_surface(
     deferred: &mut VecDeque<WaylandSurfaceId>,
-    submitted: &BTreeSet<WaylandSurfaceId>,
+    blocked: &BTreeSet<WaylandSurfaceId>,
 ) -> Option<WaylandSurfaceId> {
     let candidate_count = deferred.len();
     for _ in 0..candidate_count {
         let surface = deferred.pop_front()?;
-        if submitted.contains(&surface) {
+        if blocked.contains(&surface) {
             deferred.push_back(surface);
         } else {
             return Some(surface);
@@ -169,9 +169,295 @@ fn resizes_top(edge: ResizeEdge) -> bool {
     )
 }
 
+/// Native surface-coordinate placement, shared by painting and input. Buffer scale, transform,
+/// and viewport conversion have already been applied to `source_extent` before this boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct SurfacePlacement {
+    pub target: RectI,
+    pub clip: Option<RectI>,
+}
+
+impl SurfacePlacement {
+    pub fn native(source_extent: SizeI, origin: PointI) -> Self {
+        Self {
+            target: RectI {
+                x: origin.x,
+                y: origin.y,
+                width: source_extent.width,
+                height: source_extent.height,
+            },
+            clip: None,
+        }
+    }
+
+    pub fn toplevel(
+        source_extent: SizeI,
+        window_geometry: RectI,
+        content_slot: RectI,
+        resize_anchor: Option<ResizeAnchor>,
+    ) -> Self {
+        // Keep the committed content against the stationary edge while the live frame follows
+        // the pointer. A new buffer changes the native extent, never a texture scale factor.
+        let committed = RectI {
+            x: content_slot.x.saturating_add(
+                if resize_anchor.is_some_and(|anchor| resizes_left(anchor.edge)) {
+                    content_slot.width.saturating_sub(window_geometry.width)
+                } else {
+                    0
+                },
+            ),
+            y: content_slot.y.saturating_add(
+                if resize_anchor.is_some_and(|anchor| resizes_top(anchor.edge)) {
+                    content_slot.height.saturating_sub(window_geometry.height)
+                } else {
+                    0
+                },
+            ),
+            width: window_geometry.width,
+            height: window_geometry.height,
+        };
+        let mut placement = Self::native(
+            source_extent,
+            PointI {
+                x: committed.x.saturating_sub(window_geometry.x),
+                y: committed.y.saturating_sub(window_geometry.y),
+            },
+        );
+        // Intersect both geometries: growing must not expose the old buffer's shadow margins,
+        // and shrinking must not let old content cover the compositor's frame or neighbours.
+        placement.clip = Some(intersection(committed, content_slot).unwrap_or(RectI {
+            x: content_slot.x,
+            y: content_slot.y,
+            width: 0,
+            height: 0,
+        }));
+        placement
+    }
+
+    pub fn visible_rect(self) -> Option<RectI> {
+        self.clip
+            .map_or(Some(self.target), |clip| intersection(self.target, clip))
+    }
+
+    pub fn contains(self, position: PointF) -> bool {
+        self.visible_rect().is_some_and(|rect| {
+            position.x >= rect.x as f32
+                && position.y >= rect.y as f32
+                && position.x < rect.right() as f32
+                && position.y < rect.bottom() as f32
+        })
+    }
+
+    pub fn surface_local(self, position: PointF) -> PointF {
+        PointF {
+            x: position.x - self.target.x as f32,
+            y: position.y - self.target.y as f32,
+        }
+    }
+
+    pub fn output_position(self, position: PointF) -> PointF {
+        PointF {
+            x: position.x + self.target.x as f32,
+            y: position.y + self.target.y as f32,
+        }
+    }
+}
+
+fn intersection(left: RectI, right: RectI) -> Option<RectI> {
+    let x = left.x.max(right.x);
+    let y = left.y.max(right.y);
+    let right_edge = left.right().min(right.right());
+    let bottom = left.bottom().min(right.bottom());
+    (right_edge > x && bottom > y).then_some(RectI {
+        x,
+        y,
+        width: right_edge.saturating_sub(x),
+        height: bottom.saturating_sub(y),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_content_does_not_stretch_or_expose_shadow_margins() {
+        let placement = SurfacePlacement::toplevel(
+            SizeI {
+                width: 816,
+                height: 620,
+            },
+            RectI {
+                x: 8,
+                y: 10,
+                width: 800,
+                height: 600,
+            },
+            RectI {
+                x: 120,
+                y: 80,
+                width: 1000,
+                height: 450,
+            },
+            None,
+        );
+        assert_eq!(
+            placement.target,
+            RectI {
+                x: 112,
+                y: 70,
+                width: 816,
+                height: 620
+            }
+        );
+        assert_eq!(
+            placement.clip,
+            Some(RectI {
+                x: 120,
+                y: 80,
+                width: 800,
+                height: 450
+            })
+        );
+        let output = PointF { x: 620.0, y: 305.0 };
+        assert_eq!(
+            placement.surface_local(output),
+            PointF { x: 508.0, y: 235.0 }
+        );
+        assert_eq!(
+            placement.output_position(placement.surface_local(output)),
+            output
+        );
+        assert!(placement.contains(output));
+        assert!(!placement.contains(PointF { x: 950.0, y: 200.0 })); // grow padding
+        assert!(!placement.contains(PointF { x: 620.0, y: 530.0 })); // cropped content
+        assert!(!placement.contains(PointF { x: 116.0, y: 100.0 })); // shadow margin
+    }
+
+    #[test]
+    fn native_content_keeps_the_opposite_edge_for_all_eight_resize_directions() {
+        let start = PointI { x: 100, y: 80 };
+        let original = SizeI {
+            width: 800,
+            height: 600,
+        };
+        for (edge, left, top) in [
+            (ResizeEdge::Top, false, true),
+            (ResizeEdge::TopRight, false, true),
+            (ResizeEdge::Right, false, false),
+            (ResizeEdge::BottomRight, false, false),
+            (ResizeEdge::Bottom, false, false),
+            (ResizeEdge::BottomLeft, true, false),
+            (ResizeEdge::Left, true, false),
+            (ResizeEdge::TopLeft, true, true),
+        ] {
+            let anchor = ResizeAnchor::new(start, original, edge);
+            for requested in [
+                SizeI {
+                    width: 940,
+                    height: 710,
+                },
+                SizeI {
+                    width: 650,
+                    height: 490,
+                },
+            ] {
+                let position = anchor.reconcile_position(start, requested);
+                let slot = RectI {
+                    x: position.x + 4,
+                    y: position.y + 36,
+                    width: requested.width,
+                    height: requested.height,
+                };
+                for committed in [
+                    original,
+                    SizeI {
+                        width: 832,
+                        height: 624,
+                    },
+                ] {
+                    let geometry = RectI {
+                        x: 8,
+                        y: 10,
+                        width: committed.width,
+                        height: committed.height,
+                    };
+                    let source = SizeI {
+                        width: committed.width + 16,
+                        height: committed.height + 20,
+                    };
+                    let placement =
+                        SurfacePlacement::toplevel(source, geometry, slot, Some(anchor));
+                    assert_eq!(
+                        (placement.target.width, placement.target.height),
+                        (source.width, source.height)
+                    );
+                    let x = placement.target.x + geometry.x;
+                    let y = placement.target.y + geometry.y;
+                    assert_eq!(
+                        if left { x + committed.width } else { x },
+                        if left { 904 } else { 104 },
+                        "{edge:?}"
+                    );
+                    assert_eq!(
+                        if top { y + committed.height } else { y },
+                        if top { 716 } else { 116 },
+                        "{edge:?}"
+                    );
+                    let final_position = anchor.reconcile_position(position, committed);
+                    let final_slot = RectI {
+                        x: final_position.x + 4,
+                        y: final_position.y + 36,
+                        width: committed.width,
+                        height: committed.height,
+                    };
+                    let final_placement =
+                        SurfacePlacement::toplevel(source, geometry, final_slot, None);
+                    assert_eq!(
+                        placement.target, final_placement.target,
+                        "final acknowledgement must not jump {edge:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn native_non_toplevel_placement_preserves_its_input_space() {
+        let placement = SurfacePlacement::native(
+            SizeI {
+                width: 40,
+                height: 30,
+            },
+            PointI { x: -10, y: 20 },
+        );
+        assert_eq!(placement.clip, None);
+        assert_eq!(placement.visible_rect(), Some(placement.target));
+        assert_eq!(
+            placement.surface_local(PointF { x: 4.5, y: 30.0 }),
+            PointF { x: 14.5, y: 10.0 }
+        );
+    }
+
+    #[test]
+    fn a_paused_copy_does_not_block_other_surfaces_and_resumes_on_release() {
+        let mut deferred = VecDeque::from([surface(), other_surface()]);
+        let paused = BTreeSet::from([surface()]);
+        assert_eq!(
+            take_ready_deferred_shm_surface(&mut deferred, &paused),
+            Some(other_surface())
+        );
+        assert_eq!(
+            take_ready_deferred_shm_surface(&mut deferred, &paused),
+            None
+        );
+        assert_eq!(deferred, VecDeque::from([surface()]));
+        assert_eq!(
+            take_ready_deferred_shm_surface(&mut deferred, &BTreeSet::new()),
+            Some(surface())
+        );
+        assert!(deferred.is_empty());
+    }
 
     fn surface() -> WaylandSurfaceId {
         WaylandSurfaceId::from_raw(7).unwrap()

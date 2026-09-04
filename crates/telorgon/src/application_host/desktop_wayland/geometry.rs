@@ -70,14 +70,6 @@ pub(super) fn resize_drag_geometry(
     (position, size)
 }
 
-pub(super) fn window_content_origin(window: &ClientWindow, config: &LinuxDesktopConfig) -> PointI {
-    let target = surface_target_rect(window, window.position, config);
-    PointI {
-        x: target.x,
-        y: target.y,
-    }
-}
-
 pub(super) fn window_content_offset(window: &ClientWindow, config: &LinuxDesktopConfig) -> PointI {
     if !window_is_decorated(window) {
         PointI::default()
@@ -143,85 +135,28 @@ pub(super) fn surface_local_position(
     let Some(window) = windows.get(&surface) else {
         return position;
     };
-    target_to_surface_local(
-        position,
-        window_content_origin(window, config),
-        window.size,
-        window_content_target_extent(window),
-    )
+    surface_placement(window, window.position, config).surface_local(position)
 }
 
-pub(super) fn window_content_target_extent(window: &ClientWindow) -> SizeI {
-    let target = surface_target_rect_at_origin(window);
-    SizeI {
-        width: target.width,
-        height: target.height,
-    }
-}
-
-pub(super) fn surface_target_rect(
+pub(super) fn surface_placement(
     window: &ClientWindow,
     position: PointI,
     config: &LinuxDesktopConfig,
-) -> RectI {
+) -> SurfacePlacement {
+    if window.role == SurfaceRole::XdgToplevel {
+        return SurfacePlacement::toplevel(
+            window.size,
+            window.window_geometry,
+            window_content_rect(window, position, config),
+            window.resize_anchor,
+        );
+    }
     let offset = window_content_offset(window, config);
     let origin = PointI {
         x: position.x.saturating_add(offset.x),
         y: position.y.saturating_add(offset.y),
     };
-    let mut target = surface_target_rect_at_origin(window);
-    target.x = target.x.saturating_add(origin.x);
-    target.y = target.y.saturating_add(origin.y);
-    target
-}
-
-fn surface_target_rect_at_origin(window: &ClientWindow) -> RectI {
-    if window.role != SurfaceRole::XdgToplevel {
-        return RectI {
-            x: 0,
-            y: 0,
-            width: window.size.width,
-            height: window.size.height,
-        };
-    }
-    let scale_x = window.requested_size.width as f64 / window.window_geometry.width.max(1) as f64;
-    let scale_y = window.requested_size.height as f64 / window.window_geometry.height.max(1) as f64;
-    let left = -(window.window_geometry.x as f64 * scale_x).round() as i32;
-    let top = -(window.window_geometry.y as f64 * scale_y).round() as i32;
-    let right = (window.size.width.saturating_sub(window.window_geometry.x) as f64 * scale_x)
-        .round() as i32;
-    let bottom = (window.size.height.saturating_sub(window.window_geometry.y) as f64 * scale_y)
-        .round() as i32;
-    RectI {
-        x: left,
-        y: top,
-        width: right.saturating_sub(left).max(1),
-        height: bottom.saturating_sub(top).max(1),
-    }
-}
-
-fn target_to_surface_local(
-    position: PointF,
-    origin: PointI,
-    source: SizeI,
-    target: SizeI,
-) -> PointF {
-    PointF {
-        x: (position.x - origin.x as f32) * source.width as f32 / target.width.max(1) as f32,
-        y: (position.y - origin.y as f32) * source.height as f32 / target.height.max(1) as f32,
-    }
-}
-
-fn surface_local_to_target(
-    position: PointF,
-    origin: PointI,
-    source: SizeI,
-    target: SizeI,
-) -> PointF {
-    PointF {
-        x: origin.x as f32 + position.x * target.width as f32 / source.width.max(1) as f32,
-        y: origin.y as f32 + position.y * target.height as f32 / source.height.max(1) as f32,
-    }
+    SurfacePlacement::native(window.size, origin)
 }
 
 pub(super) fn constrain_pointer(
@@ -234,14 +169,16 @@ pub(super) fn constrain_pointer(
     let Some(window) = windows.get(&constraint.surface) else {
         return current;
     };
-    let origin = window_content_origin(window, config);
-    let target = window_content_target_extent(window);
-    let local = target_to_surface_local(proposed, origin, window.size, target);
+    let placement = surface_placement(window, window.position, config);
+    let local = placement.surface_local(proposed);
+    let Some(visible) = placement.visible_rect() else {
+        return current;
+    };
     let surface = RectI {
-        x: 0,
-        y: 0,
-        width: window.size.width,
-        height: window.size.height,
+        x: visible.x.saturating_sub(placement.target.x),
+        y: visible.y.saturating_sub(placement.target.y),
+        width: visible.width,
+        height: visible.height,
     };
     let regions = constraint.region.as_ref().map_or_else(
         || vec![surface],
@@ -271,7 +208,7 @@ pub(super) fn constrain_pointer(
     else {
         return current;
     };
-    surface_local_to_target(nearest, origin, window.size, target)
+    placement.output_position(nearest)
 }
 
 pub(super) fn intersect_rect(left: RectI, right: RectI) -> Option<RectI> {
@@ -429,27 +366,6 @@ pub(super) fn widget_position(output: SizeI, widget: SizeI, anchor: ShellWidgetA
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn live_resize_pointer_coordinates_follow_the_scaled_surface() {
-        let source = SizeI {
-            width: 800,
-            height: 600,
-        };
-        let target = SizeI {
-            width: 1000,
-            height: 450,
-        };
-        let origin = PointI { x: 120, y: 80 };
-        let output = PointF { x: 620.0, y: 305.0 };
-        let local = target_to_surface_local(output, origin, source, target);
-
-        assert_eq!(local, PointF { x: 400.0, y: 300.0 });
-        assert_eq!(
-            surface_local_to_target(local, origin, source, target),
-            output
-        );
-    }
 
     #[test]
     fn compositor_content_clip_is_independent_of_client_buffer_margins() {

@@ -12,7 +12,9 @@ use crate::wayland_server::{
     ClientRef, Display, Global, IncomingRequest, NativeProtocol, ProtocolCatalog, ResourceRef,
 };
 
-use crate::compositor_wayland::synchronization::take_surface_commits_through;
+use crate::compositor_wayland::synchronization::{
+    take_surface_commits_through, take_surface_feedbacks_through,
+};
 use crate::compositor_wayland::{
     BufferAttachment, BufferDescriptor, BufferTransform, ClientId, ClientLimits, CompositorAction,
     CompositorCore, ObjectMetadata, ProtocolObjectId, ProtocolObjectKind, Region, ShmBuffer,
@@ -1053,9 +1055,37 @@ impl<'display> NativeCompositor<'display> {
         through_revision: u64,
         time_milliseconds: u32,
     ) -> Result<(), NativeCompositorError> {
-        let identities =
-            self.state
-                .surface_presented(surface, through_revision, time_milliseconds)?;
+        let identities = self.state.surface_frame_completed(
+            surface,
+            through_revision,
+            time_milliseconds,
+            true,
+        )?;
+        for identity in identities {
+            if let Some(resource) =
+                unsafe { ResourceRef::from_raw(identity as *mut ffi::wl_resource) }
+            {
+                unsafe { resource.destroy() };
+            }
+        }
+        Ok(())
+    }
+
+    /// Lets an occluded client draw again without claiming its hidden content was presented.
+    /// Frame callbacks are pacing hints; presentation feedback stays pending until a displayed
+    /// frame either consumes or supersedes it, so older in-flight frames can still report truthfully.
+    pub(crate) fn surface_occluded_frame_ready(
+        &mut self,
+        surface: WaylandSurfaceId,
+        through_revision: u64,
+        time_milliseconds: u32,
+    ) -> Result<(), NativeCompositorError> {
+        let identities = self.state.surface_frame_completed(
+            surface,
+            through_revision,
+            time_milliseconds,
+            false,
+        )?;
         for identity in identities {
             if let Some(resource) =
                 unsafe { ResourceRef::from_raw(identity as *mut ffi::wl_resource) }
@@ -1417,11 +1447,12 @@ impl NativeState {
         Ok(Some(identity))
     }
 
-    fn surface_presented(
+    fn surface_frame_completed(
         &mut self,
         surface: WaylandSurfaceId,
         through_revision: u64,
         time_milliseconds: u32,
+        presented: bool,
     ) -> Result<Vec<usize>, NativeCompositorError> {
         let current_revision = self
             .core
@@ -1437,19 +1468,17 @@ impl NativeState {
         }
         let callback_commits =
             take_surface_commits_through(&mut self.committed_callbacks, surface, through_revision);
-        let feedback_commits = take_surface_commits_through(
+        let (presented_feedbacks, discarded_feedbacks) = take_surface_feedbacks_through(
             &mut self.committed_presentation_feedbacks,
             surface,
             through_revision,
+            presented,
         );
         let callback_count = callback_commits
             .iter()
             .map(|(_, callbacks)| callbacks.len())
             .sum::<usize>();
-        let feedback_count = feedback_commits
-            .iter()
-            .map(|(_, feedbacks)| feedbacks.len())
-            .sum::<usize>();
+        let feedback_count = presented_feedbacks.len() + discarded_feedbacks.len();
         let mut identities = Vec::with_capacity(callback_count + feedback_count);
         for object in callback_commits
             .into_iter()
@@ -1473,24 +1502,17 @@ impl NativeState {
             )?;
             identities.push(identity);
         }
-        let mut presented_feedbacks = Vec::new();
-        for (revision, feedbacks) in feedback_commits {
-            if revision == through_revision {
-                presented_feedbacks.extend(feedbacks);
+        for object in discarded_feedbacks {
+            let Some(identity) = self.resources.get(&object).copied() else {
                 continue;
-            }
-            for object in feedbacks {
-                let Some(identity) = self.resources.get(&object).copied() else {
-                    continue;
-                };
-                let Some(resource) =
-                    (unsafe { ResourceRef::from_raw(identity as *mut ffi::wl_resource) })
-                else {
-                    continue;
-                };
-                self.post_event(resource, "wp_presentation_feedback", "discarded", &mut [])?;
-                identities.push(identity);
-            }
+            };
+            let Some(resource) =
+                (unsafe { ResourceRef::from_raw(identity as *mut ffi::wl_resource) })
+            else {
+                continue;
+            };
+            self.post_event(resource, "wp_presentation_feedback", "discarded", &mut [])?;
+            identities.push(identity);
         }
         if !presented_feedbacks.is_empty() {
             let timestamp = monotonic_timestamp()?;

@@ -46,7 +46,8 @@ impl WindowInteraction {
         // A new pointer grab supersedes an older final configure even if that client has not
         // committed a matching buffer yet. A delayed client must never wedge future resizes.
         window.resize_final = None;
-        configure_scheduler.schedule_resize(surface, window.requested_size);
+        // Announce the grab without asking the client to redraw at every intermediate size.
+        configure_scheduler.schedule_resize(surface, window.configure_size());
         Some(Self::Resize {
             surface,
             edge,
@@ -59,7 +60,6 @@ impl WindowInteraction {
 
 pub(super) fn apply_window_interaction(
     windows: &mut BTreeMap<WaylandSurfaceId, ClientWindow>,
-    configure_scheduler: &mut ConfigureScheduler,
     interaction: WindowInteraction,
     pointer_position: PointF,
     output: SizeI,
@@ -98,10 +98,7 @@ pub(super) fn apply_window_interaction(
                 return Ok(());
             };
             window.position = position;
-            if size != window.requested_size {
-                window.requested_size = size;
-                configure_scheduler.schedule_resize(surface, size);
-            }
+            window.requested_size = size;
         }
     }
     Ok(())
