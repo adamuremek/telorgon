@@ -5,15 +5,28 @@ performance qualification remains user-run. This replaces the earlier stretched 
 
 ## Behavior and configuration
 
-Interactive resize shows an opaque dark slate content veil (`#262a30`) while the composed server frame
+By default, interactive resize shows an opaque dark slate content veil (`#262a30`) while the composed server frame
 and veil follow the pointer. This is a solid fill, not a blur or a scaled screenshot. The client image,
 including client-drawn decoration, popups, and subsurfaces, is hidden until the final redraw is ready.
 Server-drawn title text and controls remain ordinary composed chrome. The first version switches
 directly; it does not add a fade, blur pass, readback, image resampling, or intermediate render target.
 
-Set `LinuxDesktopConfig::resize_preview_color` to an opaque `ColorRgba8` and pass the configuration via
-the desktop declaration's `.linux(config)` method. Non-opaque colors fail configuration validation,
-because transparency would expose the old content or unpainted bands this policy is intended to hide.
+Set `LinuxDesktopConfig::resize_preview_color` to a `ColorRgba8` and pass the configuration via
+the desktop declaration's `.linux(config)` method. All alpha values are supported. Easy frames can
+override it with `WindowChromeDesign::resize_preview_color: Some(color)`; `None` inherits the host
+setting. `content_background` independently configures normal backing beneath the app. Set that
+backing's alpha to zero to let app-supplied transparency reveal lower desktop layers; opaque app
+pixels and XRGB buffers remain opaque. See the [easy-frame example](CUSTOM_WINDOWS_ASSETS_AND_POINTERS.md).
+
+The compositor cuts frame decoration out of the client rectangle with four non-overlapping clipped
+placements sharing one retained scene. Easy frames paint their content backing separately in normal
+use; custom templates can opt in through `WindowFrameTemplate::content_style`. During resize neither
+the backing nor any client pixels draw beneath the preview, even for custom templates. Thus a
+translucent preview reveals the desktop/lower windows, and alpha zero gives a frame-only resize.
+Input routing is unchanged. Rounded content backing is preserved; this does not add rounded client
+image clipping. Color scenes have per-window identity and native-sized analytic geometry for both
+backends. Resizing changes a box delta and placement, never client pixels or a CPU image allocation;
+translation-only movement reuses the scene. No new shaders, extensions, or offscreen passes are used.
 
 On press, the compositor sends the resizing state with the client's committed window extent. Motion
 only changes desired geometry; it does not issue intermediate size requests. Release sends the final
@@ -89,20 +102,53 @@ live clipping/padding exposes dead space; continuous configure/copy loops pay fo
 sizes; synchronous waiting blocks unrelated clients; CPU blur/readback diverges between SHM and
 GPU-backed content; early buffer release permits mutation during the delayed read.
 
+## RGBA and content-backing reference audit
+
+Read-only comparisons for the transparency follow-up:
+
+- egui `fd54387eac03f57ca772a8fb590ceaadf780f31c`,
+  `egui/crates/egui-wgpu/src/renderer.rs`: premultiplied source-over blending retains destination
+  contribution when source alpha is below one.
+- Flutter `51fd9afadf309ba5337320bd3653f5345c156cb9`,
+  `flutter/engine/src/flutter/impeller/entity/contents/solid_color_contents.cc`: color/opacity,
+  premultiplication, geometry coverage, and opaque classification remain separate concerns.
+
+Official checks: [Vulkan blend factors](https://docs.vulkan.org/spec/latest/chapters/framebuffer.html#framebuffer-blending)
+and [half-open scissor coverage](https://docs.vulkan.org/spec/latest/chapters/fragops.html#fragops-scissor);
+the [core Wayland SHM format contract](https://wayland.freedesktop.org/docs/html/apa.html) distinguishes
+ARGB from XRGB and specifies premultiplied alpha. No client-format or blend-equation changes are made.
+
+Invariants: an alpha-zero preview cannot reveal the hidden client; frame root fill/shadow cannot
+obscure transparent content; each frame pixel blends at most once; shared frame resources receive
+deltas once; every color scene keeps an independent window identity; empty cuts retain scene ownership;
+native-sized analytic geometry works without image scaling in either renderer. Rejected alternatives:
+changing only the color leaves an opaque backing; fading the whole window also fades controls;
+overlapping border strips double-blend corners; a vendor-exclusive scissor or shader hole would add
+unnecessary GPU requirements; changing image formats or forcing XRGB transparent would violate client
+semantics. The software compositor's existing native-extent contract also rules out a scaled 1x1
+solid scene. Reference sources were neither modified nor copied.
+
 ## Verification and manual qualification
 
 CPU tests cover native coordinate/clip mapping, shadow exclusion, all eight anchored edges and
-cell-snapped final sizes, paused mailbox fairness/resume, placement-only solid previews, hidden image
-retention, one final image publication, monotonic solid-scene epochs, opaque-color validation, final
+cell-snapped final sizes, paused mailbox fairness/resume, image-free solid previews, hidden image
+retention, one final image publication, monotonic solid-scene epochs, full-range RGBA validation, final
 configure serial/ack supersession, and hidden versus visible feedback with future revisions retained.
 Source-boundary tests include the new geometry/state policy; Linux test compilation checks native
 owner integration. No compositor, GUI, server, or GPU-presenting test is run by the agent.
 
-Verification for this change:
+The transparency follow-up adds CPU framebuffer tests for alpha 0/128/255, hidden client/backing
+exclusion, premultiplied/straight/opaque client modes, non-overlapping translucent frame strips,
+rounded-to-square backing transitions, and resized coverage repaint. Neutral tests cover partially
+offscreen/full-frame cutouts, retained ownership, independent preview colors, and easy/template API
+inheritance. Software composite tests also run on non-Linux development hosts without opening a device.
 
-- `cargo test -p telorgon --lib --quiet`: 916 passed.
+Verification for the current implementation, including the RGBA follow-up:
+
+- `cargo test -p telorgon --lib --quiet`: 924 passed.
 - `cargo test -p telorgon --lib desktop_wayland --features embedded-vulkan,profiler --quiet`:
-  25 passed.
+  31 passed.
+- `cargo test -p telorgon --test window_frame_api --quiet`: 4 passed.
 - `cargo check -p telorgon --tests --target aarch64-unknown-linux-gnu --no-default-features
   --features desktop-wayland-linux,embedded-vulkan,profiler`: passed.
 - `cargo build -p telorgon --lib --release --target aarch64-unknown-linux-gnu --no-default-features
@@ -113,7 +159,9 @@ Verification for this change:
 User-run checks: resize a terminal aggressively from all eight edges; hold still during a drag and
 release; repeat before the previous redraw finishes; try a slow client, no-motion click/release,
 client-side decorations, popups/subsurfaces, partial-damage SHM animation, and a DMA-BUF client.
-Check that chrome remains usable, the veil covers all content, the final content is sharp, and no
-stale patches or background gaps appear. Compare actual SHM-copy counters during a held drag and
+Check that chrome remains usable, the default veil covers all content, the final content is sharp,
+and no stale patches or unintended background gaps appear. For RGBA, try 0/128/255 preview alpha,
+overlapping windows, an alpha-capable SHM/GPU client, and an opaque client; verify lower layers move
+behind transparency while stale client pixels never appear during resize. Compare actual SHM-copy counters during a held drag and
 after release. Repeat with the software backend and the target Raspberry Pi/Mesa, AMD, Intel, and
 NVIDIA hardware as available; build success alone does not qualify that matrix.

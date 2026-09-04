@@ -1,10 +1,26 @@
 //! Protocol-neutral window metadata, chrome roles, actions, and layout-derived hit regions.
 
 use crate::assets::Icon;
-use crate::core::{EdgeInsets, RectF};
+use crate::core::{ColorRgba8, EdgeInsets, RectF};
 use crate::layout::LayoutEngine;
 use crate::render::ImageId;
 use crate::ui::{MountedUi, UiNodeId};
+
+/// Separate backing for an externally supplied client surface in a compositor-owned frame.
+///
+/// The host cuts the frame decoration out of the content slot, then paints this backing once
+/// beneath the client. During resize it replaces both with the preview, so preview transparency
+/// reveals lower desktop layers, never the stale client or this backing. Input regions are
+/// unaffected. The corner radius shapes the backing, not the client's pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WindowContentStyle {
+    /// Straight RGBA color beneath the client; alpha zero removes the content backing.
+    pub background: ColorRgba8,
+    /// Finite, nonnegative radius of the backing in logical pixels.
+    pub corner_radius: f32,
+    /// `None` inherits the host's resize-preview color.
+    pub resize_preview_color: Option<ColorRgba8>,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct WindowEdgeMask(u8);

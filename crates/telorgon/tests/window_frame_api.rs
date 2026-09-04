@@ -160,6 +160,7 @@ const TEST_CHROME: WindowChromeDesign = WindowChromeDesign {
         gap: 6.0,
     },
     content_background: ColorRgba8::rgba(15, 18, 26, 255),
+    resize_preview_color: None,
 };
 
 const PIN_WINDOW: ShellActionId = ShellActionId::named("window.pin");

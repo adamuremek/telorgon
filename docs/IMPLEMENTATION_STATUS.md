@@ -80,7 +80,7 @@ production-qualified.
 > and renderer updates. Full SHM reads/conversions use a single bounded FIFO worker with owner-thread
 > completion and buffer release; independent retained/scene snapshots are prepared there so the
 > completion path performs no whole-image copy on the input owner. Full-copy work is latest-wins per
-> surface rather than an accumulating commit FIFO. Interactive resize uses an opaque solid-color
+> surface rather than an accumulating commit FIFO. Interactive resize uses a configurable RGBA solid-color
 > preview with pointer-driven frame geometry, a start-state configure, and a final-size configure on
 > release. New SHM copies for the veiled surface tree pause in a latest-wins mailbox during the drag;
 > committed/desired geometry stays separate, configure acknowledgement and window
@@ -88,7 +88,9 @@ production-qualified.
 > latest-wins image-copy replacement, window presentation feedback uses frame-owned revisions,
 > and client content returns at native size only after the final applying publication.
 > Post-release frame-callback hints permit redraw progress without claiming hidden content was shown;
-> actual presentation later discards superseded feedback.
+> actual presentation later discards superseded feedback. Easy-frame designs can override preview RGBA
+> and independently configure transparent content backing. Frame decoration is cut out beneath the
+> content slot so client alpha reveals lower layers; opaque client buffers remain opaque.
 > See [solid resize preview](WAYLAND_RESIZE_PREVIEW.md). Capability-gated Vulkan DMA-BUF commits are materialized into
 > retained compositor textures with acquire/release sync-FD handling and no CPU pixel copy. A protocol
 > acquire fence is preferred; otherwise the host exports the DMA-BUF reservation object's implicit

@@ -202,6 +202,14 @@ pub(super) fn refresh_window_frames(
         } else if let Some(icon) = fallback_icon.preferred(32) {
             model = model.app_icon(icon);
         }
+        let content_style = factory.content_style(&model);
+        if content_style
+            .is_some_and(|style| !style.corner_radius.is_finite() || style.corner_radius < 0.0)
+        {
+            return Err(AppError::new(
+                "window content radius must be finite and nonnegative",
+            ));
+        }
         let fallback_outer = legacy_window_outer(window, config);
         let previous_outer = frames
             .get(&surface)
@@ -221,6 +229,7 @@ pub(super) fn refresh_window_frames(
                     layer,
                     snapshot: None,
                     outer: previous_outer,
+                    content_style,
                     icon_image: None,
                 },
             );
@@ -250,6 +259,7 @@ pub(super) fn refresh_window_frames(
             frame.icon_image = icon_image_id;
         }
         frame.model = model;
+        frame.content_style = content_style;
         frame.layer.prepare(frame.outer, now, created)?;
         let mut snapshot =
             WindowChromeSnapshot::derive(frame.layer.runtime.ui(), frame.layer.runtime.layout())
@@ -318,6 +328,7 @@ pub(super) struct WindowFrameLayer {
     pub(super) layer: Layer,
     pub(super) snapshot: Option<WindowChromeSnapshot>,
     pub(super) outer: SizeI,
+    content_style: Option<crate::window_chrome::WindowContentStyle>,
     icon_image: Option<ImageId>,
 }
 
@@ -408,12 +419,15 @@ pub(super) fn prepare_desktop_layers(
         let outer = window
             .chrome_outer
             .unwrap_or_else(|| legacy_window_outer(window, config));
+        let content_rect = window_content_rect(window, position, config);
+        let content_style = window_is_decorated(window)
+            .then(|| frames.get(surface).and_then(|frame| frame.content_style))
+            .flatten();
         if window_is_decorated(window)
             && let Some(frame) = frames.get_mut(surface)
         {
-            layers.push(DesktopLayer::retained(
-                DesktopLayerKey::Frame(surface.get()),
-                DesktopSceneKey::Frame(surface.get()),
+            layers.extend(DesktopLayer::retained_frame(
+                surface.get(),
                 if visible {
                     frame.layer.take_deltas()
                 } else {
@@ -422,6 +436,19 @@ pub(super) fn prepare_desktop_layers(
                 frame.outer,
                 position,
                 visible,
+                (veiled || content_style.is_some()).then_some(content_rect),
+            ));
+        }
+        if visible
+            && !veiled
+            && let Some(style) = content_style
+        {
+            layers.push(DesktopLayer::rounded_solid(
+                DesktopLayerKey::ContentBackground(surface.get()),
+                DesktopSceneKey::ContentBackground(surface.get()),
+                style.background,
+                content_rect,
+                style.corner_radius,
             ));
         }
         if visible
@@ -460,13 +487,15 @@ pub(super) fn prepare_desktop_layers(
             }
         }
         // The live resize preview is a solid retained primitive. Keep the image scene and its
-        // pending pixels intact, but do not upload or draw them underneath the opaque veil.
+        // pending pixels intact, but do not upload or draw them underneath even a transparent veil.
         if visible && window.role == SurfaceRole::XdgToplevel && veiled {
             layers.push(DesktopLayer::solid(
                 DesktopLayerKey::ResizeVeil(surface.get()),
-                DesktopSceneKey::ResizeVeil,
-                config.resize_preview_color,
-                window_content_rect(window, position, config),
+                DesktopSceneKey::ResizeVeil(surface.get()),
+                content_style
+                    .and_then(|style| style.resize_preview_color)
+                    .unwrap_or(config.resize_preview_color),
+                content_rect,
             ));
         }
         let placement = surface_placement(window, position, config);

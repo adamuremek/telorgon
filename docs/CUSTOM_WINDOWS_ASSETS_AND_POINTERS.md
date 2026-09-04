@@ -316,6 +316,7 @@ const TEST_CHROME: WindowChromeDesign = WindowChromeDesign {
         gap: 6.0,
     },
     content_background: ColorRgba8::rgba(15, 18, 26, 255),
+    resize_preview_color: None, // Inherit LinuxDesktopConfig; Some(rgba(...)) overrides it.
 };
 
 #[component]
@@ -347,6 +348,37 @@ nonfinite or negative metrics early. At runtime the easy frame selects active/in
 normal/maximized/tiled/fullscreen geometry, client/fallback app icons, capability-filtered controls,
 maximize versus restore artwork, resizable tiled edges, and every declared control state. The state
 styles are code-local bindings, so no theme-catalog entry is required.
+
+The easy frame exposes independent normal-content and resize-preview RGBA colors:
+
+```rust
+let chrome = WindowChromeDesign {
+    // Allow transparent application pixels to reveal the desktop or lower windows.
+    content_background: ColorRgba8::rgba(0, 0, 0, 0),
+    // A translucent slate resize placeholder; 0 alpha gives a frame-only preview.
+    resize_preview_color: Some(ColorRgba8::rgba(38, 42, 48, 160)),
+    ..TEST_CHROME
+};
+let frame = easy_window_frame(chrome);
+```
+
+`resize_preview_color: None` inherits `LinuxDesktopConfig::resize_preview_color` (opaque slate
+by default); add this field to existing complete `WindowChromeDesign` literals when upgrading.
+All alpha values from 0 through 255 are accepted. The preview replaces the client surface tree and
+normal backing, so its alpha reveals lower desktop layers, not the old client image. Normal
+`content_background` alpha is independent: an opaque value intentionally fills transparent app
+pixels. The app must provide an alpha-capable buffer with transparent pixels; XRGB and fully opaque
+app content remain opaque. This does not make transparent pixels click-through or add blur/fades.
+
+For externally supplied Wayland content, the host excludes the entire composed frame from the
+content rectangle, including its root fill and shadow, and paints the content backing separately.
+The existing `content_radius` shapes that backing, not the client pixels. Managed GUI content-slot
+children are unchanged. Custom `WindowFrameTemplate` implementations can opt into the same
+separation by returning `Some(WindowContentStyle { background, corner_radius,
+resize_preview_color })` from `content_style(&WindowChromeModel)`. Its default `None` preserves
+their normal composed backing; during resize the host still excludes that backing from the preview.
+Undecorated/client-decorated windows use the Linux configuration's preview color.
+See [resize-preview behavior and verification](WAYLAND_RESIZE_PREVIEW.md).
 
 `Compositor::icon(name, component)` remains a separate semantic icon registry for compositor-wide
 artwork such as cursor or legacy fallback names. It is not where `EasyWindowFrame` receives its

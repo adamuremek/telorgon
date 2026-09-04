@@ -18,6 +18,9 @@ mod desktop_wayland_scene_tests;
 #[cfg(all(test, not(target_os = "linux")))]
 #[path = "desktop_wayland/state.rs"]
 mod desktop_wayland_state_tests;
+#[cfg(all(test, not(target_os = "linux")))]
+#[path = "desktop_wayland/transparency_tests.rs"]
+mod desktop_wayland_transparency_tests;
 mod error;
 #[cfg(feature = "application-software")]
 mod headless;

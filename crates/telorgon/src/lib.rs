@@ -144,7 +144,7 @@ pub use telorgon_macros::{asset_catalog, component};
 pub use window_chrome::{
     ShellActionId, WindowAction, WindowChromeCapabilities, WindowChromeError, WindowChromeHitSpec,
     WindowChromeModel, WindowChromeRegion, WindowChromeRole, WindowChromeSnapshot,
-    WindowChromeState, WindowEdgeMask, WindowResizeEdge, WindowTilingState,
+    WindowChromeState, WindowContentStyle, WindowEdgeMask, WindowResizeEdge, WindowTilingState,
 };
 
 /// Imports shared by Telorgon's high-level application facade.
@@ -168,9 +168,9 @@ mod authoring {
         Shadow, ShadowList, ShellActionId, Signal, SignalSnapshot, SignalWriter, SizeF, SizeI,
         SizeRule, SizeRule2D, StyleOverride, TextStyle, Transform2D, View, ViewError, WindowAction,
         WindowChromeCapabilities, WindowChromeHitSpec, WindowChromeModel, WindowChromeRole,
-        WindowChromeState, WindowEdgeMask, WindowResizeEdge, WindowTilingState, asset_catalog,
-        button, card, checkbox, column, component, easy_window_frame, hashed_key, image, row,
-        slider, spacer, stack, switch, text, window_content_slot, window_frame,
+        WindowChromeState, WindowContentStyle, WindowEdgeMask, WindowResizeEdge, WindowTilingState,
+        asset_catalog, button, card, checkbox, column, component, easy_window_frame, hashed_key,
+        image, row, slider, spacer, stack, switch, text, window_content_slot, window_frame,
     };
 }
 

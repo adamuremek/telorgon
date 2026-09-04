@@ -2,7 +2,7 @@
 
 mod renderer;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) use renderer::SoftwareCompositeLayer;
 pub use renderer::{
     SoftwareFrameContext, SoftwareReadback, SoftwareRenderer, SoftwareScene, SoftwareSurface,

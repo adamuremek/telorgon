@@ -16,7 +16,8 @@ use crate::ui::{
     StylePropertyPatch, StyleSlotId, ThemeDomainId,
 };
 use crate::window_chrome::{
-    WindowAction, WindowChromeModel, WindowChromeState, WindowEdgeMask, WindowResizeEdge,
+    WindowAction, WindowChromeModel, WindowChromeState, WindowContentStyle, WindowEdgeMask,
+    WindowResizeEdge,
 };
 
 use super::WindowChromeViewExt;
@@ -101,7 +102,12 @@ pub struct WindowChromeDesign {
     pub fullscreen: WindowChromeStateStyle,
     pub title_bar: WindowTitleBarStyle,
     pub controls: WindowControlsDesign,
+    /// Backing beneath the application's pixels. Set alpha to zero to let client transparency
+    /// reveal lower desktop layers. Opaque client buffers remain opaque.
     pub content_background: ColorRgba8,
+    /// Resize placeholder RGBA, independent of the normal content backing. `None` inherits
+    /// `LinuxDesktopConfig::resize_preview_color`; alpha zero gives a frame-only preview.
+    pub resize_preview_color: Option<ColorRgba8>,
 }
 
 impl WindowChromeDesign {
@@ -308,6 +314,14 @@ impl WindowFrameTemplate for EasyWindowFrame {
             model,
             design: self.design,
         }
+    }
+
+    fn content_style(&self, model: &WindowChromeModel) -> Option<WindowContentStyle> {
+        Some(WindowContentStyle {
+            background: self.design.content_background,
+            corner_radius: self.design.state(model.state).content_radius,
+            resize_preview_color: self.design.resize_preview_color,
+        })
     }
 }
 
@@ -835,11 +849,39 @@ mod tests {
             gap: 6.0,
         },
         content_background: ColorRgba8::rgba(10, 12, 18, 255),
+        resize_preview_color: None,
     };
 
     #[test]
     fn design_validation_accepts_finite_complete_chrome() {
         assert_eq!(DESIGN.validate(), Ok(DESIGN));
+    }
+
+    #[test]
+    fn content_style_preserves_alpha_preview_inheritance_and_state_radius() {
+        for alpha in [0, 128, 255] {
+            for preview in [None, Some(ColorRgba8::rgba(30, 40, 50, alpha))] {
+                let design = WindowChromeDesign {
+                    content_background: ColorRgba8::rgba(0, 0, 0, alpha),
+                    resize_preview_color: preview,
+                    ..DESIGN
+                };
+                assert_eq!(design.validate(), Ok(design));
+                for state in [
+                    WindowChromeState::Normal,
+                    WindowChromeState::Maximized,
+                    WindowChromeState::Tiled,
+                    WindowChromeState::Fullscreen,
+                ] {
+                    let style = easy_window_frame(design)
+                        .content_style(&WindowChromeModel::new(7, "Editor").state(state))
+                        .unwrap();
+                    assert_eq!(style.background, design.content_background);
+                    assert_eq!(style.resize_preview_color, preview);
+                    assert_eq!(style.corner_radius, design.state(state).content_radius);
+                }
+            }
+        }
     }
 
     #[test]

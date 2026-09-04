@@ -10,7 +10,7 @@ use crate::assets::{
 use crate::compose::{Component, ErasedComponent, RuntimeTarget};
 use crate::core::{ColorRgba8, SizeI};
 use crate::runtime::CompositionDriver;
-use crate::window_chrome::{ShellActionId, WindowChromeModel};
+use crate::window_chrome::{ShellActionId, WindowChromeModel, WindowContentStyle};
 
 use crate::application_host::{AppError, AppResult, WindowDecorationMode, WindowOptions};
 
@@ -34,9 +34,10 @@ pub struct LinuxDesktopConfig {
     pub output_scale: i32,
     pub window_border: i32,
     pub titlebar_height: i32,
-    /// Opaque content veil during interactive resize and while awaiting the final client image.
+    /// Fallback content veil during interactive resize and while awaiting the final client image.
     /// Only the preview geometry changes during the drag; the client receives its final size on
-    /// release. Alpha must be 255 so stale content and resize gaps cannot show through.
+    /// release. Alpha reveals lower desktop layers, not stale client content. Frame templates
+    /// can override this through [`WindowFrameTemplate::content_style`].
     pub resize_preview_color: ColorRgba8,
     pub pointer_extent: SizeI,
 }
@@ -75,7 +76,6 @@ impl LinuxDesktopConfig {
             || self.output_scale <= 0
             || self.window_border < 0
             || self.titlebar_height < 0
-            || self.resize_preview_color.a != 255
             || self.pointer_extent.width <= 0
             || self.pointer_extent.height <= 0
         {
@@ -568,6 +568,13 @@ pub trait WindowFrameTemplate: 'static {
     type Component: Component;
 
     fn compose(&self, model: WindowChromeModel) -> Self::Component;
+
+    /// Opts into a separate client backing, allowing client alpha to reveal the desktop when
+    /// its background is transparent. `None` preserves a custom template's composed backing.
+    /// This only affects externally supplied compositor surfaces, not managed GUI children.
+    fn content_style(&self, _model: &WindowChromeModel) -> Option<WindowContentStyle> {
+        None
+    }
 }
 
 impl<F, C> WindowFrameTemplate for F
@@ -585,13 +592,19 @@ where
 /// Type-erased storage for one reusable [`WindowFrameTemplate`].
 ///
 /// The model is the only shell-owned input. Everything visual and interactive is authored with
-/// normal composition primitives plus the explicit frame/content/action roles.
+/// normal composition primitives plus the explicit frame/content/action roles. Templates may
+/// additionally describe the independent backing/preview for externally supplied client pixels.
 pub struct WindowFrameFactory {
     #[cfg_attr(
         not(all(feature = "desktop-wayland-linux", target_os = "linux")),
         allow(dead_code)
     )]
     compose: Box<dyn Fn(WindowChromeModel) -> Box<dyn ErasedComponent>>,
+    #[cfg_attr(
+        not(all(feature = "desktop-wayland-linux", target_os = "linux")),
+        allow(dead_code)
+    )]
+    content_style: Box<dyn Fn(&WindowChromeModel) -> Option<WindowContentStyle>>,
 }
 
 impl WindowFrameFactory {
@@ -599,9 +612,17 @@ impl WindowFrameFactory {
     where
         T: WindowFrameTemplate,
     {
+        let template = std::rc::Rc::new(template);
+        let style_template = std::rc::Rc::clone(&template);
         Self {
             compose: Box::new(move |model| Box::new(template.compose(model))),
+            content_style: Box::new(move |model| style_template.content_style(model)),
         }
+    }
+
+    #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
+    pub(crate) fn content_style(&self, model: &WindowChromeModel) -> Option<WindowContentStyle> {
+        (self.content_style)(model)
     }
 
     #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
@@ -1107,7 +1128,7 @@ mod tests {
     use crate::compose::{ComponentFields, View, text};
 
     #[test]
-    fn resize_preview_color_is_configurable_but_must_hide_stale_content() {
+    fn resize_preview_color_accepts_the_full_alpha_range() {
         let mut config = LinuxDesktopConfig::default();
         config.drm_device = std::env::current_dir().unwrap().join("card0");
         assert_eq!(config.resize_preview_color.a, 255);
@@ -1119,7 +1140,9 @@ mod tests {
         };
         assert!(config.validate().is_ok());
         config.resize_preview_color.a = 128;
-        assert!(config.validate().is_err());
+        assert!(config.validate().is_ok());
+        config.resize_preview_color.a = 0;
+        assert!(config.validate().is_ok());
     }
 
     struct Root;
@@ -1171,6 +1194,38 @@ mod tests {
 
         let compositor = Compositor::new().window_frame(compose).background(Root);
         assert!(compositor.window_frame().is_some());
+        assert_eq!(
+            (compositor.window_frame().unwrap().content_style)(&WindowChromeModel::new(
+                1, "Legacy"
+            )),
+            None
+        );
+    }
+
+    #[test]
+    fn frame_factory_preserves_model_specific_content_style() {
+        struct Styled;
+        impl WindowFrameTemplate for Styled {
+            type Component = Root;
+            fn compose(&self, _model: WindowChromeModel) -> Root {
+                Root
+            }
+            fn content_style(&self, model: &WindowChromeModel) -> Option<WindowContentStyle> {
+                Some(WindowContentStyle {
+                    background: ColorRgba8::rgba(0, 0, 0, 0),
+                    corner_radius: 4.0,
+                    resize_preview_color: model.active.then_some(ColorRgba8::rgba(40, 50, 60, 128)),
+                })
+            }
+        }
+        let factory = WindowFrameFactory::new(Styled);
+        for active in [false, true] {
+            let model = WindowChromeModel::new(1, "Styled").active(active);
+            assert_eq!(
+                (factory.content_style)(&model),
+                Styled.content_style(&model)
+            );
+        }
     }
 
     #[test]

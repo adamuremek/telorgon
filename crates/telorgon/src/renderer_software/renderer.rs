@@ -55,7 +55,7 @@ pub struct SoftwareFrameContext<'frame> {
     surface: &'frame mut SoftwareSurface,
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 pub(crate) struct SoftwareCompositeLayer<'scene> {
     pub scene: &'scene SoftwareScene,
     pub target: RectI,
@@ -277,7 +277,7 @@ impl RenderBackend for SoftwareRenderer {
     }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 impl SoftwareRenderer {
     /// Composites independent retained scenes directly into one software framebuffer.
     ///
@@ -736,7 +736,7 @@ fn rect_contains(outer: RectI, inner: RectI) -> bool {
         && inner.bottom() <= outer.bottom()
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", test))]
 fn intersect_rect_i(left: RectI, right: RectI) -> Option<RectI> {
     let x = left.x.max(right.x);
     let y = left.y.max(right.y);

@@ -243,8 +243,12 @@ The operational managed path is entirely Telorgon-rendered:
    new bounds. Hidden/minimized producers keep their retained identity without contributing a draw,
    and a hidden client revision is not consumed before its queued pixels are delivered. Focus-state
    changes reconcile the existing window-frame component root instead of recreating its runtime. A
-   client resize uses an opaque solid-color veil instead of stretching stale content or exposing
-   empty resize bands. All eight edges track the pointer using compositor-owned frame/veil geometry;
+   client resize uses an RGBA solid-color veil (opaque by default) instead of stretching stale content.
+   Easy-frame designs override preview color and independently set normal content backing. Frame fill
+   and shadow are excluded from the content rectangle by non-overlapping clipped placements; normal
+   backing draws separately, and neither it nor stale client pixels draw beneath a translucent veil.
+   Client alpha can reveal lower layers when the backing is transparent; opaque buffers stay opaque.
+   All eight edges track the pointer using compositor-owned frame/veil geometry;
    the client receives its current committed extent with the initial resizing hint and its final
    requested extent on release, not a stream of intermediate sizes. The client surface tree is hidden
    and new SHM copies are paused behind a bounded latest-wins mailbox during the drag. Work submitted

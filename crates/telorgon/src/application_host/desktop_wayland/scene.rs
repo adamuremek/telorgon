@@ -13,7 +13,8 @@ use crate::scene::NodeId;
 #[cfg_attr(all(test, not(target_os = "linux")), allow(dead_code))]
 pub(super) enum DesktopLayerKey {
     Background,
-    Frame(u32),
+    Frame(u32, u8),
+    ContentBackground(u32),
     Surface(u32),
     ResizeVeil(u32),
     LegacyControl(u32, u8),
@@ -36,7 +37,8 @@ pub(super) enum DesktopSceneKey {
     Background,
     Frame(u32),
     Surface(u32),
-    ResizeVeil,
+    ResizeVeil(u32),
+    ContentBackground(u32),
     LegacyControl(u8),
     Widget(u32),
     DragIcon(u32),
@@ -71,6 +73,7 @@ pub(super) enum DesktopLayerContent {
     Solid {
         scene: DesktopSceneKey,
         color: ColorRgba8,
+        corner_radius: f32,
     },
     Retained {
         scene: DesktopSceneKey,
@@ -106,17 +109,104 @@ impl DesktopLayer {
         color: ColorRgba8,
         target: RectI,
     ) -> Self {
+        Self::rounded_solid(key, scene, color, target, 0.0)
+    }
+
+    pub(super) fn rounded_solid(
+        key: DesktopLayerKey,
+        scene: DesktopSceneKey,
+        color: ColorRgba8,
+        target: RectI,
+        corner_radius: f32,
+    ) -> Self {
+        let corner_radius = if corner_radius.is_finite() {
+            corner_radius.max(0.0)
+        } else {
+            0.0
+        };
         Self {
             key,
-            content: DesktopLayerContent::Solid { scene, color },
+            content: DesktopLayerContent::Solid {
+                scene,
+                color,
+                corner_radius,
+            },
+            // Native geometry works with both desktop renderers; only this analytic primitive
+            // changes size, never a client image or a pixel allocation.
             source_extent: SizeI {
-                width: 1,
-                height: 1,
+                width: target.width,
+                height: target.height,
             },
             target,
             clip: None,
             visible: true,
         }
+    }
+
+    /// Places one retained frame scene around an external content slot. Non-overlapping scissors
+    /// remove *all* composed backing (including root fill and shadow) without blending corners
+    /// twice. Empty pieces remain invisible scene owners; deltas are delivered exactly once.
+    pub(super) fn retained_frame(
+        surface: u32,
+        deltas: Vec<RenderSceneDelta>,
+        extent: SizeI,
+        position: PointI,
+        visible: bool,
+        cutout: Option<RectI>,
+    ) -> Vec<Self> {
+        let mut frame = Self::retained(
+            DesktopLayerKey::Frame(surface, 0),
+            DesktopSceneKey::Frame(surface),
+            deltas,
+            extent,
+            position,
+            visible,
+        );
+        let Some(hole) = cutout.and_then(|hole| intersect(frame.target, hole)) else {
+            return vec![frame];
+        };
+        let outer = frame.target;
+        let clips = [
+            RectI {
+                x: outer.x,
+                y: outer.y,
+                width: outer.width,
+                height: hole.y - outer.y,
+            },
+            RectI {
+                x: outer.x,
+                y: hole.bottom(),
+                width: outer.width,
+                height: outer.bottom() - hole.bottom(),
+            },
+            RectI {
+                x: outer.x,
+                y: hole.y,
+                width: hole.x - outer.x,
+                height: hole.height,
+            },
+            RectI {
+                x: hole.right(),
+                y: hole.y,
+                width: outer.right() - hole.right(),
+                height: hole.height,
+            },
+        ];
+        frame.clip = Some(clips[0]);
+        let mut layers = vec![frame];
+        for (index, clip) in clips.into_iter().enumerate().skip(1) {
+            let mut part = Self::retained(
+                DesktopLayerKey::Frame(surface, index as u8),
+                DesktopSceneKey::Frame(surface),
+                Vec::new(),
+                extent,
+                position,
+                visible,
+            );
+            part.clip = Some(clip);
+            layers.push(part);
+        }
+        layers
     }
 
     pub(super) fn retained(
@@ -483,14 +573,63 @@ impl DesktopComposition {
 
         for layer in layers.into_iter().filter(valid_layer) {
             let scene = match layer.content {
-                DesktopLayerContent::Solid { scene, color } => {
+                DesktopLayerContent::Solid {
+                    scene,
+                    color,
+                    corner_radius,
+                } => {
                     let source = self.solid_scenes.entry(scene).or_default();
-                    if source.background != color || source.extent.width == 0.0 {
-                        source.extent = SizeF {
-                            width: 1.0,
-                            height: 1.0,
+                    let rounded = corner_radius > 0.0;
+                    let background = if rounded {
+                        ColorRgba8::rgba(0, 0, 0, 0)
+                    } else {
+                        color
+                    };
+                    let extent = size_f(layer.source_extent);
+                    if source.background != background || source.extent != extent {
+                        source.extent = extent;
+                        source.background = background;
+                        source.damage.full = true;
+                    }
+                    let node = NodeId::new(0, 1);
+                    if rounded {
+                        let rect = RectF {
+                            x: 0.0,
+                            y: 0.0,
+                            width: extent.width,
+                            height: extent.height,
                         };
-                        source.background = color;
+                        if source.boxes.upsert(
+                            node,
+                            BoxInstance {
+                                node,
+                                rect,
+                                view_bounds: rect,
+                                background: Some(color),
+                                border: Default::default(),
+                                outline: Default::default(),
+                                corner_radii: crate::ui::CornerRadii::all(corner_radius),
+                                shadows: Default::default(),
+                                opacity: 1.0,
+                                clip: ClipId(0),
+                                spatial: SpatialId(0),
+                            },
+                        ) {
+                            source.damage.full = true;
+                        }
+                        source.set_draw_order(vec![DrawItem {
+                            kind: PrimitiveKind::Box,
+                            index: 0,
+                            batch: BatchKey {
+                                pipeline: PipelineKind::AnalyticBox,
+                                resource: 0,
+                                clip: ClipId(0),
+                                blend: BlendMode::Alpha,
+                                target: 0,
+                            },
+                        }]);
+                    } else if source.boxes.remove(node).is_some() {
+                        source.set_draw_order(Vec::new());
                         source.damage.full = true;
                     }
                     if let Some(delta) = source.take_delta() {
@@ -791,10 +930,107 @@ fn intersect(left: RectI, right: RectI) -> Option<RectI> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn frame_cutouts_cover_only_the_complement_even_at_output_edges() {
+        let extent = SizeI {
+            width: 20,
+            height: 16,
+        };
+        let position = PointI { x: -2, y: -1 };
+        let outer = RectI {
+            x: -2,
+            y: -1,
+            width: 20,
+            height: 16,
+        };
+        for hole in [
+            outer,
+            RectI {
+                x: 4,
+                y: 4,
+                width: 8,
+                height: 6,
+            },
+            RectI {
+                x: -10,
+                y: -10,
+                width: 15,
+                height: 15,
+            },
+            RectI {
+                x: 40,
+                y: 40,
+                width: 4,
+                height: 4,
+            },
+        ] {
+            let layers =
+                DesktopLayer::retained_frame(9, Vec::new(), extent, position, true, Some(hole));
+            for y in -3..19 {
+                for x in -4..22 {
+                    let contains =
+                        |r: RectI| x >= r.x && y >= r.y && x < r.right() && y < r.bottom();
+                    let count = layers
+                        .iter()
+                        .filter(|layer| contains(layer.target) && layer.clip.is_none_or(contains))
+                        .count();
+                    assert_eq!(count, usize::from(contains(outer) && !contains(hole)));
+                }
+            }
+        }
+        let mut composition = DesktopComposition::new(extent);
+        let hidden = composition
+            .synchronize(
+                SizeI {
+                    width: 24,
+                    height: 20,
+                },
+                DesktopLayer::retained_frame(9, Vec::new(), extent, position, true, Some(outer)),
+            )
+            .unwrap();
+        assert!(hidden.placements.is_empty());
+        assert!(hidden.live_scenes.contains(&DesktopSceneKey::Frame(9)));
+    }
+
+    #[test]
+    fn per_window_preview_colors_do_not_alias_a_shared_scene() {
+        let extent = SizeI {
+            width: 100,
+            height: 80,
+        };
+        let mut composition = DesktopComposition::new(extent);
+        let colors = [
+            ColorRgba8::rgba(200, 20, 30, 128),
+            ColorRgba8::rgba(10, 150, 250, 255),
+        ];
+        let layers = colors
+            .into_iter()
+            .enumerate()
+            .map(|(i, color)| {
+                DesktopLayer::solid(
+                    DesktopLayerKey::ResizeVeil(i as u32),
+                    DesktopSceneKey::ResizeVeil(i as u32),
+                    color,
+                    RectI {
+                        x: i as i32 * 40,
+                        y: 0,
+                        width: 40,
+                        height: 40,
+                    },
+                )
+            })
+            .collect();
+        let frame = composition.synchronize(extent, layers).unwrap();
+        assert_eq!(frame.updates.len(), 2);
+        for (update, color) in frame.updates.iter().zip(colors) {
+            assert_eq!(update.deltas[0].boxes[0].values[0].background, Some(color));
+        }
+    }
+
     fn veil(target: RectI, color: ColorRgba8) -> DesktopLayer {
         DesktopLayer::solid(
             DesktopLayerKey::ResizeVeil(9),
-            DesktopSceneKey::ResizeVeil,
+            DesktopSceneKey::ResizeVeil(9),
             color,
             target,
         )
@@ -838,7 +1074,7 @@ mod tests {
             .synchronize(extent, vec![veil(preview(100, 80), color), hidden()])
             .unwrap();
         assert_eq!(first.updates.len(), 1);
-        assert_eq!(first.updates[0].key, DesktopSceneKey::ResizeVeil);
+        assert_eq!(first.updates[0].key, DesktopSceneKey::ResizeVeil(9));
         let delta = &first.updates[0].deltas[0];
         assert!(delta.image_resources.is_empty());
         assert_eq!(delta.boxes[0].values[0].background, Some(color));
@@ -849,9 +1085,15 @@ mod tests {
         let moved = composition
             .synchronize(extent, vec![veil(preview(150, 110), color), hidden()])
             .unwrap();
-        assert!(
-            moved.updates.is_empty(),
-            "pointer motion must change placement only"
+        assert_eq!(moved.updates.len(), 1);
+        assert_eq!(moved.updates[0].key, DesktopSceneKey::ResizeVeil(9));
+        assert!(moved.updates[0].deltas[0].image_resources.is_empty());
+        assert_eq!(
+            moved.updates[0].deltas[0].extent,
+            SizeF {
+                width: 150.0,
+                height: 110.0
+            }
         );
         assert_eq!(moved.placements[0].target, preview(150, 110));
         assert!(
@@ -885,7 +1127,7 @@ mod tests {
         assert!(
             !final_frame
                 .live_scenes
-                .contains(&DesktopSceneKey::ResizeVeil)
+                .contains(&DesktopSceneKey::ResizeVeil(9))
         );
     }
 

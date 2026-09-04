@@ -8,6 +8,10 @@ use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+#[path = "desktop_wayland/transparency_tests.rs"]
+mod transparency_tests;
+
 use crate::compositor_render::{
     shm_image_metadata, shm_image_resource, shm_image_update, transform_surface_image,
 };
