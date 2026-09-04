@@ -238,15 +238,26 @@ pub(super) fn hit_test_decoration(
             x: (position.x - window.position.x as f32).floor() as i32,
             y: (position.y - window.position.y as f32).floor() as i32,
         };
-        if local.x < 0 || local.y < 0 || local.x >= outer.width || local.y >= outer.height {
-            continue;
-        }
+        let inside_frame =
+            local.x >= 0 && local.y >= 0 && local.x < outer.width && local.y < outer.height;
         if let Some(chrome) = &window.chrome {
             let point = PointF {
-                x: local.x as f32,
-                y: local.y as f32,
+                x: position.x - window.position.x as f32,
+                y: position.y - window.position.y as f32,
             };
             let role = chrome.hit_test(point.x, point.y);
+            // Only explicitly published resize targets may extend beyond the window. Do not
+            // reject their outward tolerance before asking the shared chrome hit geometry.
+            if !inside_frame
+                && !matches!(
+                    role,
+                    Some(crate::WindowChromeRole::Action(WindowAction::BeginResize(
+                        _
+                    )))
+                )
+            {
+                continue;
+            }
             if role.is_none() && chrome.content.bounds.contains(point) {
                 return None;
             }
@@ -280,6 +291,9 @@ pub(super) fn hit_test_decoration(
                 | None => DecorationHit::Frame,
             };
             return Some((*surface, hit));
+        }
+        if !inside_frame {
+            continue;
         }
         let border = config.window_border.max(1);
         let left = local.x < border;

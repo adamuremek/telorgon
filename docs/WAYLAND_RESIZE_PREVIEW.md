@@ -23,10 +23,10 @@ placements sharing one retained scene. Easy frames paint their content backing s
 use; custom templates can opt in through `WindowFrameTemplate::content_style`. During resize neither
 the backing nor any client pixels draw beneath the preview, even for custom templates. Thus a
 translucent preview reveals the desktop/lower windows, and alpha zero gives a frame-only resize.
-Input routing is unchanged. Client pixels, backing, and preview share the frame's inner rounded
-border clip, intersected with content-slot bounds and optional `content_radius`. Both rounded
+Client pixels, backing, and preview share the frame's inner rounded
+border clip, intersected with content-slot bounds and optional custom-template aperture rounding. Both rounded
 contours start at the window's inner top edge; the title-bar seam does not get separate top corners.
-An outline placement restores the curved rim, and an inverse-clipped fill placement restores wider
+An outline placement restores the curved rim, and for custom apertures an inverse-clipped fill placement restores wider
 frame-colored corner wedges inside the cutout without backing the content aperture or double-blending
 the frame strips. Subsurfaces inherit the clip; popups remain independent.
 Color scenes have per-window identity and native-sized analytic geometry for both
@@ -207,6 +207,41 @@ outline, the square app seam versus rounded window top, translucent frame fill w
 blending, client/preview alpha 0/128/255, title-bar-height independence, empty/antialiased inverse
 coverage, inversion-only placement damage without image uploads, and per-placement GPU flag reset.
 
+### Border-derived easy-frame follow-up
+
+Easy frames now derive content bounds from `title_bar.height` and the root border, removing the
+redundant `WindowChromeStateStyle::content_margin` and `content_radius` fields. They publish
+`WindowContentStyle::corner_radius = 0`, selecting only the full-window inset border contour, and
+skip the unnecessary corner-fill placement. Custom templates retain aperture support. The outline,
+client/backing/veil clip, and resize exclusion all use the same normalized `RoundedClip::inset`
+geometry. Root layout already reserves the border width, so only title-bar height is added to the
+content slot. The composed slot's bottom radius is derived rather than independently configured.
+
+Resize regions opt into `WindowChromeHitSpec::frame_border_outset`; snapshots derive geometric hit
+clips from the root's border style. A minimum grab thickness can exceed the painted outline, but
+only outward; its per-side extent is `max(resize_edge - frame_border_width, 0) + resize_hit_slop`.
+Corner bounds cover the outer radius and are constrained to their quadrant, then exclude the inner
+curve just like edge regions. The host evaluates these targets before the outside-frame rejection,
+allows only resize actions outside, and retains fractional pointer coordinates. This changes resize
+hit geometry, not client pixel alpha or general transparent-pixel click-through behavior.
+
+Read-only audit: Flutter `51fd9afadf309ba5337320bd3653f5345c156cb9`,
+`packages/flutter/lib/src/painting/rounded_rectangle_border.dart` (`getInnerPath`, `paint`,
+`hitTest`); Android/base `1cdfff555f4a21f71ccc978290e2e212e2f8b168`,
+`libs/WindowManager/Shell/src/com/android/wm/shell/windowdecor/DragResizeWindowGeometry.java`
+(`calculateCtrlType`, `calculateEdgeResizeCtrlType`, `checkDistanceFromCenter`). Invariants:
+derive the inner contour from the border; input tolerance and visual geometry remain separate;
+corners use geometry rather than a square that steals interior input. Rejected: independently
+configured margins/radii, double-counting layout borders, inward expansion over app controls, and
+unbounded overlapping corner handles. Official checks are the CSS corner-shaping/clipping and Vulkan
+scissor references above. No reference code was copied. GPU ABI 4 and shaders, buffer ownership,
+resize configure pacing, and V3DV workarounds remain unchanged.
+
+New CPU tests cover automatic bar/border insets, zero/thin/thick borders, all curved resize corners,
+outside reach, interior exclusion, hidden bars, disabled/tiled edges, shared inset/outset geometry,
+and omission of extra fill/clip for easy frames. Native input routing is additionally inspected and
+Linux-test-compiled; interactive pointer/visual qualification remains user-run.
+
 ### Checks
 
 CPU tests cover native coordinate/clip mapping, shadow exclusion, all eight anchored edges and
@@ -228,12 +263,12 @@ scene reuse across source-node replacement. Geometry tests check inset centers a
 
 Verification for the current implementation, including the rounded-frame follow-up:
 
-- `cargo test -p telorgon --lib --quiet`: 936 passed.
+- `cargo test -p telorgon --lib --quiet`: 938 passed.
 - `cargo test -p telorgon --lib desktop_wayland --features embedded-vulkan,profiler --quiet`:
-  39 passed.
+  40 passed.
 - `cargo test -p telorgon --lib clip_tests --features embedded-vulkan,profiler --quiet`:
   1 passed (CPU-only view-uniform encoding).
-- `cargo test -p telorgon --test window_frame_api --quiet`: 4 passed.
+- `cargo test -p telorgon --test window_frame_api --quiet`: 6 passed.
 - `cargo check -p telorgon --tests --target aarch64-unknown-linux-gnu --no-default-features
   --features desktop-wayland-linux,embedded-vulkan,profiler`: passed.
 - `cargo build -p telorgon --lib --release --target aarch64-unknown-linux-gnu --no-default-features
@@ -252,6 +287,9 @@ after release. Repeat with the software backend and the target Raspberry Pi/Mesa
 NVIDIA hardware as available; build success alone does not qualify that matrix.
 
 For rounded frames, test contrasting desktop/client/border colors with thin, zero-width, and thick
-borders; `content_radius` zero and nonzero; normal/maximized/tiled transitions; translucent previews;
+borders; custom aperture radius zero and nonzero; normal/maximized/tiled transitions; translucent previews;
 and child surfaces near corners. The visible rim must remain curved while content never extends
 beyond its inner edge. Popups may extend beyond the window, and shadows remain outside its outer edge.
+Check resize cursors and press/drag both on the curved outline and just outside all eight edges;
+content immediately inside the border must remain interactive. Confirm hidden bars reserve no title
+height, thicker borders move the content inset once, and tiled/non-resizable edges stay disabled.

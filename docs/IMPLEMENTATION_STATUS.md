@@ -96,6 +96,10 @@ production-qualified.
 > inverse-clipped frame-fill patches preserve the rim and wider corner wedges without backing
 > transparent content. Both renderers support the placement clips; Vulkan's shader bundle is GPU
 > ABI 4 (the view record remains 192 bytes; flags now include per-clip inversion).
+> Easy frames derive content bounds/rounding directly from title-bar height and border width,
+> replacing the separate content-margin/radius configuration. Their resize targets follow the
+> rounded border, exclude the interior, and support outward-only tolerance beyond the window bounds;
+> custom templates retain their independently authored layout and hit regions.
 > See [solid resize preview](WAYLAND_RESIZE_PREVIEW.md). Capability-gated Vulkan DMA-BUF commits are materialized into
 > retained compositor textures with acquire/release sync-FD handling and no CPU pixel copy. A protocol
 > acquire fence is preferred; otherwise the host exports the DMA-BUF reservation object's implicit

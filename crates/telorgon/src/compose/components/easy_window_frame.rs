@@ -36,16 +36,12 @@ pub struct WindowChromeStateStyle {
     pub title_bar_visible: bool,
     /// Outer frame radius. Client content is automatically clipped to the inner border curve.
     pub frame_radius: f32,
-    /// Inner content-aperture radius, intersected with the frame contour. With a title bar,
-    /// top rounding belongs to the window, not to the app/title-bar seam.
-    pub content_radius: f32,
     pub shadow: Option<Shadow>,
     pub resize_regions: bool,
-    /// Thickness of the compositor-owned resize border on each enabled window edge.
+    /// Minimum resize grab thickness, including the visible border. Extra width extends outward.
     pub resize_edge: f32,
     /// Extra tolerance outside the resize border; the easy frame never expands it inward.
     pub resize_hit_slop: Insets,
-    pub content_margin: Insets,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -125,8 +121,6 @@ impl WindowChromeDesign {
         for state in [self.normal, self.maximized, self.tiled, self.fullscreen] {
             finite_nonnegative(state.frame_radius)
                 .ok_or(WindowChromeDesignError::InvalidFrameRadius)?;
-            finite_nonnegative(state.content_radius)
-                .ok_or(WindowChromeDesignError::InvalidContentRadius)?;
             finite_nonnegative(state.resize_edge)
                 .ok_or(WindowChromeDesignError::InvalidResizeEdge)?;
             validate_nonnegative_insets(state.resize_hit_slop)
@@ -214,8 +208,6 @@ pub enum WindowChromeDesignError {
     InvalidTitleWeight,
     #[error("window chrome frame radius must be finite and nonnegative")]
     InvalidFrameRadius,
-    #[error("window chrome content radius must be finite and nonnegative")]
-    InvalidContentRadius,
     #[error("window chrome resize edge must be finite and nonnegative")]
     InvalidResizeEdge,
     #[error("window chrome resize hit slop must be finite and nonnegative")]
@@ -282,6 +274,7 @@ impl Component for EasyWindowFrameComponent {
         let design = self.design;
         let palette = design.palette(self.model.active);
         let state = design.state(self.model.state);
+        let inner_radius = (state.frame_radius - palette.frame_border_width).max(0.0);
         let mut frame_decoration = BoxDecoration::new()
             .background(Background::Color(palette.frame_background))
             .uniform_border(palette.frame_border_width, palette.frame_border)
@@ -300,7 +293,17 @@ impl Component for EasyWindowFrameComponent {
             .children(resize)
             .content_slot(
                 window_content_slot()
-                    .margin(state.content_margin)
+                    // The root border already reserves its width on every side.
+                    .margin(Insets::new(
+                        if state.title_bar_visible {
+                            design.title_bar.height
+                        } else {
+                            0.0
+                        },
+                        0.0,
+                        0.0,
+                        0.0,
+                    ))
                     .overflow(crate::ui::Overflow::Clip)
                     .decoration(
                         BoxDecoration::new()
@@ -309,15 +312,15 @@ impl Component for EasyWindowFrameComponent {
                                 top_left: if state.title_bar_visible {
                                     0.0
                                 } else {
-                                    state.content_radius
+                                    inner_radius
                                 },
                                 top_right: if state.title_bar_visible {
                                     0.0
                                 } else {
-                                    state.content_radius
+                                    inner_radius
                                 },
-                                bottom_right: state.content_radius,
-                                bottom_left: state.content_radius,
+                                bottom_right: inner_radius,
+                                bottom_left: inner_radius,
                             }),
                     ),
             )
@@ -334,10 +337,11 @@ impl WindowFrameTemplate for EasyWindowFrame {
         }
     }
 
-    fn content_style(&self, model: &WindowChromeModel) -> Option<WindowContentStyle> {
+    fn content_style(&self, _model: &WindowChromeModel) -> Option<WindowContentStyle> {
         Some(WindowContentStyle {
             background: self.design.content_background,
-            corner_radius: self.design.state(model.state).content_radius,
+            // The full-window inner border clip owns rounding; no second aperture is needed.
+            corner_radius: 0.0,
             resize_preview_color: self.design.resize_preview_color,
         })
     }
@@ -549,36 +553,40 @@ fn build_resize_regions(
     style: WindowChromeStateStyle,
     frame_border_width: f32,
 ) -> Vec<Element> {
-    if !model.capabilities.resize || !style.resize_regions || style.resize_edge <= 0.0 {
+    if !model.capabilities.resize || !style.resize_regions {
         return Vec::new();
     }
     let edges = model
         .tiling
         .map_or(WindowEdgeMask::ALL, |tiling| tiling.resizable_edges);
-    let margins = style.content_margin.0;
-    let top = style.resize_edge.min(margins.top);
-    let right = style.resize_edge.min(margins.right);
-    let bottom = style.resize_edge.min(margins.bottom);
-    let left = style.resize_edge.min(margins.left);
-    let corner = style.resize_edge * 2.0;
-    let mut regions = Vec::with_capacity(12);
+    let extra = (style.resize_edge - frame_border_width).max(0.0);
+    let slop = style.resize_hit_slop.0;
+    let slop = Insets::new(
+        slop.top + extra,
+        slop.right + extra,
+        slop.bottom + extra,
+        slop.left + extra,
+    );
+    // The invisible boxes start at the root's inner edge. Outset restores the entire painted
+    // border and adds tolerance outside it; the shared inner contour excludes app/title pixels.
+    let region = |view: Element, edge| resize_region(view, edge, slop, frame_border_width);
+    let corner = style
+        .frame_radius
+        .max(style.resize_edge.max(frame_border_width) * 2.0);
+    let mut regions = Vec::with_capacity(8);
     if edges.contains(WindowEdgeMask::TOP) {
-        regions.push(resize_region(
-            stack().height(top),
+        regions.push(region(
+            stack().height(0.0).into_element(),
             WindowResizeEdge::Top,
-            style.resize_hit_slop,
-            frame_border_width,
         ));
     }
     if edges.contains(WindowEdgeMask::RIGHT) {
         regions.push(
             row()
                 .child(spacer())
-                .child(resize_region(
-                    stack().width(right),
+                .child(region(
+                    stack().width(0.0).into_element(),
                     WindowResizeEdge::Right,
-                    style.resize_hit_slop,
-                    frame_border_width,
                 ))
                 .into_element(),
         );
@@ -587,43 +595,26 @@ fn build_resize_regions(
         regions.push(
             column()
                 .child(spacer())
-                .child(resize_region(
-                    stack().height(bottom),
+                .child(region(
+                    stack().height(0.0).into_element(),
                     WindowResizeEdge::Bottom,
-                    style.resize_hit_slop,
-                    frame_border_width,
                 ))
                 .into_element(),
         );
     }
     if edges.contains(WindowEdgeMask::LEFT) {
-        regions.push(resize_region(
-            stack().width(left),
+        regions.push(region(
+            stack().width(0.0).into_element(),
             WindowResizeEdge::Left,
-            style.resize_hit_slop,
-            frame_border_width,
         ));
     }
     if edges.contains(WindowEdgeMask::TOP | WindowEdgeMask::RIGHT) {
         regions.push(
             row()
                 .child(spacer())
-                .child(resize_region(
-                    stack().width(corner).height(top),
+                .child(region(
+                    stack().width(corner).height(corner).into_element(),
                     WindowResizeEdge::TopRight,
-                    style.resize_hit_slop,
-                    frame_border_width,
-                ))
-                .into_element(),
-        );
-        regions.push(
-            row()
-                .child(spacer())
-                .child(resize_region(
-                    stack().width(right).height(corner),
-                    WindowResizeEdge::TopRight,
-                    style.resize_hit_slop,
-                    frame_border_width,
                 ))
                 .into_element(),
         );
@@ -632,22 +623,9 @@ fn build_resize_regions(
         regions.push(
             column()
                 .child(spacer())
-                .child(row().height(bottom).child(spacer()).child(resize_region(
-                    stack().width(corner).height(bottom),
+                .child(row().height(corner).child(spacer()).child(region(
+                    stack().width(corner).height(corner).into_element(),
                     WindowResizeEdge::BottomRight,
-                    style.resize_hit_slop,
-                    frame_border_width,
-                )))
-                .into_element(),
-        );
-        regions.push(
-            column()
-                .child(spacer())
-                .child(row().height(corner).child(spacer()).child(resize_region(
-                    stack().width(right).height(corner),
-                    WindowResizeEdge::BottomRight,
-                    style.resize_hit_slop,
-                    frame_border_width,
                 )))
                 .into_element(),
         );
@@ -658,28 +636,10 @@ fn build_resize_regions(
                 .child(spacer())
                 .child(
                     row()
-                        .height(bottom)
-                        .child(resize_region(
-                            stack().width(corner).height(bottom),
-                            WindowResizeEdge::BottomLeft,
-                            style.resize_hit_slop,
-                            frame_border_width,
-                        ))
-                        .child(spacer()),
-                )
-                .into_element(),
-        );
-        regions.push(
-            column()
-                .child(spacer())
-                .child(
-                    row()
                         .height(corner)
-                        .child(resize_region(
-                            stack().width(left).height(corner),
+                        .child(region(
+                            stack().width(corner).height(corner).into_element(),
                             WindowResizeEdge::BottomLeft,
-                            style.resize_hit_slop,
-                            frame_border_width,
                         ))
                         .child(spacer()),
                 )
@@ -687,28 +647,10 @@ fn build_resize_regions(
         );
     }
     if edges.contains(WindowEdgeMask::TOP | WindowEdgeMask::LEFT) {
-        regions.push(
-            row()
-                .child(resize_region(
-                    stack().width(corner).height(top),
-                    WindowResizeEdge::TopLeft,
-                    style.resize_hit_slop,
-                    frame_border_width,
-                ))
-                .child(spacer())
-                .into_element(),
-        );
-        regions.push(
-            row()
-                .child(resize_region(
-                    stack().width(left).height(corner),
-                    WindowResizeEdge::TopLeft,
-                    style.resize_hit_slop,
-                    frame_border_width,
-                ))
-                .child(spacer())
-                .into_element(),
-        );
+        regions.push(region(
+            stack().width(corner).height(corner).into_element(),
+            WindowResizeEdge::TopLeft,
+        ));
     }
     regions
 }
@@ -722,6 +664,7 @@ fn resize_region(
     region
         .window_resize(edge)
         .window_hit_slop(outward_resize_hit_slop(edge, hit_slop, frame_border_width))
+        .with_window_chrome_border_hit(hit_slop.0)
 }
 
 fn outward_resize_hit_slop(
@@ -792,12 +735,10 @@ mod tests {
     const STATE: WindowChromeStateStyle = WindowChromeStateStyle {
         title_bar_visible: true,
         frame_radius: 12.0,
-        content_radius: 8.0,
         shadow: None,
         resize_regions: true,
         resize_edge: 6.0,
         resize_hit_slop: Insets::all(2.0),
-        content_margin: Insets::new(42.0, 6.0, 6.0, 6.0),
     };
     const DESIGN: WindowChromeDesign = WindowChromeDesign {
         active: WindowChromePalette {
@@ -817,24 +758,20 @@ mod tests {
         normal: STATE,
         maximized: WindowChromeStateStyle {
             frame_radius: 0.0,
-            content_radius: 0.0,
             shadow: None,
             resize_regions: false,
             resize_edge: 0.0,
             resize_hit_slop: Insets::ZERO,
-            content_margin: Insets::new(42.0, 0.0, 0.0, 0.0),
             ..STATE
         },
         tiled: STATE,
         fullscreen: WindowChromeStateStyle {
             title_bar_visible: false,
             frame_radius: 0.0,
-            content_radius: 0.0,
             shadow: None,
             resize_regions: false,
             resize_edge: 0.0,
             resize_hit_slop: Insets::ZERO,
-            content_margin: Insets::ZERO,
         },
         title_bar: WindowTitleBarStyle {
             height: 42.0,
@@ -896,7 +833,7 @@ mod tests {
                         .unwrap();
                     assert_eq!(style.background, design.content_background);
                     assert_eq!(style.resize_preview_color, preview);
-                    assert_eq!(style.corner_radius, design.state(state).content_radius);
+                    assert_eq!(style.corner_radius, 0.0);
                 }
             }
         }

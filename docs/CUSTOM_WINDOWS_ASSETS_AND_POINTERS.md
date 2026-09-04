@@ -242,7 +242,6 @@ const CLOSE_BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
 const NORMAL: WindowChromeStateStyle = WindowChromeStateStyle {
     title_bar_visible: true,
     frame_radius: 14.0,
-    content_radius: 9.0,
     shadow: Some(Shadow {
         offset: PointF { x: 0.0, y: 12.0 },
         blur: 30.0,
@@ -252,7 +251,6 @@ const NORMAL: WindowChromeStateStyle = WindowChromeStateStyle {
     resize_regions: true,
     resize_edge: 6.0,
     resize_hit_slop: Insets::all(3.0),
-    content_margin: Insets::new(44.0, 6.0, 6.0, 6.0),
 };
 
 const TEST_CHROME: WindowChromeDesign = WindowChromeDesign {
@@ -273,29 +271,24 @@ const TEST_CHROME: WindowChromeDesign = WindowChromeDesign {
     normal: NORMAL,
     maximized: WindowChromeStateStyle {
         frame_radius: 0.0,
-        content_radius: 0.0,
         shadow: None,
         resize_regions: false,
         resize_edge: 0.0,
         resize_hit_slop: Insets::ZERO,
-        content_margin: Insets::new(44.0, 0.0, 0.0, 0.0),
         ..NORMAL
     },
     tiled: WindowChromeStateStyle {
         frame_radius: 0.0,
-        content_radius: 0.0,
         shadow: None,
         ..NORMAL
     },
     fullscreen: WindowChromeStateStyle {
         title_bar_visible: false,
         frame_radius: 0.0,
-        content_radius: 0.0,
         shadow: None,
         resize_regions: false,
         resize_edge: 0.0,
         resize_hit_slop: Insets::ZERO,
-        content_margin: Insets::ZERO,
     },
     title_bar: WindowTitleBarStyle {
         height: 44.0,
@@ -349,6 +342,17 @@ normal/maximized/tiled/fullscreen geometry, client/fallback app icons, capabilit
 maximize versus restore artwork, resizable tiled edges, and every declared control state. The state
 styles are code-local bindings, so no theme-catalog entry is required.
 
+Easy-frame layout is derived from the actual border and title bar. The app content begins at
+`(frame_border_width, frame_border_width + title_bar.height)` when the bar is visible, and at
+`(frame_border_width, frame_border_width)` when it is hidden. Right and bottom insets equal the border
+width; the layout engine applies that border once. There is no separate decorative margin band.
+
+Migration: remove `content_margin` and `content_radius` from `WindowChromeStateStyle` literals.
+Use `title_bar.height` for the bar, `frame_border_width` for the visible outline, and `frame_radius`
+for its outer curve. The inner radius follows the inset border automatically. Increase the actual
+border width if a thicker surround is wanted; do not use resize hit width as visible padding.
+Custom `WindowFrameTemplate` layouts can still use margins and independent aperture rounding.
+
 The easy frame exposes independent normal-content and resize-preview RGBA colors:
 
 ```rust
@@ -375,11 +379,12 @@ content rectangle, including its root fill and shadow, and paints the content ba
 Client pixels, backing, and resize preview are clipped to the inner frame-border contour. For a
 uniform border the inner radius is `max(frame_radius - frame_border_width, 0)`, with its rectangle
 inset by the border width. Zero-radius frames still clip to their rectangular interior; zero-width
-borders use the outer curve. `content_radius` controls the additional inner aperture, intersected
-with that frame clip. Its top is anchored at the window's inner top edge, not below the title bar:
-the app/title-bar seam stays square, and the bottom corners curve into the surrounding frame fill.
-It can remain zero for automatic border rounding. Both the outline and the wider frame-colored
-corner wedges are retained outside the aperture without backing transparent content inside it.
+borders use the outer curve. Easy frames use this one full-window inner contour, not another rounded
+rectangle around the app: the title-bar seam stays square and the bottom corners follow the actual
+border thickness. The border-only patch preserves the curved outline inside the rectangular cutout.
+Custom templates may additionally set `WindowContentStyle::corner_radius` for a narrower aperture;
+only those templates need the inverse-clipped frame-fill corner patch. Its contour starts at the
+window's inner top edge rather than the app/title-bar seam.
 Subsurfaces inherit the window clip; popups keep independent bounds. Easy-frame composed children
 also clip to the frame/slot overflow bounds, without clipping away the frame's own outer shadow.
 Custom `WindowFrameTemplate` implementations can opt into the same transparent-backing
@@ -413,11 +418,16 @@ until exactly one `WindowContentSlot` has been supplied. All visuals remain ordi
 - `WindowEdgeMask` and `WindowTilingState` describe tiled adjacency and the subset of edges that
   remain resizable.
 
-`EasyWindowFrame` confines resize input to the painted outer frame and the state style's
-`content_margin`. `resize_edge` is the maximum inward thickness, the painted
-`frame_border_width` is included automatically, and `resize_hit_slop` extends only toward the
-outside of the window. Diagonal targets are L-shaped unions of the two adjoining border strips, so
-their larger corner reach does not claim the titlebar or client-area square inside the corner.
+`EasyWindowFrame` uses the actual rounded border as its resize target, excluding the inner contour
+from both edge and corner handles. `resize_edge` is the minimum total grab thickness, including the
+visible border; any extra width extends outward. Per-side outside tolerance is
+`max(resize_edge - frame_border_width, 0) + resize_hit_slop.side`. The Wayland host checks published
+resize targets before rejecting points outside the window; arbitrary outside controls are not
+activated. Four edge and four corner regions intersect the shared rounded band; corner spans cover
+the radius and are bounded to their window quadrant. App/title pixels inside the inner curve are
+never captured by these resize regions. Disabled/tiled edges and control-over-resize priority remain
+in force. Custom templates retain their authored rectangular regions unless they opt into a border
+constraint.
 
 `window_system_menu()` is the semantic hook for a project-defined menu. Telorgon's managed host
 does not inject a stock menu, so the component's normal callback owns the menu content and behavior.

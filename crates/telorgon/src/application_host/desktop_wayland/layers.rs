@@ -506,7 +506,7 @@ pub(super) fn prepare_desktop_layers(
                 // Restore both the wider chrome fill and the outline, outside the aperture.
                 // These patches stay inside the cutout, disjoint from the four frame strips.
                 if let Some((_, clips)) = inherited_clip {
-                    layers.push(DesktopLayer::content_corners(
+                    layers.extend(DesktopLayer::content_corners(
                         surface.get(),
                         border.clone(),
                         frame.outer,

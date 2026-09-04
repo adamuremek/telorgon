@@ -357,7 +357,7 @@ fn rounded_frame_with_aperture(
         Some(content),
     );
     let clips = frame_content_clips(&border, position, content, content_radius);
-    layers.push(DesktopLayer::content_corners(
+    layers.extend(DesktopLayer::content_corners(
         9,
         border.clone(),
         extent,
@@ -369,6 +369,23 @@ fn rounded_frame_with_aperture(
         9, border, extent, position, content,
     ));
     (layers, clips, content)
+}
+
+#[test]
+fn border_only_aperture_has_no_extra_clip_or_frame_fill_backing() {
+    for border_width in [0.0, 1.0, 4.0, 6.0] {
+        let (layers, clips, _) = rounded_frame(8.0, border_width);
+        assert!(clips[1].is_none());
+        assert!(
+            layers
+                .iter()
+                .all(|layer| layer.key != DesktopLayerKey::ContentCorners(9))
+        );
+        assert_eq!(
+            clips[0].unwrap().radii.bottom_left,
+            (8.0 - border_width).max(0.0)
+        );
+    }
 }
 
 #[test]

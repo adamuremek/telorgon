@@ -254,6 +254,11 @@ The operational managed path is entirely Telorgon-rendered:
    corner wedges inside the rectangular cutout. Rounded-clip changes damage placements without rewriting client images. Vulkan
    applies analytic coverage through per-placement view uniforms; software uses the same distance
    rule. Composed easy-frame descendants clip at their overflow bounds, excluding the frame's shadow.
+   Easy-frame content bounds derive from title-bar height and border width, without extra content
+   margins or independent aperture radii. The same inset contour excludes client/title pixels from
+   rounded resize targets; wider grab tolerance extends outward and is tested before the host rejects
+   outside-window points. Only resize actions may activate outside the window. Custom templates can
+   still define separate aperture rounding and rectangular hit regions.
    All eight edges track the pointer using compositor-owned frame/veil geometry;
    the client receives its current committed extent with the initial resizing hint and its final
    requested extent on release, not a stream of intermediate sizes. The client surface tree is hidden

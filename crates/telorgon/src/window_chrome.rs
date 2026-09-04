@@ -242,12 +242,18 @@ pub enum WindowChromeRole {
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct WindowChromeHitSpec {
     pub hit_slop: EdgeInsets,
+    /// Opt-in resize contour: keep the frame border and this outward tolerance, not its interior.
+    pub frame_border_outset: Option<EdgeInsets>,
     pub priority: u16,
 }
 
 impl WindowChromeHitSpec {
     pub const fn new(hit_slop: EdgeInsets, priority: u16) -> Self {
-        Self { hit_slop, priority }
+        Self {
+            hit_slop,
+            priority,
+            frame_border_outset: None,
+        }
     }
 
     pub const fn for_role(role: WindowChromeRole) -> Self {
@@ -260,6 +266,7 @@ impl WindowChromeHitSpec {
         };
         Self {
             hit_slop: EdgeInsets::ZERO,
+            frame_border_outset: None,
             priority,
         }
     }
@@ -281,6 +288,8 @@ pub struct WindowChromeRegion {
     pub role: WindowChromeRole,
     pub bounds: RectF,
     pub hit_bounds: RectF,
+    /// Optional geometric constraints in frame coordinates. Ordinary custom regions stay rectangular.
+    pub hit_clips: [Option<crate::render::RoundedClip>; 2],
     pub priority: u16,
 }
 
@@ -310,6 +319,7 @@ impl WindowChromeSnapshot {
                 role: *role,
                 bounds: computed.border_rect,
                 hit_bounds: outset(computed.border_rect, hit.hit_slop),
+                hit_clips: [None; 2],
                 priority: hit.priority,
             };
             match role {
@@ -326,8 +336,67 @@ impl WindowChromeSnapshot {
                 _ => regions.push(region),
             }
         }
+        let frame = frame.ok_or(WindowChromeError::MissingFrame)?;
+        let decoration = ui
+            .box_styles
+            .get(frame.node)
+            .cloned()
+            .unwrap_or_default()
+            .decoration;
+        let outer = crate::render::RoundedClip::new(frame.bounds, decoration.corner_radii);
+        let inner = outer.inset(decoration.border);
+        for region in &mut regions {
+            if let Some(outset) = ui
+                .window_chrome_hit_specs
+                .get(region.node)
+                .and_then(|spec| spec.frame_border_outset)
+            {
+                region.hit_clips = [Some(outer.outset(outset)), Some(inner.inverse())];
+                // Oversized corner metrics must not let opposite diagonal handles overlap.
+                let corner = match region.role {
+                    WindowChromeRole::Action(WindowAction::BeginResize(
+                        WindowResizeEdge::TopLeft,
+                    )) => Some((false, false)),
+                    WindowChromeRole::Action(WindowAction::BeginResize(
+                        WindowResizeEdge::TopRight,
+                    )) => Some((true, false)),
+                    WindowChromeRole::Action(WindowAction::BeginResize(
+                        WindowResizeEdge::BottomLeft,
+                    )) => Some((false, true)),
+                    WindowChromeRole::Action(WindowAction::BeginResize(
+                        WindowResizeEdge::BottomRight,
+                    )) => Some((true, true)),
+                    _ => None,
+                };
+                if let Some((right, bottom)) = corner {
+                    let expanded = outer.outset(outset).rect;
+                    let mid_x = frame.bounds.x + frame.bounds.width * 0.5;
+                    let mid_y = frame.bounds.y + frame.bounds.height * 0.5;
+                    let x = if right { mid_x } else { expanded.x };
+                    let y = if bottom { mid_y } else { expanded.y };
+                    let quadrant = RectF {
+                        x,
+                        y,
+                        width: if right {
+                            expanded.right() - x
+                        } else {
+                            mid_x - x
+                        },
+                        height: if bottom {
+                            expanded.bottom() - y
+                        } else {
+                            mid_y - y
+                        },
+                    };
+                    region.hit_bounds = region
+                        .hit_bounds
+                        .intersection(quadrant)
+                        .unwrap_or(RectF::ZERO);
+                }
+            }
+        }
         Ok(Self {
-            frame: frame.ok_or(WindowChromeError::MissingFrame)?,
+            frame,
             content: content.ok_or(WindowChromeError::MissingContentSlot)?,
             regions,
         })
@@ -344,7 +413,14 @@ impl WindowChromeSnapshot {
         self.regions
             .iter()
             .enumerate()
-            .filter(|(_, region)| region.hit_bounds.contains(point))
+            .filter(|(_, region)| {
+                region.hit_bounds.contains(point)
+                    && region
+                        .hit_clips
+                        .iter()
+                        .flatten()
+                        .all(|clip| clip.contains(point))
+            })
             .max_by_key(|(paint_order, region)| (region.priority, *paint_order))
             .map(|(_, region)| region)
     }
@@ -382,6 +458,7 @@ mod tests {
             role,
             bounds,
             hit_bounds: bounds,
+            hit_clips: [None; 2],
             priority: WindowChromeHitSpec::for_role(role).priority,
         }
     }

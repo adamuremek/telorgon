@@ -11,7 +11,8 @@ use crate::scene::NodeId;
 
 /// Both contours start at the window's inner top edge, not the app/title-bar seam.
 /// The rectangular content scissor cuts off the title bar without introducing another pair of
-/// top corners. The second contour controls the aperture inside the wider frame margins.
+/// top corners. Easy frames use only the border contour; custom templates can request a second
+/// contour for an aperture inside wider frame margins.
 pub(super) fn frame_content_clips(
     border: &BoxInstance,
     position: PointI,
@@ -24,6 +25,9 @@ pub(super) fn frame_content_clips(
         ..border.rect
     };
     let inner = RoundedClip::new(rect, border.corner_radii).inset(border.border);
+    if content_radius <= 0.0 {
+        return [Some(inner), None];
+    }
     [
         Some(inner),
         Some(RoundedClip::new(
@@ -178,7 +182,11 @@ impl DesktopLayer {
         position: PointI,
         content: RectI,
         clips: [Option<RoundedClip>; 2],
-    ) -> Self {
+    ) -> Option<Self> {
+        let aperture = clips[1]?;
+        if instance.background.is_none_or(|color| color.a == 0) {
+            return None;
+        }
         instance.node = NodeId::new(0, 1);
         for side in [
             &mut instance.border.top,
@@ -201,8 +209,8 @@ impl DesktopLayer {
             instance,
         };
         layer.clip = Some(content);
-        layer.rounded_clips = [clips[1].map(RoundedClip::inverse), None];
-        layer
+        layer.rounded_clips = [Some(aperture.inverse()), None];
+        Some(layer)
     }
 
     pub(super) fn with_content_clip(

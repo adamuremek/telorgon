@@ -109,6 +109,17 @@ impl Element {
     }
 
     #[doc(hidden)]
+    pub fn with_window_chrome_border_hit(mut self, outset: crate::core::EdgeInsets) -> Self {
+        let default = self
+            .window_chrome_role
+            .map(crate::window_chrome::WindowChromeHitSpec::for_role)
+            .unwrap_or_default();
+        let spec = self.window_chrome_hit_spec.get_or_insert(default);
+        spec.frame_border_outset = Some(outset);
+        self
+    }
+
+    #[doc(hidden)]
     pub fn with_window_chrome_hit_priority(mut self, priority: u16) -> Self {
         let default = self
             .window_chrome_role

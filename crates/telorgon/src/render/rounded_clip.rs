@@ -1,4 +1,4 @@
-use crate::core::{PointF, RectF};
+use crate::core::{EdgeInsets, PointF, RectF};
 use crate::ui::{Border, CornerRadii};
 
 /// An analytic rounded clip in output-pixel coordinates, independent of a retained scene.
@@ -15,6 +15,40 @@ pub struct RoundedClip {
 mod tests {
     use super::*;
     use crate::core::ColorRgba8;
+
+    #[test]
+    fn resize_outset_and_containment_share_the_border_curve() {
+        let outer = RoundedClip::new(
+            RectF {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 80.0,
+            },
+            CornerRadii::all(14.0),
+        );
+        let inner = outer.inset(Border::all(4.0, ColorRgba8::rgba(0, 0, 0, 0)));
+        let expanded = outer.outset(EdgeInsets::all(6.0));
+        assert_eq!(
+            expanded.rect.x + expanded.radii.top_left,
+            outer.rect.x + outer.radii.top_left
+        );
+        assert_eq!(expanded.radii, CornerRadii::all(20.0));
+        let border_point = PointF { x: 15.5, y: 25.5 };
+        assert!(outer.contains(border_point));
+        assert!(!inner.contains(border_point));
+        assert!(inner.inverse().contains(border_point));
+        assert!(expanded.contains(PointF { x: 5.0, y: 60.0 }));
+        assert!(!expanded.contains(PointF { x: 3.0, y: 60.0 }));
+        assert!(
+            !expanded.contains(PointF { x: 4.0, y: 14.0 }),
+            "outside square corner is not in the rounded band"
+        );
+        assert_eq!(
+            outer.inverse().outset(EdgeInsets::all(6.0)),
+            expanded.inverse()
+        );
+    }
 
     #[test]
     fn inverse_coverage_is_complementary_including_empty_bounds_and_antialiasing() {
@@ -130,6 +164,36 @@ impl RoundedClip {
     pub fn inverse(mut self) -> Self {
         self.inverted = !self.inverted;
         self
+    }
+
+    /// Expands a contour without changing the source geometry (for outside input tolerance).
+    pub fn outset(self, insets: EdgeInsets) -> Self {
+        let top = insets.top.max(0.0);
+        let right = insets.right.max(0.0);
+        let bottom = insets.bottom.max(0.0);
+        let left = insets.left.max(0.0);
+        let mut outer = Self::new(
+            RectF {
+                x: self.rect.x - left,
+                y: self.rect.y - top,
+                width: self.rect.width + left + right,
+                height: self.rect.height + top + bottom,
+            },
+            CornerRadii {
+                top_left: self.radii.top_left + top.max(left),
+                top_right: self.radii.top_right + top.max(right),
+                bottom_right: self.radii.bottom_right + bottom.max(right),
+                bottom_left: self.radii.bottom_left + bottom.max(left),
+            },
+        );
+        outer.inverted = self.inverted;
+        outer
+    }
+
+    /// Geometric input containment; antialiasing does not enlarge the hit target.
+    pub fn contains(self, point: PointF) -> bool {
+        let inside = self.rect.contains(point) && self.inner_coverage(point) >= 0.5;
+        if self.inverted { !inside } else { inside }
     }
 
     /// Matches the analytic box renderer's inner border contour, including zero-width borders.
