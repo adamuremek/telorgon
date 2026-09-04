@@ -407,6 +407,13 @@ impl WindowChromeSnapshot {
         self.hit_test_region(x, y).map(|region| region.role)
     }
 
+    /// Whether a frame-local point belongs to client content rather than a chrome target.
+    /// Rounded resize bands can overlap the content slot's rectangular bounds.
+    pub fn hit_test_content(&self, x: f32, y: f32) -> bool {
+        self.content.bounds.contains(crate::core::PointF { x, y })
+            && self.hit_test_region(x, y).is_none()
+    }
+
     /// Returns the highest-priority, top-most region containing a frame-local point.
     pub fn hit_test_region(&self, x: f32, y: f32) -> Option<&WindowChromeRegion> {
         let point = crate::core::PointF { x, y };

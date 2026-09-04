@@ -183,6 +183,13 @@ surface/client destruction, and session locking cancel client delivery while ret
 state until release. Session locking also cancels armed frame controls. Pointer leave events are
 terminated with a frame, including when no new surface receives focus.
 
+Client hover focus and decoration cursor selection share `WindowChromeSnapshot::hit_test_content`.
+Published chrome targets take precedence over the rectangular content slot, including rounded
+corner resize bands that overlap that slot. Crossing from a corner handle into content therefore
+produces a fresh client enter instead of leaving a compositor cursor installed under unchanged
+client focus. The window-frame regression walks inward in subpixel steps at every corner (with
+and without a title bar where content is adjacent) and also checks the straight-edge transitions.
+
 Both cursor requests authorize against the focused client and its current pointer-enter serial,
 independently of the bounded general serial ledger. Nonmatching requests are ignored before cursor
 state or surface roles change; invalid cursor shapes and role conflicts remain protocol errors.

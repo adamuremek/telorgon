@@ -457,6 +457,102 @@ fn title_bar_height_and_visibility_derive_content_bounds_automatically() {
 }
 
 #[test]
+fn corner_resize_to_content_hover_changes_pointer_ownership() {
+    for title_bar_visible in [false, true] {
+        let design = WindowChromeDesign {
+            normal: WindowChromeStateStyle {
+                title_bar_visible,
+                ..NORMAL
+            },
+            ..TEST_CHROME
+        };
+        let snapshot = chrome_snapshot(design, WindowChromeModel::new(17, "Hover").active(true));
+        let radius = NORMAL.frame_radius;
+        let border = design.active.frame_border_width;
+        let start = radius - (radius - border * 0.5) / 2.0_f32.sqrt();
+        for (edge, right, bottom) in [
+            (WindowResizeEdge::TopLeft, false, false),
+            (WindowResizeEdge::TopRight, true, false),
+            (WindowResizeEdge::BottomLeft, false, true),
+            (WindowResizeEdge::BottomRight, true, true),
+        ] {
+            // With a title bar, the upper corners lead into chrome, not client content.
+            if title_bar_visible && !bottom {
+                continue;
+            }
+            let point = |inset: f32| PointF {
+                x: if right { 640.0 - inset } else { inset },
+                y: if bottom { 480.0 - inset } else { inset },
+            };
+            let corner = point(start);
+            assert!(
+                snapshot.content.bounds.contains(corner),
+                "the old rectangular focus test would enter here"
+            );
+            assert_eq!(
+                snapshot.hit_test(corner.x, corner.y),
+                Some(WindowChromeRole::Action(WindowAction::BeginResize(edge)))
+            );
+            assert!(!snapshot.hit_test_content(corner.x, corner.y));
+
+            let mut entered = false;
+            let mut transitions = 0;
+            for step in 0..=80 {
+                let p = point(start + (radius - start) * step as f32 / 80.0);
+                let content = snapshot.hit_test_content(p.x, p.y);
+                if content != entered {
+                    transitions += 1;
+                }
+                if content {
+                    assert_eq!(snapshot.hit_test(p.x, p.y), None);
+                }
+                entered = content;
+            }
+            assert!(entered);
+            assert_eq!(
+                transitions, 1,
+                "slow corner-to-content motion must hand focus back exactly once"
+            );
+        }
+        for (outside, inside) in [
+            (
+                PointF {
+                    x: border * 0.5,
+                    y: 240.0,
+                },
+                PointF {
+                    x: border + 0.5,
+                    y: 240.0,
+                },
+            ),
+            (
+                PointF {
+                    x: 640.0 - border * 0.5,
+                    y: 240.0,
+                },
+                PointF {
+                    x: 640.0 - border - 0.5,
+                    y: 240.0,
+                },
+            ),
+            (
+                PointF {
+                    x: 320.0,
+                    y: 480.0 - border * 0.5,
+                },
+                PointF {
+                    x: 320.0,
+                    y: 480.0 - border - 0.5,
+                },
+            ),
+        ] {
+            assert!(!snapshot.hit_test_content(outside.x, outside.y));
+            assert!(snapshot.hit_test_content(inside.x, inside.y));
+        }
+    }
+}
+
+#[test]
 fn resize_contours_do_not_capture_client_pixels_or_enable_disabled_edges() {
     let snapshot = chrome_snapshot(
         TEST_CHROME,

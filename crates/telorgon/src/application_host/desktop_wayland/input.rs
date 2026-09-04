@@ -270,7 +270,7 @@ pub(super) fn hit_test_decoration(
             {
                 continue;
             }
-            if role.is_none() && chrome.content.bounds.contains(point) {
+            if chrome.hit_test_content(point.x, point.y) {
                 return None;
             }
             let hit = match role {
@@ -501,6 +501,15 @@ pub(super) fn hit_test_surface(
         .filter(|(surface, window)| {
             resize_veil_owner(windows, *surface).is_none()
                 && surface_placement(window, window.position, config).contains(position)
+                // Rounded corner handles overlap the rectangular content slot. Use the same
+                // chrome geometry as cursor/decoration routing so leaving a handle produces a
+                // fresh client enter (and a new opportunity to install its cursor).
+                && window.chrome.as_ref().is_none_or(|chrome| {
+                    chrome.hit_test_content(
+                        position.x - window.position.x as f32,
+                        position.y - window.position.y as f32,
+                    )
+                })
         })
         .map(|(surface, _)| surface)
 }
