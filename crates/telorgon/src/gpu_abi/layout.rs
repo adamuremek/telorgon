@@ -7,7 +7,7 @@ use crate::gpu_abi::{
 
 const _: () = {
     assert!(align_of::<GpuView>() == 16);
-    assert!(size_of::<GpuView>() == 128);
+    assert!(size_of::<GpuView>() == 192);
     assert!(offset_of!(GpuView, clip_from_view_0) == 0);
     assert!(offset_of!(GpuView, clip_from_view_1) == 16);
     assert!(offset_of!(GpuView, clip_from_view_2) == 32);
@@ -16,6 +16,8 @@ const _: () = {
     assert!(offset_of!(GpuView, target_size_origin) == 80);
     assert!(offset_of!(GpuView, render_size_inverse) == 96);
     assert!(offset_of!(GpuView, epoch_flags) == 112);
+    assert!(offset_of!(GpuView, placement_clip_rects) == 128);
+    assert!(offset_of!(GpuView, placement_clip_radii) == 160);
 
     assert!(align_of::<GpuSpatial>() == 16);
     assert!(size_of::<GpuSpatial>() == 32);

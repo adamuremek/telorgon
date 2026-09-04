@@ -23,10 +23,14 @@ placements sharing one retained scene. Easy frames paint their content backing s
 use; custom templates can opt in through `WindowFrameTemplate::content_style`. During resize neither
 the backing nor any client pixels draw beneath the preview, even for custom templates. Thus a
 translucent preview reveals the desktop/lower windows, and alpha zero gives a frame-only resize.
-Input routing is unchanged. Rounded content backing is preserved; this does not add rounded client
-image clipping. Color scenes have per-window identity and native-sized analytic geometry for both
+Input routing is unchanged. Client pixels, backing, and preview share the frame's inner rounded
+border clip, intersected with content-slot bounds and optional `content_radius`. A border-only
+placement restores the curved rim inside the rectangular cutout without repainting an opaque backing
+or double-blending the frame strips. Subsurfaces inherit the clip; popups remain independent.
+Color scenes have per-window identity and native-sized analytic geometry for both
 backends. Resizing changes a box delta and placement, never client pixels or a CPU image allocation;
-translation-only movement reuses the scene. No new shaders, extensions, or offscreen passes are used.
+translation-only movement reuses the scene. Rounded clipping uses per-placement analytic shader
+coverage (GPU ABI 3) and matching software coverage, without new extensions or offscreen passes.
 
 On press, the compositor sends the resizing state with the client's committed window extent. Motion
 only changes desired geometry; it does not issue intermediate size requests. Release sends the final
@@ -128,6 +132,47 @@ unnecessary GPU requirements; changing image formats or forcing XRGB transparent
 semantics. The software compositor's existing native-extent contract also rules out a scaled 1x1
 solid scene. Reference sources were neither modified nor copied.
 
+## Rounded-frame clipping audit
+
+Concern: preserve the curved border rim while clipping external content, including opaque XRGB
+images, to the same inner contour. The outer radius alone cannot define the inner edge; border
+thickness and content-slot offsets matter. Transparent content must not regain an opaque backing.
+
+Read-only references inspected:
+
+- Flutter `51fd9afadf309ba5337320bd3653f5345c156cb9`,
+  `flutter/packages/flutter/lib/src/painting/rounded_rectangle_border.dart`, `getInnerPath`,
+  `getOuterPath`, and `paint`: derive an inset inner contour and paint the difference between outer
+  and inner bounds. Telorgon's uniform easy-frame border follows that geometry; custom asymmetric
+  borders retain the existing analytic-box renderer's per-corner circular inset convention.
+- Android platform/base `1cdfff555f4a21f71ccc978290e2e212e2f8b168`,
+  `base/core/java/android/view/SurfaceControl.java`, `Transaction.setCrop` and `setCornerRadius`:
+  clipping is surface-composition metadata, not a request to rewrite the producer buffer; child
+  surfaces and independent overlays have different clipping ownership.
+
+Official checks: [CSS corner shaping](https://www.w3.org/TR/css-backgrounds-3/#corner-shaping)
+for uniform border inset geometry and [Vulkan fragment operations](https://docs.vulkan.org/spec/latest/chapters/fragops.html)
+for rectangular scissor bounds versus fragment coverage. No vendor-specific exclusive-scissor,
+stencil attachment, mask texture, imported-image mutation, or new synchronization feature is needed.
+
+Implemented invariants: at most two output-space rounded bounds per composite placement (frame
+interior and content slot), intersected with existing rectangular scissors; premultiplied color and
+alpha both receive coverage; clipped opaque batches use source-over for their edge; shader/CPU
+coverage use the same one-output-pixel distance rule; radius-only changes damage old/new placement
+bounds without touching image resources; frame-node replacement cannot accumulate stale border
+geometry. The border-only patch and four frame strips have disjoint scissors. The existing
+slot-fenced GPU upload/driver workarounds, image ownership, callback pacing, and input hit regions
+remain unchanged. The easy frame clips composed descendants, not its own shadow.
+
+Rejected alternatives: merely rounding the background leaves square client pixels; an opaque corner
+cover breaks transparency; a radius-only content setting ignores border thickness and title-bar
+offsets; CPU image masks/readbacks add resize work and diverge for DMA-BUF; shader-space hard discard
+alone creates jagged edges. General arbitrary clip stacks remain outside this bounded compositor
+feature. No reference code was copied or modified.
+
+Vulkan shader assets are regenerated offline, SPIR-V validated, and reflected against the 192-byte
+view-block offsets in all eight stages. This is compilation/verification, not an application run.
+
 ## Verification and manual qualification
 
 CPU tests cover native coordinate/clip mapping, shadow exclusion, all eight anchored edges and
@@ -143,11 +188,15 @@ rounded-to-square backing transitions, and resized coverage repaint. Neutral tes
 offscreen/full-frame cutouts, retained ownership, independent preview colors, and easy/template API
 inheritance. Software composite tests also run on non-Linux development hosts without opening a device.
 
-Verification for the current implementation, including the RGBA follow-up:
+Rounded-frame tests additionally raster-check both bottom rims and outside corners, zero/oversized
+radii, zero/thick borders, preview alpha 0/128/255, radius changes without image uploads, and border
+scene reuse across source-node replacement. Geometry tests check inset centers and empty clips.
 
-- `cargo test -p telorgon --lib --quiet`: 924 passed.
+Verification for the current implementation, including the rounded-frame follow-up:
+
+- `cargo test -p telorgon --lib --quiet`: 930 passed.
 - `cargo test -p telorgon --lib desktop_wayland --features embedded-vulkan,profiler --quiet`:
-  31 passed.
+  35 passed.
 - `cargo test -p telorgon --test window_frame_api --quiet`: 4 passed.
 - `cargo check -p telorgon --tests --target aarch64-unknown-linux-gnu --no-default-features
   --features desktop-wayland-linux,embedded-vulkan,profiler`: passed.
@@ -165,3 +214,8 @@ overlapping windows, an alpha-capable SHM/GPU client, and an opaque client; veri
 behind transparency while stale client pixels never appear during resize. Compare actual SHM-copy counters during a held drag and
 after release. Repeat with the software backend and the target Raspberry Pi/Mesa, AMD, Intel, and
 NVIDIA hardware as available; build success alone does not qualify that matrix.
+
+For rounded frames, test contrasting desktop/client/border colors with thin, zero-width, and thick
+borders; `content_radius` zero and nonzero; normal/maximized/tiled transitions; translucent previews;
+and child surfaces near corners. The visible rim must remain curved while content never extends
+beyond its inner edge. Popups may extend beyond the window, and shadows remain outside its outer edge.

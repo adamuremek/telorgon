@@ -11,12 +11,13 @@ use crate::ui::{MountedUi, UiNodeId};
 /// The host cuts the frame decoration out of the content slot, then paints this backing once
 /// beneath the client. During resize it replaces both with the preview, so preview transparency
 /// reveals lower desktop layers, never the stale client or this backing. Input regions are
-/// unaffected. The corner radius shapes the backing, not the client's pixels.
+/// unaffected. The corner radius clips the backing, preview, and client surface tree in addition
+/// to the composed frame's inner border contour. Popups retain independent bounds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowContentStyle {
     /// Straight RGBA color beneath the client; alpha zero removes the content backing.
     pub background: ColorRgba8,
-    /// Finite, nonnegative radius of the backing in logical pixels.
+    /// Finite, nonnegative additional content-slot radius in logical pixels.
     pub corner_radius: f32,
     /// `None` inherits the host's resize-preview color.
     pub resize_preview_color: Option<ColorRgba8>,

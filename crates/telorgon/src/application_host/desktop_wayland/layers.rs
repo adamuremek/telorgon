@@ -1,4 +1,6 @@
+use super::scene::frame_content_clips;
 use super::*;
+use crate::render::{BoxInstance, ClipId, SpatialId};
 
 pub(super) struct Layer {
     pub(super) runtime: ComposedAppRuntime,
@@ -230,6 +232,7 @@ pub(super) fn refresh_window_frames(
                     snapshot: None,
                     outer: previous_outer,
                     content_style,
+                    border: None,
                     icon_image: None,
                 },
             );
@@ -287,6 +290,27 @@ pub(super) fn refresh_window_frames(
             )
             .map_err(app_error)?;
         }
+        let style = frame
+            .layer
+            .runtime
+            .ui()
+            .box_styles
+            .get(snapshot.frame.node)
+            .cloned()
+            .unwrap_or_default();
+        frame.border = Some(BoxInstance {
+            node: snapshot.frame.node,
+            rect: snapshot.frame.bounds,
+            view_bounds: snapshot.frame.bounds,
+            background: None,
+            border: style.decoration.border,
+            outline: Default::default(),
+            corner_radii: style.decoration.corner_radii,
+            shadows: Default::default(),
+            opacity: style.opacity,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        });
         frame.snapshot = Some(snapshot.clone());
         frame.layer.prepare(frame.outer, now, false)?;
         updates.push((
@@ -329,6 +353,7 @@ pub(super) struct WindowFrameLayer {
     pub(super) snapshot: Option<WindowChromeSnapshot>,
     pub(super) outer: SizeI,
     content_style: Option<crate::window_chrome::WindowContentStyle>,
+    border: Option<BoxInstance>,
     icon_image: Option<ImageId>,
 }
 
@@ -405,8 +430,41 @@ pub(super) fn prepare_desktop_layers(
             (*surface, position)
         })
         .collect::<BTreeMap<_, _>>();
+    let content_clips = windows
+        .iter()
+        .filter_map(|(surface, window)| {
+            if !window_is_decorated(window) {
+                return None;
+            }
+            let frame = frames.get(surface)?;
+            let border = frame.border.as_ref()?;
+            let position = placements.get(surface).copied().unwrap_or(window.position);
+            let rect = window_content_rect(window, position, config);
+            let clips = frame_content_clips(
+                border,
+                position,
+                rect,
+                frame.content_style.map_or(0.0, |style| style.corner_radius),
+            );
+            Some((*surface, (rect, clips)))
+        })
+        .collect::<BTreeMap<_, _>>();
     for surface in stacking_order {
         let veiled = resize_veil_owner(windows, *surface).is_some();
+        // Only subsurfaces inherit their toplevel's clip. Popups are independent overlays and
+        // may legitimately extend beyond the parent window.
+        let mut owner = Some(*surface);
+        for _ in 0..=windows.len() {
+            let Some(candidate) = owner.and_then(|id| windows.get(&id)) else {
+                break;
+            };
+            if candidate.role == SurfaceRole::Subsurface {
+                owner = candidate.parent;
+            } else {
+                break;
+            }
+        }
+        let inherited_clip = owner.and_then(|id| content_clips.get(&id)).copied();
         let Some(window) = windows.get_mut(surface) else {
             continue;
         };
@@ -438,18 +496,35 @@ pub(super) fn prepare_desktop_layers(
                 visible,
                 (veiled || content_style.is_some()).then_some(content_rect),
             ));
+            if visible
+                && (veiled || content_style.is_some())
+                && let Some(border) = &frame.border
+            {
+                // Restore only the curved rim removed by the rectangular backing cutout.
+                // Its scissor is disjoint from the four retained frame strips.
+                layers.push(DesktopLayer::content_border(
+                    surface.get(),
+                    border.clone(),
+                    frame.outer,
+                    position,
+                    content_rect,
+                ));
+            }
         }
         if visible
             && !veiled
             && let Some(style) = content_style
         {
-            layers.push(DesktopLayer::rounded_solid(
+            let mut backing = DesktopLayer::solid(
                 DesktopLayerKey::ContentBackground(surface.get()),
                 DesktopSceneKey::ContentBackground(surface.get()),
                 style.background,
                 content_rect,
-                style.corner_radius,
-            ));
+            );
+            if let Some((bounds, clips)) = inherited_clip {
+                backing = backing.with_content_clip(bounds, clips);
+            }
+            layers.push(backing);
         }
         if visible
             && window_is_decorated(window)
@@ -489,17 +564,21 @@ pub(super) fn prepare_desktop_layers(
         // The live resize preview is a solid retained primitive. Keep the image scene and its
         // pending pixels intact, but do not upload or draw them underneath even a transparent veil.
         if visible && window.role == SurfaceRole::XdgToplevel && veiled {
-            layers.push(DesktopLayer::solid(
+            let mut preview = DesktopLayer::solid(
                 DesktopLayerKey::ResizeVeil(surface.get()),
                 DesktopSceneKey::ResizeVeil(surface.get()),
                 content_style
                     .and_then(|style| style.resize_preview_color)
                     .unwrap_or(config.resize_preview_color),
                 content_rect,
-            ));
+            );
+            if let Some((bounds, clips)) = inherited_clip {
+                preview = preview.with_content_clip(bounds, clips);
+            }
+            layers.push(preview);
         }
         let placement = surface_placement(window, position, config);
-        layers.push(DesktopLayer::image(
+        let mut client = DesktopLayer::image(
             DesktopLayerKey::Surface(surface.get()),
             DesktopSceneKey::Surface(surface.get()),
             window.revision,
@@ -514,7 +593,11 @@ pub(super) fn prepare_desktop_layers(
             window.alpha_mode,
             window.pixel_format,
             visible && !veiled,
-        ));
+        );
+        if let Some((bounds, clips)) = inherited_clip {
+            client = client.with_content_clip(bounds, clips);
+        }
+        layers.push(client);
     }
 
     // Drag-icon surfaces intentionally do not participate in ordinary window stacking, so retain

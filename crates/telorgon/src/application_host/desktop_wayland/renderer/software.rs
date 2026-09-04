@@ -76,6 +76,7 @@ impl SoftwareDesktopRenderer {
                 scene,
                 target: placement.target,
                 clip: placement.clip,
+                rounded_clips: placement.rounded_clips,
             });
         }
         self.renderer

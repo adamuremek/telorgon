@@ -34,7 +34,9 @@ pub struct WindowChromePalette {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowChromeStateStyle {
     pub title_bar_visible: bool,
+    /// Outer frame radius. Client content is automatically clipped to the inner border curve.
     pub frame_radius: f32,
+    /// Optional additional rounding at the content slot, intersected with the inner frame clip.
     pub content_radius: f32,
     pub shadow: Option<Shadow>,
     pub resize_regions: bool,
@@ -292,11 +294,13 @@ impl Component for EasyWindowFrameComponent {
 
         window_frame()
             .decoration(frame_decoration)
+            .overflow(crate::ui::Overflow::Clip)
             .children(title_bar)
             .children(resize)
             .content_slot(
                 window_content_slot()
                     .margin(state.content_margin)
+                    .overflow(crate::ui::Overflow::Clip)
                     .decoration(
                         BoxDecoration::new()
                             .background(Background::Color(design.content_background))

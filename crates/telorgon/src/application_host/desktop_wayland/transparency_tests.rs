@@ -57,6 +57,7 @@ impl Raster {
                 scene: &self.scenes[&placement.scene],
                 target: placement.target,
                 clip: placement.clip,
+                rounded_clips: placement.rounded_clips,
             })
             .collect::<Vec<_>>();
         SoftwareRenderer
@@ -270,5 +271,260 @@ fn rounded_backing_and_resize_geometry_render_at_native_extent() {
         raster.pixel(24, 18),
         [0, 255, 0, 255],
         "old coverage is repainted"
+    );
+}
+
+fn rounded_frame(
+    radius: f32,
+    width: f32,
+) -> (
+    Vec<DesktopLayer>,
+    [Option<crate::render::RoundedClip>; 2],
+    RectI,
+) {
+    use crate::render::{
+        BatchKey, BlendMode, Border, BoxInstance, ClipId, DrawItem, PipelineKind, PrimitiveKind,
+        SpatialId,
+    };
+    let extent = SizeI {
+        width: 28,
+        height: 22,
+    };
+    let position = PointI { x: 2, y: 1 };
+    let content = RectI {
+        x: 2 + width as i32,
+        y: 8,
+        width: 28 - width as i32 * 2,
+        height: 15 - width as i32,
+    };
+    let rect = crate::core::RectF {
+        x: 0.0,
+        y: 0.0,
+        width: 28.0,
+        height: 22.0,
+    };
+    let mut border = BoxInstance {
+        node: crate::scene::NodeId::new(0, 1),
+        rect,
+        view_bounds: rect,
+        background: Some(ColorRgba8::rgba(60, 60, 60, 255)),
+        border: Border::all(width, ColorRgba8::rgba(255, 0, 0, 255)),
+        outline: Default::default(),
+        corner_radii: crate::ui::CornerRadii::all(radius),
+        shadows: Default::default(),
+        opacity: 1.0,
+        clip: ClipId(0),
+        spatial: SpatialId(0),
+    };
+    let mut source = RenderScene::default();
+    source.extent = SizeF {
+        width: 28.0,
+        height: 22.0,
+    };
+    source.background = ColorRgba8::rgba(0, 0, 0, 0);
+    source.boxes.upsert(border.node, border.clone());
+    source.set_draw_order(vec![DrawItem {
+        kind: PrimitiveKind::Box,
+        index: 0,
+        batch: BatchKey {
+            pipeline: PipelineKind::AnalyticBox,
+            resource: 0,
+            clip: ClipId(0),
+            blend: BlendMode::Alpha,
+            target: 0,
+        },
+    }]);
+    let mut layers = DesktopLayer::retained_frame(
+        9,
+        vec![source.take_delta().unwrap()],
+        extent,
+        position,
+        true,
+        Some(content),
+    );
+    border.background = None;
+    let clips = frame_content_clips(&border, position, content, 0.0);
+    layers.push(DesktopLayer::content_border(
+        9, border, extent, position, content,
+    ));
+    (layers, clips, content)
+}
+
+#[test]
+fn rounded_border_keeps_its_inner_rim_and_clips_opaque_client_corners() {
+    for (radius, width) in [(8.0, 2.0), (8.0, 0.0), (0.0, 2.0), (200.0, 2.0), (3.0, 6.0)] {
+        let (mut layers, clips, content) = rounded_frame(radius, width);
+        layers.push(
+            DesktopLayer::image(
+                DesktopLayerKey::Surface(9),
+                DesktopSceneKey::Surface(9),
+                1,
+                DesktopImageUpdate::Full(
+                    [0, 0, 255, 0]
+                        .repeat((content.width * content.height) as usize)
+                        .into(),
+                ),
+                SizeI {
+                    width: content.width,
+                    height: content.height,
+                },
+                content,
+                None,
+                ImageAlphaMode::Opaque,
+                ImagePixelFormat::Rgba8,
+                true,
+            )
+            .with_content_clip(content, clips),
+        );
+        let mut raster = Raster::new();
+        raster.draw(layers);
+        for y in content.y..content.bottom() {
+            for x in content.x..content.right() {
+                let point = crate::core::PointF {
+                    x: x as f32 + 0.5,
+                    y: y as f32 + 0.5,
+                };
+                let coverage = clips
+                    .iter()
+                    .flatten()
+                    .fold(1.0_f32, |a, clip| a.min(clip.coverage(point)));
+                let pixel = raster.pixel(x as usize, y as usize);
+                if coverage == 0.0 {
+                    assert_eq!(
+                        pixel[2], 0,
+                        "client escaped: r={radius} b={width} at {x},{y}"
+                    );
+                }
+                if coverage == 1.0 {
+                    assert_eq!(pixel, [0, 0, 255, 255]);
+                }
+            }
+        }
+        if radius == 8.0 && width == 2.0 {
+            assert_eq!(
+                raster.pixel(4, 19),
+                [255, 0, 0, 255],
+                "inner curved rim was cut away"
+            );
+            assert_eq!(
+                raster.pixel(27, 19),
+                [255, 0, 0, 255],
+                "right curved rim was cut away"
+            );
+            assert_eq!(
+                raster.pixel(2, 22),
+                [0, 255, 0, 255],
+                "outside corner is not clipped"
+            );
+            assert_eq!(raster.pixel(29, 22), [0, 255, 0, 255]);
+        }
+    }
+}
+
+#[test]
+fn rounded_preview_preserves_transparency_and_the_curved_rim() {
+    for alpha in [0, 128, 255] {
+        let (mut layers, clips, content) = rounded_frame(8.0, 2.0);
+        layers.push(
+            DesktopLayer::solid(
+                DesktopLayerKey::ResizeVeil(9),
+                DesktopSceneKey::ResizeVeil(9),
+                ColorRgba8::rgba(0, 0, 255, alpha),
+                content,
+            )
+            .with_content_clip(content, clips),
+        );
+        let mut raster = Raster::new();
+        raster.draw(layers);
+        assert_eq!(raster.pixel(4, 19), [255, 0, 0, 255]);
+        assert_eq!(raster.pixel(2, 22), [0, 255, 0, 255]);
+        let expected = match alpha {
+            0 => [0, 255, 0, 255],
+            128 => [0, 187, 188, 255],
+            _ => [0, 0, 255, 255],
+        };
+        assert_eq!(raster.pixel(16, 16), expected);
+    }
+}
+
+#[test]
+fn rounded_clip_changes_repaint_without_touching_client_pixels() {
+    use crate::render::RoundedClip;
+    let extent = SizeI {
+        width: CONTENT.width,
+        height: CONTENT.height,
+    };
+    let clip = |radius| {
+        Some(RoundedClip::new(
+            crate::core::RectF {
+                x: CONTENT.x as f32,
+                y: CONTENT.y as f32,
+                width: CONTENT.width as f32,
+                height: CONTENT.height as f32,
+            },
+            crate::ui::CornerRadii::all(radius),
+        ))
+    };
+    let layer = |update, radius| {
+        DesktopLayer::image(
+            DesktopLayerKey::Surface(9),
+            DesktopSceneKey::Surface(9),
+            1,
+            update,
+            extent,
+            CONTENT,
+            None,
+            ImageAlphaMode::Opaque,
+            ImagePixelFormat::Rgba8,
+            true,
+        )
+        .with_content_clip(CONTENT, [clip(radius), None])
+    };
+    let mut raster = Raster::new();
+    raster.draw(vec![layer(
+        DesktopImageUpdate::Full([0, 0, 255, 255].repeat(240).into()),
+        0.0,
+    )]);
+    assert_eq!(raster.pixel(6, 8), [0, 0, 255, 255]);
+    let changed = raster.draw(vec![layer(DesktopImageUpdate::Unchanged, 5.0)]);
+    assert!(changed.updates.is_empty());
+    assert_eq!(raster.pixel(6, 8), [0, 255, 0, 255]);
+    let changed = raster.draw(vec![layer(DesktopImageUpdate::Unchanged, 0.0)]);
+    assert!(changed.updates.is_empty());
+    assert_eq!(raster.pixel(6, 8), [0, 0, 255, 255]);
+}
+
+#[test]
+fn replaced_frame_nodes_update_the_same_border_scene_slot() {
+    let (layers, _, _) = rounded_frame(8.0, 2.0);
+    let border = layers
+        .into_iter()
+        .find(|l| l.key == DesktopLayerKey::ContentBorder(9))
+        .unwrap();
+    let DesktopLayerContent::Decoration { mut instance, .. } = border.content else {
+        unreachable!()
+    };
+    let mut raster = Raster::new();
+    raster.draw(vec![DesktopLayer::content_border(
+        9,
+        instance.clone(),
+        border.source_extent,
+        PointI { x: 2, y: 1 },
+        border.clip.unwrap(),
+    )]);
+    assert_eq!(raster.pixel(4, 19), [255, 0, 0, 255]);
+    instance.node = crate::scene::NodeId::new(99, 5);
+    instance.border = crate::render::Border::all(2.0, ColorRgba8::rgba(0, 0, 255, 255));
+    let frame = raster.draw(vec![DesktopLayer::content_border(
+        9,
+        instance,
+        border.source_extent,
+        PointI { x: 2, y: 1 },
+        border.clip.unwrap(),
+    )]);
+    assert_eq!(raster.pixel(4, 19), [0, 0, 255, 255]);
+    assert_eq!(
+        frame.updates[0].deltas[0].box_len, 2,
+        "one border plus scene clear slot"
     );
 }

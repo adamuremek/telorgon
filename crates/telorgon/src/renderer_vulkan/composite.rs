@@ -5,8 +5,8 @@ use ash::vk;
 use crate::core::RectI;
 use crate::gpu_abi::GpuView;
 use crate::render::{
-    ColorSpace, PrimitiveKind, RenderError, RenderErrorKind, RenderRequest, RenderResult,
-    RenderStats, TargetLoad, TargetStore,
+    BlendMode, ColorSpace, PrimitiveKind, RenderError, RenderErrorKind, RenderRequest,
+    RenderResult, RenderStats, RoundedClip, TargetLoad, TargetStore,
 };
 
 use super::buffer::AllocatedBuffer;
@@ -42,6 +42,7 @@ pub struct VulkanCompositePlacement {
     pub scene_index: usize,
     pub target: RectI,
     pub clip: Option<RectI>,
+    pub rounded_clips: [Option<RoundedClip>; 2],
 }
 
 struct PreparedPlacement {
@@ -50,6 +51,7 @@ struct PreparedPlacement {
     mapping: ViewMapping,
     target: RectI,
     clip: Option<RectI>,
+    rounded: bool,
     scene_index: usize,
 }
 
@@ -104,6 +106,17 @@ impl VulkanDevice {
             return Err(RenderError::new(
                 RenderErrorKind::HostContract,
                 "Vulkan desktop placement references a missing scene",
+            ));
+        }
+        if placements
+            .iter()
+            .flat_map(|p| p.rounded_clips)
+            .flatten()
+            .any(|c| !c.is_valid())
+        {
+            return Err(RenderError::new(
+                RenderErrorKind::HostContract,
+                "invalid rounded composite clip",
             ));
         }
         let total_texture_sets = placements
@@ -189,7 +202,19 @@ impl VulkanDevice {
         for (placement, descriptors) in placements.iter().zip(descriptor_groups) {
             let scene = &scenes[placement.scene_index].scene;
             let mapping = ViewMapping::new(scene.extent, placement.target);
-            let view = gpu_view(scene, target, mapping);
+            let mut view = gpu_view(scene, target, mapping);
+            for (index, clip) in placement.rounded_clips.iter().enumerate() {
+                if let Some(clip) = clip {
+                    view.placement_clip_rects[index] =
+                        [clip.rect.x, clip.rect.y, clip.rect.width, clip.rect.height];
+                    view.placement_clip_radii[index] = [
+                        clip.radii.top_left,
+                        clip.radii.top_right,
+                        clip.radii.bottom_right,
+                        clip.radii.bottom_left,
+                    ];
+                }
+            }
             let plan = plans[placement.scene_index]
                 .take()
                 .unwrap_or_else(SceneUploadPlan::default);
@@ -217,6 +242,7 @@ impl VulkanDevice {
                 mapping,
                 target: placement.target,
                 clip: placement.clip,
+                rounded: placement.rounded_clips.iter().any(Option::is_some),
                 scene_index: placement.scene_index,
             });
         }
@@ -341,7 +367,13 @@ impl VulkanDevice {
                 if scissor.extent.width == 0 || scissor.extent.height == 0 {
                     continue;
                 }
-                let pipeline = self.pipeline(target.format, batch.key.pipeline, batch.key.blend)?;
+                // Even an opaque XRGB image needs source-over at its antialiased clip edge.
+                let blend = if placement.rounded {
+                    BlendMode::Alpha
+                } else {
+                    batch.key.blend
+                };
+                let pipeline = self.pipeline(target.format, batch.key.pipeline, blend)?;
                 let primitive = primitive_index(batch.kind);
                 unsafe {
                     if bound_pipeline != Some(pipeline) {

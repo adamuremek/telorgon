@@ -5,6 +5,7 @@ mod compiler;
 mod error;
 mod readback;
 mod request;
+mod rounded_clip;
 mod scene;
 mod stats;
 mod target;
@@ -16,6 +17,7 @@ pub use compiler::{CompileStats, SceneCompiler};
 pub use error::{RenderError, RenderErrorKind, RenderResult};
 pub use readback::{ReadbackFormat, ReadbackImage, ReadbackRequest, RenderReadback};
 pub use request::{RenderRequest, TargetLoad, TargetStore};
+pub use rounded_clip::RoundedClip;
 #[doc(hidden)]
 pub use scene::apply_patches;
 pub use scene::{

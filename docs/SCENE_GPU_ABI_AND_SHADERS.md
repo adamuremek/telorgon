@@ -293,7 +293,7 @@ The following offsets and sizes are normative. All offsets are bytes.
 
 ### 6.1 Frame/view record
 
-`GpuView`, alignment 16, size 128:
+`GpuView`, alignment 16, size 192 in the implemented GPU ABI 3.0:
 
 | Offset | Field | Meaning |
 |---:|---|---|
@@ -305,9 +305,20 @@ The following offsets and sizes are normative. All offsets are bytes.
 | 80 | `target_size_origin: [f32; 4]` | target pixel width/height, render-area X/Y |
 | 96 | `render_size_inverse: [f32; 4]` | render pixel width/height, inverse target width/height |
 | 112 | `epoch_flags: [u32; 4]` | epoch low/high, target color mode, flags |
+| 128 | `placement_clip_rects: [[f32; 4]; 2]` | optional output-pixel X/Y/width/height bounds |
+| 160 | `placement_clip_radii: [[f32; 4]; 2]` | corresponding TL/TR/BR/BL circular radii |
 
 `GpuView` uses uniform-buffer-compatible base alignment. Matrices are stored as explicit rows so host
 layout does not depend on language matrix-major defaults.
+
+ABI 3 extends the view record for bounded compositor clipping; all stages declare the same block.
+A negative rectangle width disables a clip slot, zero extent clips all fragments, and the two enabled
+rounded bounds intersect. Ordinary non-composite views explicitly disable both slots. Composite
+fragment stages use output-space signed-distance coverage with a one-pixel antialias band and
+multiply both premultiplied RGB and alpha; opaque batches select source-over when these clips are
+enabled. Existing scene clips and scissors still apply. Clip metadata is placement-owned, preserving
+shared scene resources and per-frame lifetime; there is no client image rewrite or mask attachment.
+See [rounded-frame audit](WAYLAND_RESIZE_PREVIEW.md#rounded-frame-clipping-audit).
 
 ### 6.2 Spatial and clip records
 

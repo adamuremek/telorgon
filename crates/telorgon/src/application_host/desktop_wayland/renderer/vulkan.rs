@@ -471,6 +471,7 @@ impl VulkanDesktopRenderer {
                     })?,
                     target: placement.target,
                     clip: placement.clip,
+                    rounded_clips: placement.rounded_clips,
                 })
             })
             .collect::<AppResult<Vec<_>>>()?;
@@ -494,6 +495,7 @@ impl VulkanDesktopRenderer {
                         scene_index: 0,
                         target: full_rect(materialization.target.extent()),
                         clip: None,
+                        rounded_clips: [None; 2],
                     }];
                     let mut source = [VulkanCompositeScene {
                         scene: &mut materialization.source,

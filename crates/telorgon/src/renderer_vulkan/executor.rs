@@ -1295,6 +1295,8 @@ pub(crate) fn gpu_view(
             },
             u32::from(target.info.alpha_mode == AlphaMode::Opaque),
         ],
+        placement_clip_rects: [[0.0, 0.0, -1.0, -1.0]; 2],
+        placement_clip_radii: [[0.0; 4]; 2],
     }
 }
 pub(crate) fn linear_clear(color: ColorRgba8) -> [f32; 4] {

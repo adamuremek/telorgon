@@ -21,6 +21,6 @@ pub use shadow_instance::GpuShadowInstance;
 pub use spatial::GpuSpatial;
 pub use view::GpuView;
 
-pub const GPU_ABI_MAJOR: u32 = 2;
+pub const GPU_ABI_MAJOR: u32 = 3;
 pub const GPU_ABI_MINOR: u32 = 0;
 pub const NO_GPU_SLOT: u32 = u32::MAX;

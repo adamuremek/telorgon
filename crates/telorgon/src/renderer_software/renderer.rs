@@ -60,6 +60,7 @@ pub(crate) struct SoftwareCompositeLayer<'scene> {
     pub scene: &'scene SoftwareScene,
     pub target: RectI,
     pub clip: Option<RectI>,
+    pub rounded_clips: [Option<crate::render::RoundedClip>; 2],
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -343,6 +344,12 @@ impl SoftwareRenderer {
         let mut batches = 0_u32;
         let mut epoch = 0_u64;
         for layer in layers {
+            if layer.rounded_clips.iter().flatten().any(|c| !c.is_valid()) {
+                return Err(RenderError::new(
+                    RenderErrorKind::HostContract,
+                    "invalid rounded composite clip",
+                ));
+            }
             let expected = SizeI {
                 width: layer.scene.extent.width.round() as i32,
                 height: layer.scene.extent.height.round() as i32,
@@ -376,6 +383,7 @@ impl SoftwareRenderer {
                     },
                     blend_mode: BlendMode::Alpha,
                     color_space: ColorSpace::Srgb,
+                    rounded_clips: layer.rounded_clips,
                 };
                 layer.scene.draw_region(&mut target, local);
                 batches = batches.saturating_add(
@@ -562,6 +570,7 @@ impl SoftwareScene {
             origin: crate::core::PointI::default(),
             blend_mode: BlendMode::Alpha,
             color_space,
+            rounded_clips: [None; 2],
         };
         self.draw_region(&mut target, region);
     }
@@ -643,6 +652,7 @@ struct RasterTarget<'a> {
     origin: crate::core::PointI,
     blend_mode: BlendMode,
     color_space: ColorSpace,
+    rounded_clips: [Option<crate::render::RoundedClip>; 2],
 }
 
 impl RasterTarget<'_> {
@@ -665,6 +675,21 @@ impl RasterTarget<'_> {
     ) {
         let x = x.saturating_add(self.origin.x);
         let y = y.saturating_add(self.origin.y);
+        let coverage = self
+            .rounded_clips
+            .iter()
+            .flatten()
+            .fold(1.0_f32, |amount, clip| {
+                amount.min(clip.coverage(crate::core::PointF {
+                    x: x as f32 + 0.5,
+                    y: y as f32 + 0.5,
+                }))
+            });
+        if coverage <= 0.0 {
+            return;
+        }
+        let source_alpha = source_alpha * coverage;
+        let source_rgb = source_rgb.map(|c| c * coverage);
         if x < 0
             || y < 0
             || x as usize >= self.width
@@ -679,7 +704,9 @@ impl RasterTarget<'_> {
         }
         let source_alpha = source_alpha.clamp(0.0, 1.0);
         let inverse = 1.0 - source_alpha;
-        let (rgb, alpha) = if self.blend_mode == BlendMode::Opaque {
+        let (rgb, alpha) = if self.blend_mode == BlendMode::Opaque
+            && self.rounded_clips.iter().all(Option::is_none)
+        {
             (source_rgb, source_alpha)
         } else {
             (
@@ -1454,6 +1481,7 @@ mod tests {
             origin: crate::core::PointI::default(),
             blend_mode: BlendMode::Alpha,
             color_space: ColorSpace::Srgb,
+            rounded_clips: [None; 2],
         };
         let glyph = GlyphInstance {
             node: NodeId::new(0, 1),
@@ -1509,6 +1537,7 @@ mod tests {
             origin: crate::core::PointI::default(),
             blend_mode: BlendMode::Alpha,
             color_space: ColorSpace::Srgb,
+            rounded_clips: [None; 2],
         };
         let node = NodeId::new(0, 1);
         let rect = RectF {
@@ -1727,6 +1756,7 @@ mod tests {
                 &[
                     SoftwareCompositeLayer {
                         scene: &red,
+                        rounded_clips: [None; 2],
                         target: RectI {
                             x: 0,
                             y: 0,
@@ -1737,6 +1767,7 @@ mod tests {
                     },
                     SoftwareCompositeLayer {
                         scene: &blue,
+                        rounded_clips: [None; 2],
                         target: RectI {
                             x: 1,
                             y: 0,

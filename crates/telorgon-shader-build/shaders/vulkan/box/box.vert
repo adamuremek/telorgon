@@ -7,7 +7,7 @@ struct GpuBoxInstance {
     float opacity; uint reserved_0; uint reserved_1; uint reserved_2;
     vec4 outline; vec4 shadow_0; vec4 shadow_1; uvec4 outline_shadow_colors;
 };
-layout(set=0,binding=0,std140) uniform ViewBlock { vec4 clip_from_view_0; vec4 clip_from_view_1; vec4 clip_from_view_2; vec4 clip_from_view_3; vec4 view_size_scale; vec4 target_size_origin; vec4 render_size_inverse; uvec4 epoch_flags; } view_data;
+layout(set=0,binding=0,std140) uniform ViewBlock { vec4 clip_from_view_0; vec4 clip_from_view_1; vec4 clip_from_view_2; vec4 clip_from_view_3; vec4 view_size_scale; vec4 target_size_origin; vec4 render_size_inverse; uvec4 epoch_flags; vec4 placement_clip_rects[2]; vec4 placement_clip_radii[2]; } view_data;
 layout(set=1,binding=0,std430) readonly buffer SpatialBlock { GpuSpatial values[]; } spatials;
 layout(set=1,binding=2,std430) readonly buffer DrawIndexBlock { uint values[]; } draw_indices;
 layout(set=2,binding=0,std430) readonly buffer BoxBlock { GpuBoxInstance values[]; } boxes;

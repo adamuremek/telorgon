@@ -11,4 +11,7 @@ pub struct GpuView {
     pub target_size_origin: [f32; 4],
     pub render_size_inverse: [f32; 4],
     pub epoch_flags: [u32; 4],
+    /// Output-space composite clips. A negative width disables a slot; zero clips everything.
+    pub placement_clip_rects: [[f32; 4]; 2],
+    pub placement_clip_radii: [[f32; 4]; 2],
 }

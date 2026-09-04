@@ -372,12 +372,20 @@ app content remain opaque. This does not make transparent pixels click-through o
 
 For externally supplied Wayland content, the host excludes the entire composed frame from the
 content rectangle, including its root fill and shadow, and paints the content backing separately.
-The existing `content_radius` shapes that backing, not the client pixels. Managed GUI content-slot
-children are unchanged. Custom `WindowFrameTemplate` implementations can opt into the same
+Client pixels, backing, and resize preview are clipped to the inner frame-border contour. For a
+uniform border the inner radius is `max(frame_radius - frame_border_width, 0)`, with its rectangle
+inset by the border width. Zero-radius frames still clip to their rectangular interior; zero-width
+borders use the outer curve. `content_radius` now applies additional content-slot rounding to all
+three, intersected with the inner frame clip. It can remain zero for automatic border rounding.
+Subsurfaces inherit the window clip; popups keep independent bounds. Easy-frame composed children
+also clip to the frame/slot overflow bounds, without clipping away the frame's own outer shadow.
+Custom `WindowFrameTemplate` implementations can opt into the same transparent-backing
 separation by returning `Some(WindowContentStyle { background, corner_radius,
 resize_preview_color })` from `content_style(&WindowChromeModel)`. Its default `None` preserves
 their normal composed backing; during resize the host still excludes that backing from the preview.
-Undecorated/client-decorated windows use the Linux configuration's preview color.
+The curved border segment inside the rectangular content slot is retained even when content is
+transparent. Undecorated/client-decorated windows keep their client-authored shape and use the Linux
+configuration's preview color. No new design fields are required for rounded clipping.
 See [resize-preview behavior and verification](WAYLAND_RESIZE_PREVIEW.md).
 
 `Compositor::icon(name, component)` remains a separate semantic icon registry for compositor-wide

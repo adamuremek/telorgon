@@ -5,9 +5,37 @@ use crate::core::{ColorRgba8, PointI, RectF, RectI, SizeF, SizeI};
 use crate::render::{
     BatchKey, BlendMode, BoxInstance, ClipId, DrawItem, ImageAlphaMode, ImageColorEncoding,
     ImageId, ImageInstance, ImagePixelFormat, ImageResource, ImageResourceUpdate, PipelineKind,
-    PrimitiveKind, RangePatch, RenderScene, RenderSceneDelta, SpatialId,
+    PrimitiveKind, RangePatch, RenderScene, RenderSceneDelta, RoundedClip, SpatialId,
 };
 use crate::scene::NodeId;
+
+/// The frame's inner border contour and the content slot are separate intersections: a tall
+/// title bar must not turn the bottom corner into a smaller circle or round the slot's top by
+/// accident. A slot may request additional rounding of its own.
+pub(super) fn frame_content_clips(
+    border: &BoxInstance,
+    position: PointI,
+    content: RectI,
+    content_radius: f32,
+) -> [Option<RoundedClip>; 2] {
+    let rect = RectF {
+        x: border.rect.x + position.x as f32,
+        y: border.rect.y + position.y as f32,
+        ..border.rect
+    };
+    [
+        Some(RoundedClip::new(rect, border.corner_radii).inset(border.border)),
+        Some(RoundedClip::new(
+            RectF {
+                x: content.x as f32,
+                y: content.y as f32,
+                width: content.width as f32,
+                height: content.height as f32,
+            },
+            crate::ui::CornerRadii::all(content_radius),
+        )),
+    ]
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(all(test, not(target_os = "linux")), allow(dead_code))]
@@ -15,6 +43,7 @@ pub(super) enum DesktopLayerKey {
     Background,
     Frame(u32, u8),
     ContentBackground(u32),
+    ContentBorder(u32),
     Surface(u32),
     ResizeVeil(u32),
     LegacyControl(u32, u8),
@@ -39,6 +68,7 @@ pub(super) enum DesktopSceneKey {
     Surface(u32),
     ResizeVeil(u32),
     ContentBackground(u32),
+    ContentBorder(u32),
     LegacyControl(u8),
     Widget(u32),
     DragIcon(u32),
@@ -70,6 +100,10 @@ pub(super) enum DesktopImageUpdate {
 }
 
 pub(super) enum DesktopLayerContent {
+    Decoration {
+        scene: DesktopSceneKey,
+        instance: BoxInstance,
+    },
     Solid {
         scene: DesktopSceneKey,
         color: ColorRgba8,
@@ -98,11 +132,54 @@ pub(super) struct DesktopLayer {
     pub target: RectI,
     /// A compositor-space clip used to constrain stale committed buffers during live resize.
     pub clip: Option<RectI>,
+    pub rounded_clips: [Option<RoundedClip>; 2],
     /// Invisible placements retain their backend scene but contribute no output geometry.
     pub visible: bool,
 }
 
 impl DesktopLayer {
+    pub(super) fn content_border(
+        surface: u32,
+        mut instance: BoxInstance,
+        extent: SizeI,
+        position: PointI,
+        content: RectI,
+    ) -> Self {
+        // The source UI node can be replaced on a model/state change. This single-box scene
+        // has its own stable slot; never accumulate obsolete frame nodes behind draw index zero.
+        instance.node = NodeId::new(0, 1);
+        let mut layer = Self::retained(
+            DesktopLayerKey::ContentBorder(surface),
+            DesktopSceneKey::ContentBorder(surface),
+            Vec::new(),
+            extent,
+            position,
+            true,
+        );
+        layer.content = DesktopLayerContent::Decoration {
+            scene: DesktopSceneKey::ContentBorder(surface),
+            instance,
+        };
+        layer.clip = Some(content);
+        layer
+    }
+
+    pub(super) fn with_content_clip(
+        mut self,
+        bounds: RectI,
+        clips: [Option<RoundedClip>; 2],
+    ) -> Self {
+        self.clip = Some(self.clip.map_or(bounds, |clip| {
+            intersect(clip, bounds).unwrap_or(RectI {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 0,
+            })
+        }));
+        self.rounded_clips = clips;
+        self
+    }
     pub(super) fn solid(
         key: DesktopLayerKey,
         scene: DesktopSceneKey,
@@ -140,6 +217,7 @@ impl DesktopLayer {
             target,
             clip: None,
             visible: true,
+            rounded_clips: [None; 2],
         }
     }
 
@@ -229,6 +307,7 @@ impl DesktopLayer {
             },
             clip: None,
             visible,
+            rounded_clips: [None; 2],
         }
     }
 
@@ -258,6 +337,7 @@ impl DesktopLayer {
             target,
             clip,
             visible,
+            rounded_clips: [None; 2],
         }
     }
 }
@@ -269,12 +349,13 @@ pub(super) struct DesktopSceneUpdate {
     pub deltas: Vec<RenderSceneDelta>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct DesktopPlacement {
     pub key: DesktopLayerKey,
     pub scene: DesktopSceneKey,
     pub target: RectI,
     pub clip: Option<RectI>,
+    pub rounded_clips: [Option<RoundedClip>; 2],
 }
 
 #[derive(Clone, Debug)]
@@ -474,6 +555,7 @@ struct PlacementState {
     bounds: Option<RectI>,
     target: RectI,
     clip: Option<RectI>,
+    rounded_clips: [Option<RoundedClip>; 2],
 }
 
 #[derive(Default)]
@@ -573,6 +655,37 @@ impl DesktopComposition {
 
         for layer in layers.into_iter().filter(valid_layer) {
             let scene = match layer.content {
+                DesktopLayerContent::Decoration { scene, instance } => {
+                    let source = self.solid_scenes.entry(scene).or_default();
+                    let extent = size_f(layer.source_extent);
+                    let transparent = ColorRgba8::rgba(0, 0, 0, 0);
+                    if source.extent != extent || source.background != transparent {
+                        source.extent = extent;
+                        source.background = transparent;
+                        source.damage.full = true;
+                    }
+                    if source.boxes.upsert(instance.node, instance) {
+                        source.damage.full = true;
+                    }
+                    source.set_draw_order(vec![DrawItem {
+                        kind: PrimitiveKind::Box,
+                        index: 0,
+                        batch: BatchKey {
+                            pipeline: PipelineKind::AnalyticBox,
+                            resource: 0,
+                            clip: ClipId(0),
+                            blend: BlendMode::Alpha,
+                            target: 0,
+                        },
+                    }]);
+                    if let Some(delta) = source.take_delta() {
+                        updates
+                            .entry(scene)
+                            .or_default()
+                            .push(self.retained_scenes.entry(scene).or_default().adapt(delta));
+                    }
+                    scene
+                }
                 DesktopLayerContent::Solid {
                     scene,
                     color,
@@ -689,12 +802,14 @@ impl DesktopComposition {
                 bounds,
                 target,
                 clip: layer.clip,
+                rounded_clips: layer.rounded_clips,
             };
             if self.placements.get(&layer.key).is_none_or(|previous| {
                 previous.scene != state.scene
                     || previous.bounds != state.bounds
                     || previous.target != state.target
                     || previous.clip != state.clip
+                    || previous.rounded_clips != state.rounded_clips
             }) {
                 if let Some(previous) = self
                     .placements
@@ -715,6 +830,7 @@ impl DesktopComposition {
                     scene,
                     target,
                     clip: layer.clip,
+                    rounded_clips: layer.rounded_clips,
                 });
             }
         }
@@ -818,7 +934,9 @@ fn valid_layer(layer: &DesktopLayer) -> bool {
         return false;
     }
     match &layer.content {
-        DesktopLayerContent::Retained { .. } | DesktopLayerContent::Solid { .. } => true,
+        DesktopLayerContent::Retained { .. }
+        | DesktopLayerContent::Solid { .. }
+        | DesktopLayerContent::Decoration { .. } => true,
         DesktopLayerContent::Image { update, .. } => match update {
             DesktopImageUpdate::Unchanged | DesktopImageUpdate::Reused => true,
             DesktopImageUpdate::Full(pixels) => {
