@@ -30,7 +30,19 @@ pub(super) fn update_pointer_focus(
     position: PointF,
     config: &LinuxDesktopConfig,
 ) -> AppResult<()> {
-    let next = hit_test_surface(windows, stacking_order, position, config, session_locked)
+    let grab = wayland
+        .core()
+        .seats
+        .get(&1)
+        .and_then(|seat| seat.pointer_grab_focus())
+        .map(|focus| focus.surface)
+        .filter(|surface| {
+            windows.get(surface).is_some_and(|window| {
+                !window.minimized && (window.role == SurfaceRole::SessionLock) == session_locked
+            })
+        });
+    let next = grab
+        .or_else(|| hit_test_surface(windows, stacking_order, position, config, session_locked))
         .filter(|surface| wayland.core().world.surface(*surface).is_some());
     let seat_focus = wayland
         .core()
@@ -355,6 +367,14 @@ pub(super) fn set_decoration_pointer_cursor(
     config: &LinuxDesktopConfig,
     icons: &[(String, Layer)],
 ) {
+    if wayland
+        .core()
+        .seats
+        .get(&1)
+        .is_some_and(|seat| seat.pointer_grab_focus().is_some())
+    {
+        return;
+    }
     let next = decoration_pointer_request(frames, windows, stacking_order, position, config, icons)
         .map(pointer_request_cursor_image)
         .or_else(|| {

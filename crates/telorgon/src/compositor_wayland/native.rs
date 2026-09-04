@@ -1600,6 +1600,7 @@ impl NativeState {
                             },
                         ],
                     )?;
+                    self.pointer_frame(resource)?;
                 }
             }
             self.clear_selection_for_client(seat_id, previous.client)?;
@@ -1653,6 +1654,7 @@ impl NativeState {
             None
         };
         let seat = self.core.seats.get_mut(&seat_id).expect("seat checked");
+        seat.cancel_client_pointer_grab();
         seat.pointer_focus = focus;
         // A client cursor is scoped to the focus that authorized it. Do not retain it while the
         // new focus decides which cursor to install, or after the old surface has been destroyed.
@@ -1759,10 +1761,12 @@ impl NativeState {
         let focus = self
             .core
             .seats
-            .get(&seat_id)
+            .get_mut(&seat_id)
             .ok_or_else(|| NativeCompositorError::new("unknown seat"))?
-            .pointer_focus
-            .ok_or_else(|| NativeCompositorError::new("pointer has no focused surface"))?;
+            .pointer_button_target(button, state, false);
+        let Some(focus) = focus else {
+            return Ok(());
+        };
         self.core
             .serials
             .issue(
@@ -1772,11 +1776,6 @@ impl NativeState {
                 Some(focus.surface),
             )
             .map_err(error)?;
-        self.core
-            .seats
-            .get_mut(&seat_id)
-            .expect("seat checked")
-            .set_button(button, state);
         let wire_state = u32::from(matches!(
             state,
             crate::compositor_wayland::ButtonState::Pressed
@@ -3089,18 +3088,14 @@ impl NativeState {
             return Err(unsupported_request(request));
         }
         let serial = request.uint(0).map_err(error)?;
-        self.core
-            .serials
-            .validate(
-                context.client,
-                serial,
-                &[crate::compositor_wayland::SerialKind::PointerEnter],
-                self.core
-                    .seats
-                    .get(&seat)
-                    .and_then(|seat| seat.pointer_focus.map(|focus| focus.surface)),
-            )
-            .map_err(error)?;
+        if !self
+            .core
+            .seats
+            .get(&seat)
+            .is_some_and(|seat| seat.accepts_cursor(context.client, serial))
+        {
+            return Ok(DispatchOutcome::default());
+        }
         let cursor = request
             .object(1)
             .map_err(error)?
@@ -3733,21 +3728,16 @@ impl NativeState {
         if !(1..=36).contains(&shape) {
             return Err(NativeCompositorError::new("invalid cursor shape"));
         }
-        let focus = self
+        // A stale or unrelated serial is a harmless no-op, not a protocol error. The
+        // current enter remains valid even after it ages out of the general serial ledger.
+        if !self
             .core
             .seats
             .get(&seat)
-            .and_then(|seat| seat.pointer_focus)
-            .ok_or_else(|| NativeCompositorError::new("pointer has no focus"))?;
-        self.core
-            .serials
-            .validate(
-                context.client,
-                serial,
-                &[crate::compositor_wayland::SerialKind::PointerEnter],
-                Some(focus.surface),
-            )
-            .map_err(error)?;
+            .is_some_and(|seat| seat.accepts_cursor(context.client, serial))
+        {
+            return Ok(DispatchOutcome::default());
+        }
         self.core.seats.get_mut(&seat).expect("seat checked").cursor =
             crate::compositor_wayland::CursorImage::Shape(shape);
         Ok(DispatchOutcome::default())

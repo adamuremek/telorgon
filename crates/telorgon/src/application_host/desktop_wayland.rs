@@ -716,7 +716,15 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         }
                     }
                     LinuxInputEventKind::PointerButton { button, pressed } => {
-                        if button == 0x110 && !session_locked {
+                        if button == 0x110
+                            && !pressed
+                            && !session_locked
+                            && wayland
+                                .core()
+                                .seats
+                                .get(&1)
+                                .is_some_and(|seat| seat.compositor_owns_button(button))
+                        {
                             repaint |= route_frame_pointer_button(
                                 &mut frame_layers,
                                 pressed,
@@ -728,6 +736,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         if pressed
                             && button == 0x110
                             && !session_locked
+                            && window_interaction.is_none()
+                            && wayland
+                                .core()
+                                .seats
+                                .get(&1)
+                                .is_some_and(|seat| seat.pressed_buttons().is_empty())
                             && let Some((surface, hit)) = hit_test_decoration(
                                 &windows,
                                 &stacking_order,
@@ -737,6 +751,19 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             )
                             && wayland.core().world.surface(surface).is_some()
                         {
+                            wayland
+                                .core_mut()
+                                .seats
+                                .get_mut(&1)
+                                .expect("desktop seat")
+                                .pointer_button_target(button, WaylandButtonState::Pressed, true);
+                            route_frame_pointer_button(
+                                &mut frame_layers,
+                                true,
+                                MonotonicInstant::from_nanos(
+                                    time_microseconds.saturating_mul(1_000),
+                                ),
+                            );
                             set_decoration_pointer_cursor(
                                 &mut wayland,
                                 &frame_layers,
@@ -814,7 +841,22 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             .get(&1)
                             .and_then(|seat| seat.pointer_focus)
                             .map(|focus| focus.surface);
-                        if seat_pointer_focus.is_some() {
+                        if window_interaction.is_some() {
+                            wayland
+                                .core_mut()
+                                .seats
+                                .get_mut(&1)
+                                .expect("desktop seat")
+                                .pointer_button_target(
+                                    button,
+                                    if pressed {
+                                        WaylandButtonState::Pressed
+                                    } else {
+                                        WaylandButtonState::Released
+                                    },
+                                    true,
+                                );
+                        } else {
                             let serial = display.next_serial();
                             wayland
                                 .pointer_button(
@@ -829,7 +871,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                     serial,
                                 )
                                 .map_err(app_error)?;
-                            if pressed {
+                            if pressed && seat_pointer_focus.is_some() {
                                 focus_toplevel(
                                     &display,
                                     &mut wayland,
@@ -861,7 +903,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             )?;
                         }
                         if !pressed
-                            && button == 0x110
+                            && wayland
+                                .core()
+                                .seats
+                                .get(&1)
+                                .is_some_and(|seat| seat.pressed_buttons().is_empty())
                             && let Some(interaction) = window_interaction.take()
                         {
                             finish_window_interaction(
@@ -881,6 +927,19 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                                 &config,
                                 &icon_layers,
                             );
+                        }
+                        if !pressed && window_interaction.is_none() && !wayland.drag_active(1) {
+                            update_pointer_focus(
+                                &display,
+                                &mut wayland,
+                                &windows,
+                                &stacking_order,
+                                session_locked,
+                                &mut pointer_focus,
+                                pointer_position,
+                                &config,
+                            )?;
+                            pointer_scene_dirty = true;
                         }
                     }
                     LinuxInputEventKind::KeyboardKey { keycode, pressed } => {
@@ -1564,15 +1623,33 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 CompositorAction::MoveToplevel(surface) => {
                     if windows.get(&surface).is_some_and(|window| {
                         !window.maximized && !window.fullscreen && !window.minimized
-                    }) {
+                    }) && wayland
+                        .core()
+                        .seats
+                        .get(&1)
+                        .and_then(|seat| seat.pointer_grab_focus())
+                        .is_some_and(|focus| focus.surface == surface)
+                    {
                         window_interaction =
                             WindowInteraction::begin_move(&windows, surface, pointer_position);
+                        if window_interaction.is_some() {
+                            wayland
+                                .set_pointer_focus(1, None, pointer_position, display.next_serial())
+                                .map_err(app_error)?;
+                            pointer_focus = None;
+                        }
                     }
                 }
                 CompositorAction::ResizeToplevel { surface, edge } => {
                     if windows.get(&surface).is_some_and(|window| {
                         !window.maximized && !window.fullscreen && !window.minimized
-                    }) {
+                    }) && wayland
+                        .core()
+                        .seats
+                        .get(&1)
+                        .and_then(|seat| seat.pointer_grab_focus())
+                        .is_some_and(|focus| focus.surface == surface)
+                    {
                         window_interaction = WindowInteraction::begin_resize(
                             &mut windows,
                             &mut configure_scheduler,
@@ -1580,6 +1657,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             edge,
                             pointer_position,
                         );
+                        if window_interaction.is_some() {
+                            wayland
+                                .set_pointer_focus(1, None, pointer_position, display.next_serial())
+                                .map_err(app_error)?;
+                            pointer_focus = None;
+                        }
                         repaint = true;
                     }
                 }
@@ -1624,6 +1707,18 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         wayland.cancel_drag(1).map_err(app_error)?;
                     }
                     session_locked = true;
+                    for frame in frame_layers.values_mut() {
+                        frame
+                            .layer
+                            .runtime
+                            .cancel_pointer(crate::input::PointerId::PRIMARY);
+                    }
+                    wayland
+                        .core_mut()
+                        .seats
+                        .get_mut(&1)
+                        .expect("desktop seat")
+                        .cancel_pointer_buttons();
                     pending_session_lock = Some(lock);
                     if let Some(interaction) = window_interaction.take() {
                         finish_window_interaction(
@@ -1659,6 +1754,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         pending_session_lock = None;
                     }
                     session_locked = false;
+                    wayland
+                        .core_mut()
+                        .seats
+                        .get_mut(&1)
+                        .expect("desktop seat")
+                        .cancel_pointer_buttons();
                     pointer_scene_dirty = true;
                     repaint = true;
                 }

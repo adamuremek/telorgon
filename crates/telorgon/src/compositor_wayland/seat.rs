@@ -1,4 +1,5 @@
 use crate::core::PointF;
+use std::collections::BTreeMap;
 
 use crate::compositor_wayland::{ClientId, WaylandSurfaceId};
 
@@ -42,6 +43,14 @@ pub enum CursorImage {
     TelorgonDefault,
 }
 
+#[derive(Clone, Copy, Debug)]
+enum PointerButtonOwner {
+    Client(PointerFocus),
+    Compositor,
+    // Keep the physical press until release, even when its recipient disappears.
+    Suppressed,
+}
+
 #[derive(Debug)]
 pub struct SeatState {
     pub name: String,
@@ -51,6 +60,7 @@ pub struct SeatState {
     pub cursor: CursorImage,
     pressed_keys: Vec<u32>,
     pressed_buttons: Vec<u32>,
+    button_owners: BTreeMap<u32, PointerButtonOwner>,
     keyboard_modifiers: (u32, u32, u32, u32),
 }
 
@@ -64,6 +74,7 @@ impl SeatState {
             cursor: CursorImage::TelorgonDefault,
             pressed_keys: Vec::new(),
             pressed_buttons: Vec::new(),
+            button_owners: BTreeMap::new(),
             keyboard_modifiers: (0, 0, 0, 0),
         }
     }
@@ -82,6 +93,91 @@ impl SeatState {
 
     pub fn pressed_buttons(&self) -> &[u32] {
         &self.pressed_buttons
+    }
+
+    pub(crate) fn accepts_cursor(&self, client: ClientId, serial: u32) -> bool {
+        self.pointer_focus
+            .is_some_and(|focus| focus.client == client && focus.enter_serial == serial)
+    }
+
+    /// The implicit grab belongs to the first client press until all its buttons are up.
+    pub(crate) fn pointer_grab_focus(&self) -> Option<PointerFocus> {
+        self.button_owners.values().find_map(|owner| match owner {
+            PointerButtonOwner::Client(focus)
+                if self.accepts_cursor(focus.client, focus.enter_serial)
+                    && self
+                        .pointer_focus
+                        .is_some_and(|current| current.surface == focus.surface) =>
+            {
+                Some(*focus)
+            }
+            _ => None,
+        })
+    }
+
+    pub(crate) fn compositor_owns_button(&self, button: u32) -> bool {
+        matches!(
+            self.button_owners.get(&button),
+            Some(PointerButtonOwner::Compositor)
+        )
+    }
+
+    /// Update physical state and return a client only for an owned, matched event.
+    pub(crate) fn pointer_button_target(
+        &mut self,
+        button: u32,
+        state: ButtonState,
+        compositor_owned: bool,
+    ) -> Option<PointerFocus> {
+        let owner = match state {
+            ButtonState::Pressed => {
+                if self.pressed_buttons.contains(&button) {
+                    return None;
+                }
+                let owner = if compositor_owned {
+                    PointerButtonOwner::Compositor
+                } else if let Some(focus) = self.pointer_grab_focus() {
+                    PointerButtonOwner::Client(focus)
+                } else if !self.pressed_buttons.is_empty() {
+                    PointerButtonOwner::Suppressed
+                } else {
+                    self.pointer_focus
+                        .map_or(PointerButtonOwner::Suppressed, PointerButtonOwner::Client)
+                };
+                self.set_button(button, state);
+                self.button_owners.insert(button, owner);
+                owner
+            }
+            ButtonState::Released => {
+                self.set_button(button, state);
+                self.button_owners.remove(&button)?
+            }
+        };
+        match owner {
+            PointerButtonOwner::Client(focus)
+                if self.accepts_cursor(focus.client, focus.enter_serial)
+                    && self
+                        .pointer_focus
+                        .is_some_and(|current| current.surface == focus.surface) =>
+            {
+                Some(focus)
+            }
+            _ => None,
+        }
+    }
+
+    pub(crate) fn cancel_client_pointer_grab(&mut self) {
+        for owner in self.button_owners.values_mut() {
+            if matches!(owner, PointerButtonOwner::Client(_)) {
+                *owner = PointerButtonOwner::Suppressed;
+            }
+        }
+    }
+
+    pub(crate) fn cancel_pointer_buttons(&mut self) {
+        self.button_owners
+            .values_mut()
+            .for_each(|owner| *owner = PointerButtonOwner::Suppressed);
     }
 
     pub fn keyboard_modifiers(&self) -> (u32, u32, u32, u32) {
@@ -103,6 +199,7 @@ impl SeatState {
             .pointer_focus
             .is_some_and(|focus| focus.client == client)
         {
+            self.cancel_client_pointer_grab();
             self.pointer_focus = None;
             self.cursor = CursorImage::TelorgonDefault;
         }
@@ -119,6 +216,7 @@ impl SeatState {
             .pointer_focus
             .is_some_and(|focus| focus.surface == surface)
         {
+            self.cancel_client_pointer_grab();
             self.pointer_focus = None;
             self.cursor = CursorImage::TelorgonDefault;
         }
@@ -160,6 +258,193 @@ fn update_pressed(values: &mut Vec<u32>, value: u32, state: ButtonState) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn focused_seat() -> (SeatState, PointerFocus) {
+        let focus = PointerFocus {
+            client: ClientId::from_raw(1).unwrap(),
+            surface: WaylandSurfaceId::from_raw(7).unwrap(),
+            position: PointF::default(),
+            enter_serial: 166,
+        };
+        let mut seat = SeatState::new("seat0", SeatCapabilities::default());
+        seat.pointer_focus = Some(focus);
+        (seat, focus)
+    }
+
+    #[test]
+    fn cursor_authorization_uses_current_enter_not_button_or_historical_serials() {
+        let (mut seat, focus) = focused_seat();
+        let mut ledger = crate::compositor_wayland::SerialLedger::new(1).unwrap();
+        ledger
+            .issue(
+                166,
+                focus.client,
+                crate::compositor_wayland::SerialKind::PointerEnter,
+                Some(focus.surface),
+            )
+            .unwrap();
+        ledger
+            .issue(
+                167,
+                focus.client,
+                crate::compositor_wayland::SerialKind::PointerButton,
+                Some(focus.surface),
+            )
+            .unwrap();
+        assert!(seat.accepts_cursor(focus.client, 166));
+        assert!(!seat.accepts_cursor(focus.client, 167));
+        assert!(!seat.accepts_cursor(ClientId::from_raw(2).unwrap(), 166));
+        seat.pointer_focus = Some(PointerFocus {
+            enter_serial: 168,
+            ..focus
+        });
+        assert!(!seat.accepts_cursor(focus.client, 166));
+        assert!(seat.accepts_cursor(focus.client, 168));
+        seat.pointer_focus = None;
+        assert!(!seat.accepts_cursor(focus.client, 168));
+    }
+
+    #[test]
+    fn decoration_press_and_release_never_reach_a_reentered_client() {
+        let (mut seat, focus) = focused_seat();
+        seat.pointer_focus = None;
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Pressed, true),
+            None
+        );
+        seat.pointer_focus = Some(focus);
+        assert!(seat.compositor_owns_button(272));
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            None
+        );
+        assert!(!seat.compositor_owns_button(272));
+        assert!(seat.pressed_buttons().is_empty());
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Pressed, false),
+            Some(focus)
+        );
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            Some(focus)
+        );
+    }
+
+    #[test]
+    fn client_grab_lasts_through_multiple_buttons_and_rejects_duplicate_edges() {
+        let (mut seat, focus) = focused_seat();
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            None
+        );
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Pressed, false),
+            Some(focus)
+        );
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Pressed, false),
+            None
+        );
+        assert_eq!(
+            seat.pointer_button_target(273, ButtonState::Pressed, false),
+            Some(focus)
+        );
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            Some(focus)
+        );
+        assert_eq!(seat.pointer_grab_focus(), Some(focus));
+        assert_eq!(
+            seat.pointer_button_target(273, ButtonState::Released, false),
+            Some(focus)
+        );
+        assert_eq!(seat.pointer_grab_focus(), None);
+        assert!(seat.pressed_buttons().is_empty());
+    }
+
+    #[test]
+    fn destroyed_surface_or_client_does_not_transfer_held_buttons() {
+        for remove_client in [false, true] {
+            let (mut seat, focus) = focused_seat();
+            seat.pointer_button_target(272, ButtonState::Pressed, false);
+            if remove_client {
+                seat.remove_client(focus.client);
+            } else {
+                seat.remove_surface(focus.surface);
+            }
+            assert_eq!(seat.pointer_grab_focus(), None);
+            let next = PointerFocus {
+                client: ClientId::from_raw(2).unwrap(),
+                surface: WaylandSurfaceId::from_raw(8).unwrap(),
+                enter_serial: 170,
+                ..focus
+            };
+            seat.pointer_focus = Some(next);
+            assert_eq!(
+                seat.pointer_button_target(272, ButtonState::Released, false),
+                None
+            );
+            assert!(seat.pressed_buttons().is_empty());
+            assert_eq!(
+                seat.pointer_button_target(272, ButtonState::Pressed, false),
+                Some(next)
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_grab_and_session_lock_suppress_releases_until_buttons_are_up() {
+        let (mut seat, focus) = focused_seat();
+        seat.pointer_button_target(272, ButtonState::Pressed, false);
+        seat.cancel_client_pointer_grab();
+        assert_eq!(seat.pointer_grab_focus(), None);
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            None
+        );
+        seat.pointer_button_target(272, ButtonState::Pressed, true);
+        seat.cancel_pointer_buttons();
+        seat.pointer_focus = Some(PointerFocus {
+            enter_serial: 200,
+            ..focus
+        });
+        assert!(!seat.compositor_owns_button(272));
+        assert_eq!(
+            seat.pointer_button_target(273, ButtonState::Pressed, false),
+            None
+        );
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            None
+        );
+        assert_eq!(
+            seat.pointer_button_target(273, ButtonState::Released, false),
+            None
+        );
+        assert!(seat.pressed_buttons().is_empty());
+    }
+
+    #[test]
+    fn press_without_focus_and_focus_replacement_do_not_leak_releases() {
+        let (mut seat, focus) = focused_seat();
+        seat.pointer_focus = None;
+        seat.pointer_button_target(272, ButtonState::Pressed, false);
+        seat.pointer_focus = Some(focus);
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            None
+        );
+        seat.pointer_button_target(272, ButtonState::Pressed, false);
+        seat.pointer_focus = Some(PointerFocus {
+            enter_serial: 200,
+            ..focus
+        });
+        assert_eq!(
+            seat.pointer_button_target(272, ButtonState::Released, false),
+            None
+        );
+        assert!(seat.pressed_buttons().is_empty());
+    }
 
     #[test]
     fn repeated_button_state_does_not_duplicate_pressed_state() {

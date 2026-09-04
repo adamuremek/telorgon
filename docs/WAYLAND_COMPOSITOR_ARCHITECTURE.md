@@ -176,6 +176,30 @@ focus/keys/modifiers and slot-stable touch down/motion/up/frame/cancel streams. 
 toplevels receive keyboard focus, and keyboard delivery follows that focus independently from
 pointer hover. Pointer and touch coordinates are transformed into surface-local coordinates.
 
+Pointer button routing retains physical presses separately from their recipients. A client press
+keeps an implicit grab until its final button release; decoration and unfocused presses cannot
+deliver a release into a newly entered client. Explicit move/resize grabs, focus replacement,
+surface/client destruction, and session locking cancel client delivery while retaining physical
+state until release. Session locking also cancels armed frame controls. Pointer leave events are
+terminated with a frame, including when no new surface receives focus.
+
+Both cursor requests authorize against the focused client and its current pointer-enter serial,
+independently of the bounded general serial ledger. Nonmatching requests are ignored before cursor
+state or surface roles change; invalid cursor shapes and role conflicts remain protocol errors.
+This follows the [core pointer protocol](https://wayland.freedesktop.org/docs/html/apa.html#protocol-spec-wl_pointer)
+and [cursor-shape protocol](https://wayland.app/protocols/cursor-shape-v1).
+
+The input ownership review inspected `../other-rendering-libs/slint/internal/core/input.rs`
+(`handle_mouse_grab`) and `../other-rendering-libs/xilem/masonry_core/src/passes/event.rs`
+(`get_pointer_target` and pointer-up/cancel handling). Their shared invariants are that capture
+precedes hover targeting, invalid owners lose capture, and release/cancellation terminates an
+interaction. Telorgon implements these rules with seat-owned button recipients, without copying
+reference code. Filtering only unmatched releases in Foot or accepting every cursor serial was
+rejected: neither establishes compositor-side ownership. Portable seat tests cover the captured
+166/167 cursor mismatch, serial-history eviction, decoration reentry, multiple buttons, duplicate
+edges, destruction, focus replacement, explicit grabs, and session cancellation. Linux host wiring
+is compile-checked; interactive compositor qualification remains a user-run check.
+
 Relative-pointer and pointer-constraints v1 are native-dispatched. A constraint is unique per
 pointer/surface pair, follows pointer focus, implements persistent and one-shot lifetimes, and
 emits the required locked/unlocked or confined/unconfined transitions. Locked pointers suppress
