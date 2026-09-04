@@ -92,8 +92,10 @@ production-qualified.
 > and independently configure transparent content backing. Frame decoration is cut out beneath the
 > content slot so client alpha reveals lower layers; opaque client buffers remain opaque.
 > Client surfaces, subsurfaces, backing, and resize previews now share analytic inner-border rounded
-> clipping; a disjoint border-only patch preserves the curved rim. Both renderers support the
-> placement clips, and Vulkan's offline shader bundle/view record advances to GPU ABI 3.
+> clipping anchored at the window top rather than the app/title-bar seam. Disjoint outline and
+> inverse-clipped frame-fill patches preserve the rim and wider corner wedges without backing
+> transparent content. Both renderers support the placement clips; Vulkan's shader bundle is GPU
+> ABI 4 (the view record remains 192 bytes; flags now include per-clip inversion).
 > See [solid resize preview](WAYLAND_RESIZE_PREVIEW.md). Capability-gated Vulkan DMA-BUF commits are materialized into
 > retained compositor textures with acquire/release sync-FD handling and no CPU pixel copy. A protocol
 > acquire fence is preferred; otherwise the host exports the DMA-BUF reservation object's implicit

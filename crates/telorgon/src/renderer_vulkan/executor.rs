@@ -1259,6 +1259,63 @@ fn validate_render_region(region: RectI, target: &VulkanTarget<'_>) -> RenderRes
     }
     Ok(())
 }
+#[cfg(any(target_os = "linux", test))]
+pub(crate) fn set_placement_clips(
+    view: &mut GpuView,
+    clips: [Option<crate::render::RoundedClip>; 2],
+) {
+    view.epoch_flags[3] &= !0b110;
+    view.placement_clip_rects = [[0.0, 0.0, -1.0, -1.0]; 2];
+    view.placement_clip_radii = [[0.0; 4]; 2];
+    for (index, clip) in clips.into_iter().enumerate() {
+        if let Some(clip) = clip {
+            if clip.inverted {
+                view.epoch_flags[3] |= 1 << (index + 1);
+            }
+            view.placement_clip_rects[index] =
+                [clip.rect.x, clip.rect.y, clip.rect.width, clip.rect.height];
+            view.placement_clip_radii[index] = [
+                clip.radii.top_left,
+                clip.radii.top_right,
+                clip.radii.bottom_right,
+                clip.radii.bottom_left,
+            ];
+        }
+    }
+}
+
+#[cfg(test)]
+mod clip_tests {
+    use super::*;
+
+    #[test]
+    fn inverse_clip_flags_preserve_target_flags_and_reset_between_placements() {
+        let clip = crate::render::RoundedClip::new(
+            crate::core::RectF {
+                x: 10.0,
+                y: 12.0,
+                width: 30.0,
+                height: 40.0,
+            },
+            crate::ui::CornerRadii::all(6.0),
+        );
+        let mut view = GpuView {
+            epoch_flags: [12, 0, 1, 1],
+            ..GpuView::default()
+        };
+        set_placement_clips(&mut view, [Some(clip.inverse()), Some(clip)]);
+        assert_eq!(view.epoch_flags, [12, 0, 1, 0b011]);
+        assert_eq!(view.placement_clip_rects[0], [10.0, 12.0, 30.0, 40.0]);
+        assert_eq!(view.placement_clip_radii[0], [6.0; 4]);
+        set_placement_clips(&mut view, [None, Some(clip.inverse())]);
+        assert_eq!(view.epoch_flags[3], 0b101);
+        assert_eq!(view.placement_clip_rects[0][2], -1.0);
+        set_placement_clips(&mut view, [None; 2]);
+        assert_eq!(view.epoch_flags[3], 1);
+        assert!(view.placement_clip_rects.iter().all(|r| r[2] < 0.0));
+    }
+}
+
 pub(crate) fn gpu_view(
     scene: &VulkanScene,
     target: &VulkanTarget<'_>,

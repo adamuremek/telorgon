@@ -221,6 +221,27 @@ fn easy_frame_publishes_controls_and_all_resize_directions() {
     runtime.prepare_frame(MonotonicInstant::ZERO, true).unwrap();
     let snapshot = telorgon::WindowChromeSnapshot::derive(runtime.ui(), runtime.layout()).unwrap();
 
+    let root = &runtime
+        .ui()
+        .box_styles
+        .get(snapshot.frame.node)
+        .unwrap()
+        .decoration;
+    let slot = &runtime
+        .ui()
+        .box_styles
+        .get(snapshot.content.node)
+        .unwrap()
+        .decoration;
+    assert_eq!(root.corner_radii, CornerRadii::all(NORMAL.frame_radius));
+    assert_eq!(
+        slot.corner_radii.top_left, 0.0,
+        "title-bar seam is not a window corner"
+    );
+    assert_eq!(slot.corner_radii.top_right, 0.0);
+    assert_eq!(slot.corner_radii.bottom_left, NORMAL.content_radius);
+    assert_eq!(slot.corner_radii.bottom_right, NORMAL.content_radius);
+
     assert!(
         snapshot
             .regions

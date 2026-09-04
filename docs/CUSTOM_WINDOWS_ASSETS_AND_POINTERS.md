@@ -375,8 +375,11 @@ content rectangle, including its root fill and shadow, and paints the content ba
 Client pixels, backing, and resize preview are clipped to the inner frame-border contour. For a
 uniform border the inner radius is `max(frame_radius - frame_border_width, 0)`, with its rectangle
 inset by the border width. Zero-radius frames still clip to their rectangular interior; zero-width
-borders use the outer curve. `content_radius` now applies additional content-slot rounding to all
-three, intersected with the inner frame clip. It can remain zero for automatic border rounding.
+borders use the outer curve. `content_radius` controls the additional inner aperture, intersected
+with that frame clip. Its top is anchored at the window's inner top edge, not below the title bar:
+the app/title-bar seam stays square, and the bottom corners curve into the surrounding frame fill.
+It can remain zero for automatic border rounding. Both the outline and the wider frame-colored
+corner wedges are retained outside the aperture without backing transparent content inside it.
 Subsurfaces inherit the window clip; popups keep independent bounds. Easy-frame composed children
 also clip to the frame/slot overflow bounds, without clipping away the frame's own outer shadow.
 Custom `WindowFrameTemplate` implementations can opt into the same transparent-backing

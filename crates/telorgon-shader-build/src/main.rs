@@ -29,7 +29,7 @@ fn run() -> Result<(), String> {
 
     let bundle_text = fs::read_to_string(&bundle_path).map_err(|error| error.to_string())?;
     let source: BundleSource = toml::from_str(&bundle_text).map_err(|error| error.to_string())?;
-    if source.schema_version != 1 || source.interface_major != 3 {
+    if source.schema_version != 1 || source.interface_major != 4 {
         return Err("unsupported shader bundle or interface version".to_owned());
     }
     if source.target != "vulkan1.3-spirv1.6" {

@@ -9,9 +9,9 @@ use crate::render::{
 };
 use crate::scene::NodeId;
 
-/// The frame's inner border contour and the content slot are separate intersections: a tall
-/// title bar must not turn the bottom corner into a smaller circle or round the slot's top by
-/// accident. A slot may request additional rounding of its own.
+/// Both contours start at the window's inner top edge, not the app/title-bar seam.
+/// The rectangular content scissor cuts off the title bar without introducing another pair of
+/// top corners. The second contour controls the aperture inside the wider frame margins.
 pub(super) fn frame_content_clips(
     border: &BoxInstance,
     position: PointI,
@@ -23,14 +23,15 @@ pub(super) fn frame_content_clips(
         y: border.rect.y + position.y as f32,
         ..border.rect
     };
+    let inner = RoundedClip::new(rect, border.corner_radii).inset(border.border);
     [
-        Some(RoundedClip::new(rect, border.corner_radii).inset(border.border)),
+        Some(inner),
         Some(RoundedClip::new(
             RectF {
                 x: content.x as f32,
-                y: content.y as f32,
+                y: inner.rect.y,
                 width: content.width as f32,
-                height: content.height as f32,
+                height: (content.bottom() as f32 - inner.rect.y).max(0.0),
             },
             crate::ui::CornerRadii::all(content_radius),
         )),
@@ -44,6 +45,7 @@ pub(super) enum DesktopLayerKey {
     Frame(u32, u8),
     ContentBackground(u32),
     ContentBorder(u32),
+    ContentCorners(u32),
     Surface(u32),
     ResizeVeil(u32),
     LegacyControl(u32, u8),
@@ -69,6 +71,7 @@ pub(super) enum DesktopSceneKey {
     ResizeVeil(u32),
     ContentBackground(u32),
     ContentBorder(u32),
+    ContentCorners(u32),
     LegacyControl(u8),
     Widget(u32),
     DragIcon(u32),
@@ -148,6 +151,7 @@ impl DesktopLayer {
         // The source UI node can be replaced on a model/state change. This single-box scene
         // has its own stable slot; never accumulate obsolete frame nodes behind draw index zero.
         instance.node = NodeId::new(0, 1);
+        instance.background = None;
         let mut layer = Self::retained(
             DesktopLayerKey::ContentBorder(surface),
             DesktopSceneKey::ContentBorder(surface),
@@ -161,6 +165,43 @@ impl DesktopLayer {
             instance,
         };
         layer.clip = Some(content);
+        layer
+    }
+
+    /// Restore the frame fill outside the content aperture, never beneath transparent client
+    /// pixels. The box retains its border widths to match the root's fill contour, but its border
+    /// colors are transparent: the separate border patch paints that ring exactly once.
+    pub(super) fn content_corners(
+        surface: u32,
+        mut instance: BoxInstance,
+        extent: SizeI,
+        position: PointI,
+        content: RectI,
+        clips: [Option<RoundedClip>; 2],
+    ) -> Self {
+        instance.node = NodeId::new(0, 1);
+        for side in [
+            &mut instance.border.top,
+            &mut instance.border.right,
+            &mut instance.border.bottom,
+            &mut instance.border.left,
+        ] {
+            side.color = ColorRgba8::rgba(0, 0, 0, 0);
+        }
+        let mut layer = Self::retained(
+            DesktopLayerKey::ContentCorners(surface),
+            DesktopSceneKey::ContentCorners(surface),
+            Vec::new(),
+            extent,
+            position,
+            true,
+        );
+        layer.content = DesktopLayerContent::Decoration {
+            scene: DesktopSceneKey::ContentCorners(surface),
+            instance,
+        };
+        layer.clip = Some(content);
+        layer.rounded_clips = [clips[1].map(RoundedClip::inverse), None];
         layer
     }
 

@@ -24,13 +24,15 @@ use; custom templates can opt in through `WindowFrameTemplate::content_style`. D
 the backing nor any client pixels draw beneath the preview, even for custom templates. Thus a
 translucent preview reveals the desktop/lower windows, and alpha zero gives a frame-only resize.
 Input routing is unchanged. Client pixels, backing, and preview share the frame's inner rounded
-border clip, intersected with content-slot bounds and optional `content_radius`. A border-only
-placement restores the curved rim inside the rectangular cutout without repainting an opaque backing
-or double-blending the frame strips. Subsurfaces inherit the clip; popups remain independent.
+border clip, intersected with content-slot bounds and optional `content_radius`. Both rounded
+contours start at the window's inner top edge; the title-bar seam does not get separate top corners.
+An outline placement restores the curved rim, and an inverse-clipped fill placement restores wider
+frame-colored corner wedges inside the cutout without backing the content aperture or double-blending
+the frame strips. Subsurfaces inherit the clip; popups remain independent.
 Color scenes have per-window identity and native-sized analytic geometry for both
 backends. Resizing changes a box delta and placement, never client pixels or a CPU image allocation;
 translation-only movement reuses the scene. Rounded clipping uses per-placement analytic shader
-coverage (GPU ABI 3) and matching software coverage, without new extensions or offscreen passes.
+coverage (GPU ABI 4) and matching software coverage, without new extensions or offscreen passes.
 
 On press, the compositor sends the resizing state with the client's committed window extent. Motion
 only changes desired geometry; it does not issue intermediate size requests. Release sends the final
@@ -43,9 +45,9 @@ clients, closing the window, or a subsequent resize. No timeout pretends that cl
 
 ## Work and ownership
 
-- One retained one-unit solid scene supplies all veil placements. Changing preview bounds changes
-  placement/damage only; it uploads no client texture and rebuilds no fill scene. Composed chrome can
-  still require layout/scene updates. Vulkan and software consume the same neutral placements.
+- Each window retains a native-sized analytic color scene for its veil. Resizing updates that box
+  and its placement/damage without uploading client pixels; translation reuses the scene. Composed
+  chrome can still require layout/scene updates. Vulkan and software consume the same neutral placements.
 - A veiled tree retains its image scenes and queued pixel deltas without drawing or uploading them.
   Source and destination image extents remain equal; XDG margins and visible clips are separate.
 - New SHM reads/conversions during an active drag enter the existing bounded, replaceable per-surface
@@ -156,7 +158,7 @@ for rectangular scissor bounds versus fragment coverage. No vendor-specific excl
 stencil attachment, mask texture, imported-image mutation, or new synchronization feature is needed.
 
 Implemented invariants: at most two output-space rounded bounds per composite placement (frame
-interior and content slot), intersected with existing rectangular scissors; premultiplied color and
+interior and window-top-anchored content aperture), intersected with rectangular scissors; premultiplied color and
 alpha both receive coverage; clipped opaque batches use source-over for their edge; shader/CPU
 coverage use the same one-output-pixel distance rule; radius-only changes damage old/new placement
 bounds without touching image resources; frame-node replacement cannot accumulate stale border
@@ -174,6 +176,38 @@ Vulkan shader assets are regenerated offline, SPIR-V validated, and reflected ag
 view-block offsets in all eight stages. This is compilation/verification, not an application run.
 
 ## Verification and manual qualification
+
+### Corner-gap correction audit
+
+The initial rounded-frame implementation rounded the app rectangle independently below the title
+bar and restored only the thin outline, leaving desktop-visible wedges when content margins were
+wider than the outline. The correction retains the frame's root fill color and paints its interior
+only outside the full-height content aperture. The original border-only patch still owns the outline;
+the four rectangular frame strips remain disjoint from both patches. No fill is restored inside the
+aperture, even for alpha-zero clients/previews. Easy-frame slot decoration also keeps its top corners
+square when a title bar is visible. Changing title-bar height cannot shift the window-top contour or
+shrink bottom radii merely by shortening the app rectangle.
+
+Re-inspected references: Flutter `51fd9afadf309ba5337320bd3653f5345c156cb9`,
+`packages/flutter/lib/src/painting/rounded_rectangle_border.dart` (`getInnerPath`, `paint`), and
+Android/base `1cdfff555f4a21f71ccc978290e2e212e2f8b168`,
+`core/java/android/view/SurfaceControl.java` (`setCrop`, `setCornerRadius`). The former distinguishes
+frame fill/outline and the interior curve; the latter keeps cropping at composition rather than
+modifying client buffers. Official checks remain [CSS corner shaping/clipping](https://www.w3.org/TR/css-backgrounds-3/#corner-shaping)
+and [Vulkan scissor bounds](https://docs.vulkan.org/spec/latest/chapters/fragops.html#fragops-scissor).
+Rejected: rounding the app's top corners, outlining without filling wider corner wedges, and restoring
+an opaque full backing. No reference code was copied. Image lifetime, SHM copying, resize/configure
+pacing, and V3DV upload workarounds are unchanged.
+
+Neutral `RoundedClip::inverse` supplies complementary coverage in software and four Vulkan fragment
+stages. GPU ABI 4 keeps the 192-byte view layout but assigns bits 1/2 of view flags to clip inversion;
+the offline bundle is regenerated, validated, and reflected. No new GPU extension, mask image,
+offscreen pass, or presenting run is required. Tests cover bottom wedges with margins wider than the
+outline, the square app seam versus rounded window top, translucent frame fill without duplicate
+blending, client/preview alpha 0/128/255, title-bar-height independence, empty/antialiased inverse
+coverage, inversion-only placement damage without image uploads, and per-placement GPU flag reset.
+
+### Checks
 
 CPU tests cover native coordinate/clip mapping, shadow exclusion, all eight anchored edges and
 cell-snapped final sizes, paused mailbox fairness/resume, image-free solid previews, hidden image
@@ -194,9 +228,11 @@ scene reuse across source-node replacement. Geometry tests check inset centers a
 
 Verification for the current implementation, including the rounded-frame follow-up:
 
-- `cargo test -p telorgon --lib --quiet`: 930 passed.
+- `cargo test -p telorgon --lib --quiet`: 936 passed.
 - `cargo test -p telorgon --lib desktop_wayland --features embedded-vulkan,profiler --quiet`:
-  35 passed.
+  39 passed.
+- `cargo test -p telorgon --lib clip_tests --features embedded-vulkan,profiler --quiet`:
+  1 passed (CPU-only view-uniform encoding).
 - `cargo test -p telorgon --test window_frame_api --quiet`: 4 passed.
 - `cargo check -p telorgon --tests --target aarch64-unknown-linux-gnu --no-default-features
   --features desktop-wayland-linux,embedded-vulkan,profiler`: passed.

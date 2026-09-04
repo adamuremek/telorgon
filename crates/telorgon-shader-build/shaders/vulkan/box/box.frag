@@ -5,7 +5,8 @@ float placement_coverage(){
     for(int i=0;i<2;i++){
         vec4 rect=view_data.placement_clip_rects[i];
         if(rect.z<0.0)continue;
-        if(rect.z<=0.0||rect.w<=0.0)return 0.0;
+        bool inverted=(view_data.epoch_flags.w&(1u<<uint(i+1)))!=0u;
+        if(rect.z<=0.0||rect.w<=0.0){if(inverted)continue;return 0.0;}
         vec2 p=gl_FragCoord.xy-rect.xy;
         vec2 half_size=rect.zw*.5;
         vec4 radii=view_data.placement_clip_radii[i];
@@ -13,7 +14,8 @@ float placement_coverage(){
         radius=clamp(radius,0.0,min(half_size.x,half_size.y));
         vec2 q=abs(p-half_size)-(half_size-vec2(radius));
         float d=length(max(q,vec2(0)))+min(max(q.x,q.y),0.0)-radius;
-        amount=min(amount,clamp(.5-d,0.0,1.0));
+        float coverage=clamp(.5-d,0.0,1.0);
+        amount=min(amount,inverted?1.0-coverage:coverage);
     }
     return amount;
 }

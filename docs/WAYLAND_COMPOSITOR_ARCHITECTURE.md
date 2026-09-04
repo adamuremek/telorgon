@@ -249,8 +249,9 @@ The operational managed path is entirely Telorgon-rendered:
    backing draws separately, and neither it nor stale client pixels draw beneath a translucent veil.
    Client alpha can reveal lower layers when the backing is transparent; opaque buffers stay opaque.
    Content and subsurfaces intersect the frame's inset rounded-border contour with the content slot;
-   popups remain independent. A border-only placement restores the curved rim inside the rectangular
-   backing cutout. Rounded-clip changes damage placements without rewriting client images. Vulkan
+   popups remain independent. Both contours start at the window top, not the app/title-bar seam.
+   Separate outline and inverse-clipped frame-fill placements restore the curved rim and wider
+   corner wedges inside the rectangular cutout. Rounded-clip changes damage placements without rewriting client images. Vulkan
    applies analytic coverage through per-placement view uniforms; software uses the same distance
    rule. Composed easy-frame descendants clip at their overflow bounds, excluding the frame's shadow.
    All eight edges track the pointer using compositor-owned frame/veil geometry;

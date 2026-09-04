@@ -7,12 +7,47 @@ use crate::ui::{Border, CornerRadii};
 pub struct RoundedClip {
     pub rect: RectF,
     pub radii: CornerRadii,
+    /// Keep the outside of this contour (for a transparent content aperture).
+    pub inverted: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::core::ColorRgba8;
+
+    #[test]
+    fn inverse_coverage_is_complementary_including_empty_bounds_and_antialiasing() {
+        let clip = RoundedClip::new(
+            RectF {
+                x: 3.0,
+                y: 5.0,
+                width: 20.0,
+                height: 16.0,
+            },
+            CornerRadii::all(6.0),
+        );
+        for y in 0..28 {
+            for x in 0..28 {
+                let point = PointF {
+                    x: x as f32 + 0.5,
+                    y: y as f32 + 0.5,
+                };
+                assert_eq!(clip.coverage(point) + clip.inverse().coverage(point), 1.0);
+            }
+        }
+        assert_eq!(clip.inverse().inverse(), clip);
+        let inset = Border::all(2.0, ColorRgba8::rgba(0, 0, 0, 0));
+        assert_eq!(clip.inverse().inset(inset), clip.inset(inset).inverse());
+        let empty = RoundedClip::new(
+            RectF {
+                width: 0.0,
+                ..clip.rect
+            },
+            clip.radii,
+        );
+        assert_eq!(empty.inverse().coverage(PointF { x: 0.0, y: 0.0 }), 1.0);
+    }
 
     #[test]
     fn inner_curve_is_concentric_with_uniform_border_and_clamps_when_thick() {
@@ -82,6 +117,7 @@ impl RoundedClip {
         };
         Self {
             rect,
+            inverted: false,
             radii: CornerRadii {
                 top_left: radius(radii.top_left),
                 top_right: radius(radii.top_right),
@@ -91,13 +127,18 @@ impl RoundedClip {
         }
     }
 
+    pub fn inverse(mut self) -> Self {
+        self.inverted = !self.inverted;
+        self
+    }
+
     /// Matches the analytic box renderer's inner border contour, including zero-width borders.
     pub fn inset(self, border: Border) -> Self {
         let top = border.top.width.max(0.0);
         let right = border.right.width.max(0.0);
         let bottom = border.bottom.width.max(0.0);
         let left = border.left.width.max(0.0);
-        Self::new(
+        let mut inner = Self::new(
             RectF {
                 x: self.rect.x + left,
                 y: self.rect.y + top,
@@ -110,7 +151,9 @@ impl RoundedClip {
                 bottom_right: (self.radii.bottom_right - bottom.max(right)).max(0.0),
                 bottom_left: (self.radii.bottom_left - bottom.max(left)).max(0.0),
             },
-        )
+        );
+        inner.inverted = self.inverted;
+        inner
     }
 
     pub fn is_valid(self) -> bool {
@@ -140,6 +183,15 @@ impl RoundedClip {
 
     /// One-output-pixel analytic antialiasing, shared with the composite fragment shaders.
     pub fn coverage(self, point: PointF) -> f32 {
+        let coverage = self.inner_coverage(point);
+        if self.inverted {
+            1.0 - coverage
+        } else {
+            coverage
+        }
+    }
+
+    fn inner_coverage(self, point: PointF) -> f32 {
         if self.rect.width <= 0.0 || self.rect.height <= 0.0 {
             return 0.0;
         }

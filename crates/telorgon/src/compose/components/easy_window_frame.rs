@@ -36,7 +36,8 @@ pub struct WindowChromeStateStyle {
     pub title_bar_visible: bool,
     /// Outer frame radius. Client content is automatically clipped to the inner border curve.
     pub frame_radius: f32,
-    /// Optional additional rounding at the content slot, intersected with the inner frame clip.
+    /// Inner content-aperture radius, intersected with the frame contour. With a title bar,
+    /// top rounding belongs to the window, not to the app/title-bar seam.
     pub content_radius: f32,
     pub shadow: Option<Shadow>,
     pub resize_regions: bool,
@@ -304,7 +305,20 @@ impl Component for EasyWindowFrameComponent {
                     .decoration(
                         BoxDecoration::new()
                             .background(Background::Color(design.content_background))
-                            .corner_radius(state.content_radius),
+                            .corner_radii(crate::ui::CornerRadii {
+                                top_left: if state.title_bar_visible {
+                                    0.0
+                                } else {
+                                    state.content_radius
+                                },
+                                top_right: if state.title_bar_visible {
+                                    0.0
+                                } else {
+                                    state.content_radius
+                                },
+                                bottom_right: state.content_radius,
+                                bottom_left: state.content_radius,
+                            }),
                     ),
             )
     }

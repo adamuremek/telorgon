@@ -1,5 +1,5 @@
 schema_version = 1
-interface_major = 3
+interface_major = 4
 interface_minor = 0
 target = "vulkan1.3-spirv1.6"
 

@@ -282,6 +282,20 @@ fn rounded_frame(
     [Option<crate::render::RoundedClip>; 2],
     RectI,
 ) {
+    rounded_frame_with_aperture(radius, width, width as i32, 0.0, 255)
+}
+
+fn rounded_frame_with_aperture(
+    radius: f32,
+    width: f32,
+    margin: i32,
+    content_radius: f32,
+    frame_alpha: u8,
+) -> (
+    Vec<DesktopLayer>,
+    [Option<crate::render::RoundedClip>; 2],
+    RectI,
+) {
     use crate::render::{
         BatchKey, BlendMode, Border, BoxInstance, ClipId, DrawItem, PipelineKind, PrimitiveKind,
         SpatialId,
@@ -292,10 +306,10 @@ fn rounded_frame(
     };
     let position = PointI { x: 2, y: 1 };
     let content = RectI {
-        x: 2 + width as i32,
+        x: 2 + margin,
         y: 8,
-        width: 28 - width as i32 * 2,
-        height: 15 - width as i32,
+        width: 28 - margin * 2,
+        height: 15 - margin,
     };
     let rect = crate::core::RectF {
         x: 0.0,
@@ -303,11 +317,11 @@ fn rounded_frame(
         width: 28.0,
         height: 22.0,
     };
-    let mut border = BoxInstance {
+    let border = BoxInstance {
         node: crate::scene::NodeId::new(0, 1),
         rect,
         view_bounds: rect,
-        background: Some(ColorRgba8::rgba(60, 60, 60, 255)),
+        background: Some(ColorRgba8::rgba(60, 60, 60, frame_alpha)),
         border: Border::all(width, ColorRgba8::rgba(255, 0, 0, 255)),
         outline: Default::default(),
         corner_radii: crate::ui::CornerRadii::all(radius),
@@ -342,12 +356,164 @@ fn rounded_frame(
         true,
         Some(content),
     );
-    border.background = None;
-    let clips = frame_content_clips(&border, position, content, 0.0);
+    let clips = frame_content_clips(&border, position, content, content_radius);
+    layers.push(DesktopLayer::content_corners(
+        9,
+        border.clone(),
+        extent,
+        position,
+        content,
+        clips,
+    ));
     layers.push(DesktopLayer::content_border(
         9, border, extent, position, content,
     ));
     (layers, clips, content)
+}
+
+#[test]
+fn title_bar_height_does_not_relocate_or_shrink_the_window_contours() {
+    let (layers, clips, content) = rounded_frame_with_aperture(8.0, 1.0, 4, 5.0, 255);
+    let border = layers
+        .iter()
+        .find(|layer| layer.key == DesktopLayerKey::ContentBorder(9))
+        .unwrap();
+    let DesktopLayerContent::Decoration { instance, .. } = &border.content else {
+        unreachable!()
+    };
+    let short_content = RectI {
+        y: content.y + 8,
+        height: content.height - 8,
+        ..content
+    };
+    assert_eq!(
+        frame_content_clips(instance, PointI { x: 2, y: 1 }, short_content, 5.0),
+        clips
+    );
+    assert_eq!(clips[1].unwrap().rect.y, 2.0);
+    assert_eq!(clips[1].unwrap().radii.bottom_left, 5.0);
+}
+
+#[test]
+fn wide_frame_margins_fill_bottom_corners_without_rounding_the_app_top() {
+    let (mut layers, clips, content) = rounded_frame_with_aperture(8.0, 1.0, 4, 5.0, 255);
+    layers.push(
+        DesktopLayer::image(
+            DesktopLayerKey::Surface(9),
+            DesktopSceneKey::Surface(9),
+            1,
+            DesktopImageUpdate::Full(
+                [0, 0, 255, 0]
+                    .repeat((content.width * content.height) as usize)
+                    .into(),
+            ),
+            SizeI {
+                width: content.width,
+                height: content.height,
+            },
+            content,
+            None,
+            ImageAlphaMode::Opaque,
+            ImagePixelFormat::Rgba8,
+            true,
+        )
+        .with_content_clip(content, clips),
+    );
+    let mut raster = Raster::new();
+    raster.draw(layers);
+    for x in [6, 25] {
+        assert_eq!(
+            raster.pixel(x, 8),
+            [0, 0, 255, 255],
+            "app top seam must stay square"
+        );
+        assert_eq!(
+            raster.pixel(x, 18),
+            [60, 60, 60, 255],
+            "bottom aperture wedge belongs to frame fill"
+        );
+    }
+    for x in [2, 29] {
+        assert_eq!(
+            raster.pixel(x, 1),
+            [0, 255, 0, 255],
+            "outer window top must be rounded"
+        );
+        assert_eq!(
+            raster.pixel(x, 22),
+            [0, 255, 0, 255],
+            "outer window bottom must be rounded"
+        );
+    }
+    assert_eq!(
+        raster.pixel(16, 3),
+        [60, 60, 60, 255],
+        "title bar remains filled"
+    );
+}
+
+#[test]
+fn aperture_corner_fill_preserves_preview_and_client_transparency() {
+    for preview in [false, true] {
+        for alpha in [0, 128, 255] {
+            let (mut layers, clips, content) = rounded_frame_with_aperture(8.0, 1.0, 4, 5.0, 255);
+            let layer = if preview {
+                DesktopLayer::solid(
+                    DesktopLayerKey::ResizeVeil(9),
+                    DesktopSceneKey::ResizeVeil(9),
+                    ColorRgba8::rgba(0, 0, 255, alpha),
+                    content,
+                )
+            } else {
+                DesktopLayer::image(
+                    DesktopLayerKey::Surface(9),
+                    DesktopSceneKey::Surface(9),
+                    1,
+                    DesktopImageUpdate::Full(
+                        [0, 0, 255, alpha]
+                            .repeat((content.width * content.height) as usize)
+                            .into(),
+                    ),
+                    SizeI {
+                        width: content.width,
+                        height: content.height,
+                    },
+                    content,
+                    None,
+                    ImageAlphaMode::Straight,
+                    ImagePixelFormat::Rgba8,
+                    true,
+                )
+            };
+            layers.push(layer.with_content_clip(content, clips));
+            let mut raster = Raster::new();
+            raster.draw(layers);
+            for x in [6, 25] {
+                assert_eq!(raster.pixel(x, 18), [60, 60, 60, 255]);
+            }
+            let expected = match alpha {
+                0 => [0, 255, 0, 255],
+                128 => [0, 187, 188, 255],
+                _ => [0, 0, 255, 255],
+            };
+            assert_eq!(
+                raster.pixel(16, 14),
+                expected,
+                "frame must not back the content interior"
+            );
+        }
+    }
+}
+
+#[test]
+fn translucent_frame_corner_matches_the_uncut_frame_fill() {
+    let (layers, _, _) = rounded_frame_with_aperture(8.0, 1.0, 4, 5.0, 128);
+    let mut raster = Raster::new();
+    raster.draw(layers);
+    // Both are fully covered fill pixels. A corner blended twice would be darker/less green.
+    assert_eq!(raster.pixel(6, 18), raster.pixel(16, 3));
+    assert_eq!(raster.pixel(25, 18), raster.pixel(16, 3));
+    assert_eq!(raster.pixel(16, 14), [0, 255, 0, 255]);
 }
 
 #[test]
@@ -492,6 +658,16 @@ fn rounded_clip_changes_repaint_without_touching_client_pixels() {
     let changed = raster.draw(vec![layer(DesktopImageUpdate::Unchanged, 0.0)]);
     assert!(changed.updates.is_empty());
     assert_eq!(raster.pixel(6, 8), [0, 0, 255, 255]);
+    let mut inverse = layer(DesktopImageUpdate::Unchanged, 5.0);
+    inverse.rounded_clips[0] = inverse.rounded_clips[0].map(RoundedClip::inverse);
+    raster.draw(vec![inverse]);
+    assert_eq!(raster.pixel(6, 8), [0, 0, 255, 255]);
+    let changed = raster.draw(vec![layer(DesktopImageUpdate::Unchanged, 5.0)]);
+    assert!(
+        changed.updates.is_empty(),
+        "inverse-only clip changes must not reupload images"
+    );
+    assert_eq!(raster.pixel(6, 8), [0, 255, 0, 255]);
 }
 
 #[test]

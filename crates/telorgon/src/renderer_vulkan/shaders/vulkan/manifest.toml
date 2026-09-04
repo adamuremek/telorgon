@@ -1,9 +1,9 @@
 schema_version = 1
-interface_major = 3
+interface_major = 4
 interface_minor = 0
 target = "vulkan1.3-spirv1.6"
-source_config_hash = "44d5645eb6c82623bd97042644f93dd9e5795b9e12779573cc0159b364745f65"
-bundle_hash = "12d3e67694a878a6840787b7454c0e8e0dd487bb103d19c8d609100f1b5f8c65"
+source_config_hash = "eb7f93861289f94c5a8d59a8a54d91cc63dc42b629a39418c7ab3292b785f232"
+bundle_hash = "a346671e23338bb2b2ad9e61414cd371140d280a5412e5d5e437b49f7109e582"
 
 [[shader]]
 name = "box_vertex"
@@ -17,9 +17,9 @@ entry_point = "main"
 [[shader]]
 name = "box_fragment"
 source = "shaders/vulkan/box/box.frag"
-source_hash = "e476d03f8027d5b7ec2c5df327d1aca4e8c057334c6af42d2a67eea4cfbc0931"
+source_hash = "daf19b2368daba13199e70c17784f215a32a4304c18445dec8543e35e0849e44"
 artifact = "box.frag.spv"
-artifact_hash = "dbde373f1568750c01c02539946fea3c25fd2ba8cb7b63e1a8a7d5d032ee418c"
+artifact_hash = "50c7e41a87ca9d62ff123f0d6fde5b264371021a8e919685e901262755dd80cc"
 stage = "fragment"
 entry_point = "main"
 
@@ -35,9 +35,9 @@ entry_point = "main"
 [[shader]]
 name = "glyph_fragment"
 source = "shaders/vulkan/box/glyph.frag"
-source_hash = "a94501341bfa507e03f3842cb4f18037df0bbb7dce144b60632bd1a0ec3ae945"
+source_hash = "d4923f3702e0e8a61a33a11896890ccdb1081dacebef56e43bbda176c85ee38c"
 artifact = "glyph.frag.spv"
-artifact_hash = "d7c8fe9314bf6aaf1d0c41a175c0615ac2f5d279336710245ad8ce71af1dbe6f"
+artifact_hash = "9b4643de4e9c059bec5b2e549a3ae79883a48fb9443bd4138e1a337b1d32ae94"
 stage = "fragment"
 entry_point = "main"
 
@@ -53,9 +53,9 @@ entry_point = "main"
 [[shader]]
 name = "image_fragment"
 source = "shaders/vulkan/box/image.frag"
-source_hash = "4c6cf2e244acc7b48f1822f244d8b844c9027ecd7c71966f63df4b04bee0e6e7"
+source_hash = "ef584958a700cf03f4d97c787016a048b8e5579a7ce1128b2e7439a906cee0e1"
 artifact = "image.frag.spv"
-artifact_hash = "83b5ec33a436f8864b9166195538f0888d0293a2b9153ea3295bb54c3c922d6b"
+artifact_hash = "b442394e14f70d0a400c3c40451382f918795900b5cbb5c670a926ee39d607ec"
 stage = "fragment"
 entry_point = "main"
 
@@ -71,8 +71,8 @@ entry_point = "main"
 [[shader]]
 name = "material_fragment"
 source = "shaders/vulkan/box/material.frag"
-source_hash = "ad35f43d3f0f0bfa3aacbc3603df59452fd1d6e06b75f2641c975322c8c5d6f0"
+source_hash = "e61144abb520de4625a893fb6ee2d85146e7132c9e64a67737170e9a6de04f63"
 artifact = "material.frag.spv"
-artifact_hash = "60263c7cdbc5b6e77ca8ae4e946d9b57be5e47bbccffce8134a6bdfafe5a6881"
+artifact_hash = "ec64b3c4ccd3a9079df63cc80f48a1fac026b853d9f8cfe2f9c7edf9a5fcf9a6"
 stage = "fragment"
 entry_point = "main"

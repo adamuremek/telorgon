@@ -293,7 +293,7 @@ The following offsets and sizes are normative. All offsets are bytes.
 
 ### 6.1 Frame/view record
 
-`GpuView`, alignment 16, size 192 in the implemented GPU ABI 3.0:
+`GpuView`, alignment 16, size 192 in the implemented GPU ABI 4.0:
 
 | Offset | Field | Meaning |
 |---:|---|---|
@@ -312,8 +312,10 @@ The following offsets and sizes are normative. All offsets are bytes.
 layout does not depend on language matrix-major defaults.
 
 ABI 3 extends the view record for bounded compositor clipping; all stages declare the same block.
-A negative rectangle width disables a clip slot, zero extent clips all fragments, and the two enabled
-rounded bounds intersect. Ordinary non-composite views explicitly disable both slots. Composite
+A negative rectangle width disables a clip slot, and the two enabled rounded bounds intersect.
+ABI 4 assigns flags bits 1/2 to invert coverage for clip slots 0/1 respectively, allowing frame fill
+outside an aperture without painting behind transparent clients. A zero-extent normal clip rejects
+everything; its inverse accepts everything. Ordinary non-composite views explicitly disable both slots. Composite
 fragment stages use output-space signed-distance coverage with a one-pixel antialias band and
 multiply both premultiplied RGB and alpha; opaque batches select source-over when these clips are
 enabled. Existing scene clips and scissors still apply. Clip metadata is placement-owned, preserving
@@ -424,7 +426,7 @@ The initial flag and mode words are normative:
 | Word | Values |
 |---|---|
 | `GpuView.epoch_flags[2]` | `0 linear attachment`, `1 hardware sRGB attachment`, `2 linear intermediate requiring final encode` |
-| `GpuView.epoch_flags[3]` | bit 0 target is opaque; every other bit is zero |
+| `GpuView.epoch_flags[3]` | bit 0 target is opaque; bits 1/2 invert placement clips 0/1; remaining bits zero |
 | `GpuBoxInstance` flags | bit 0 fill present; bit 1 border present; every other bit is zero |
 | `GpuShadowInstance` flags | zero; inset or alternative shadow algorithms require a later variant |
 | `GpuGlyphInstance.flags` | bit 0 color glyph; every other bit is zero; it must agree with the selected pipeline variant |

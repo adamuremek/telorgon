@@ -17,7 +17,7 @@ use super::descriptor::{
 use super::error::unsupported;
 use super::executor::{
     ViewMapping, batch_scissor, begin_external_image_uses, buffer_info, gpu_view,
-    intersect_scissor, linear_clear, primitive_index, record_uploads, rect2d,
+    intersect_scissor, linear_clear, primitive_index, record_uploads, rect2d, set_placement_clips,
     validate_retained_scene,
 };
 use super::external_image::{VulkanExternalAcquire, VulkanExternalRelease};
@@ -203,18 +203,7 @@ impl VulkanDevice {
             let scene = &scenes[placement.scene_index].scene;
             let mapping = ViewMapping::new(scene.extent, placement.target);
             let mut view = gpu_view(scene, target, mapping);
-            for (index, clip) in placement.rounded_clips.iter().enumerate() {
-                if let Some(clip) = clip {
-                    view.placement_clip_rects[index] =
-                        [clip.rect.x, clip.rect.y, clip.rect.width, clip.rect.height];
-                    view.placement_clip_radii[index] = [
-                        clip.radii.top_left,
-                        clip.radii.top_right,
-                        clip.radii.bottom_right,
-                        clip.radii.bottom_left,
-                    ];
-                }
-            }
+            set_placement_clips(&mut view, placement.rounded_clips);
             let plan = plans[placement.scene_index]
                 .take()
                 .unwrap_or_else(SceneUploadPlan::default);

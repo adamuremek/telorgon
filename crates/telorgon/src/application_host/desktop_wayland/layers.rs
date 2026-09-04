@@ -302,7 +302,10 @@ pub(super) fn refresh_window_frames(
             node: snapshot.frame.node,
             rect: snapshot.frame.bounds,
             view_bounds: snapshot.frame.bounds,
-            background: None,
+            background: match style.decoration.background {
+                crate::ui::Background::Color(color) => Some(color),
+                _ => None,
+            },
             border: style.decoration.border,
             outline: Default::default(),
             corner_radii: style.decoration.corner_radii,
@@ -500,8 +503,18 @@ pub(super) fn prepare_desktop_layers(
                 && (veiled || content_style.is_some())
                 && let Some(border) = &frame.border
             {
-                // Restore only the curved rim removed by the rectangular backing cutout.
-                // Its scissor is disjoint from the four retained frame strips.
+                // Restore both the wider chrome fill and the outline, outside the aperture.
+                // These patches stay inside the cutout, disjoint from the four frame strips.
+                if let Some((_, clips)) = inherited_clip {
+                    layers.push(DesktopLayer::content_corners(
+                        surface.get(),
+                        border.clone(),
+                        frame.outer,
+                        position,
+                        content_rect,
+                        clips,
+                    ));
+                }
                 layers.push(DesktopLayer::content_border(
                     surface.get(),
                     border.clone(),
