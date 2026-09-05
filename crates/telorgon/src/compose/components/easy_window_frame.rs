@@ -1052,6 +1052,10 @@ mod tests {
                         255,
                         "inner antialias seam must remain opaque"
                     );
+                    assert!(
+                        pixel(195, 6)[2] > 0,
+                        "partially covered inner corner must contain button color, not just frame fill"
+                    );
                     assert_eq!(
                         pixel(196, 6),
                         [255, 0, 0, 255],

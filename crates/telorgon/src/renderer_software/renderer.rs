@@ -879,7 +879,8 @@ fn draw_box(
         for x in bounds.x.floor() as i32..bounds.right().ceil() as i32 {
             let point_x = x as f32 + 0.5;
             let point_y = y as f32 + 0.5;
-            if !inside_clip(point_x, point_y, clip) {
+            let clip_amount = clip_coverage(point_x, point_y, clip);
+            if clip_amount <= 0.0 {
                 continue;
             }
             let local = inverse.transform_point(crate::core::PointF {
@@ -890,7 +891,12 @@ fn draw_box(
                 let coverage =
                     shadow_coverage(local.x, local.y, instance.rect, radii, *shadow, scale_min);
                 if coverage > 0.0 {
-                    raster.blend_srgba(x, y, shadow.color, coverage * instance.opacity);
+                    raster.blend_srgba(
+                        x,
+                        y,
+                        shadow.color,
+                        coverage * instance.opacity * clip_amount,
+                    );
                 }
             }
 
@@ -913,7 +919,12 @@ fn draw_box(
                 );
                 let coverage = (outer - inner).clamp(0.0, 1.0);
                 if coverage > 0.0 {
-                    raster.blend_srgba(x, y, instance.outline.color, coverage * instance.opacity);
+                    raster.blend_srgba(
+                        x,
+                        y,
+                        instance.outline.color,
+                        coverage * instance.opacity * clip_amount,
+                    );
                 }
             }
 
@@ -949,7 +960,12 @@ fn draw_box(
                     *channel += srgb_decode_byte(value) * amount;
                 }
             }
-            raster.blend_linear_premultiplied(x, y, rgb, alpha);
+            raster.blend_linear_premultiplied(
+                x,
+                y,
+                rgb.map(|c| c * clip_amount),
+                alpha * clip_amount,
+            );
         }
     }
 }
@@ -1113,7 +1129,8 @@ fn draw_glyph(
         for x in target.x.floor() as i32..target.right().ceil() as i32 {
             let point_x = x as f32 + 0.5;
             let point_y = y as f32 + 0.5;
-            if !inside_clip(point_x, point_y, clip) {
+            let clip_amount = clip_coverage(point_x, point_y, clip);
+            if clip_amount <= 0.0 {
                 continue;
             }
             let local = inverse.transform_point(crate::core::PointF {
@@ -1132,7 +1149,7 @@ fn draw_glyph(
                 atlas_x,
                 atlas_y,
             );
-            raster.blend_srgba(x, y, glyph.color, coverage * glyph.opacity);
+            raster.blend_srgba(x, y, glyph.color, coverage * glyph.opacity * clip_amount);
         }
     }
 }
@@ -1164,7 +1181,8 @@ fn draw_image(
         for x in target.x.floor() as i32..target.right().ceil() as i32 {
             let point_x = x as f32 + 0.5;
             let point_y = y as f32 + 0.5;
-            if !inside_clip(point_x, point_y, clip) {
+            let clip_amount = clip_coverage(point_x, point_y, clip);
+            if clip_amount <= 0.0 {
                 continue;
             }
             let local = inverse.transform_point(crate::core::PointF {
@@ -1181,7 +1199,7 @@ fn draw_image(
                 u,
                 v,
             );
-            let opacity = instance.opacity.clamp(0.0, 1.0);
+            let opacity = instance.opacity.clamp(0.0, 1.0) * clip_amount;
             if let Some(tint) = instance.tint {
                 let source_alpha = match image.alpha_mode {
                     ImageAlphaMode::Opaque => 1.0,
@@ -1250,7 +1268,8 @@ fn draw_material(
         for x in target.x.floor() as i32..target.right().ceil() as i32 {
             let point_x = x as f32 + 0.5;
             let point_y = y as f32 + 0.5;
-            if !inside_clip(point_x, point_y, clip) {
+            let clip_amount = clip_coverage(point_x, point_y, clip);
+            if clip_amount <= 0.0 {
                 continue;
             }
             let local = inverse.transform_point(crate::core::PointF {
@@ -1271,33 +1290,24 @@ fn draw_material(
                 x,
                 y,
                 lerp_color(material.colors[0], material.colors[1], amount),
-                instance.opacity,
+                instance.opacity * clip_amount,
             );
         }
     }
 }
 
-fn inside_clip(x: f32, y: f32, clip: Option<&RenderClip>) -> bool {
+fn clip_coverage(x: f32, y: f32, clip: Option<&RenderClip>) -> f32 {
     let Some(clip) = clip else {
-        return true;
+        return 1.0;
     };
-    let local_x = x - clip.rect.x;
-    let local_y = y - clip.rect.y;
-    if local_x < 0.0 || local_y < 0.0 || local_x > clip.rect.width || local_y > clip.rect.height {
-        return false;
+    let point = crate::core::PointF { x, y };
+    if !clip.rect.contains(point) {
+        return 0.0;
     }
-    inside_rounded(
-        local_x,
-        local_y,
-        clip.rect.width,
-        clip.rect.height,
-        [
-            clip.corner_radii.top_left,
-            clip.corner_radii.top_right,
-            clip.corner_radii.bottom_right,
-            clip.corner_radii.bottom_left,
-        ],
-    )
+    if clip.corner_radii == crate::ui::CornerRadii::default() {
+        return 1.0; // Rectangular scissors retain their existing hard edge.
+    }
+    crate::render::RoundedClip::new(clip.rect, clip.corner_radii).coverage(point)
 }
 
 fn lerp_color(first: ColorRgba8, second: ColorRgba8, amount: f32) -> ColorRgba8 {
@@ -1310,32 +1320,6 @@ fn lerp_color(first: ColorRgba8, second: ColorRgba8, amount: f32) -> ColorRgba8 
         channel(first.b, second.b),
         channel(first.a, second.a),
     )
-}
-
-fn inside_rounded(x: f32, y: f32, width: f32, height: f32, radii: [f32; 4]) -> bool {
-    let [top_left, top_right, bottom_right, bottom_left] = radii;
-    let check = |x: f32, y: f32, cx: f32, cy: f32, radius: f32| {
-        let dx = x - cx;
-        let dy = y - cy;
-        dx * dx + dy * dy <= radius * radius
-    };
-    if x < top_left && y < top_left {
-        check(x, y, top_left, top_left, top_left)
-    } else if x > width - top_right && y < top_right {
-        check(x, y, width - top_right, top_right, top_right)
-    } else if x > width - bottom_right && y > height - bottom_right {
-        check(
-            x,
-            y,
-            width - bottom_right,
-            height - bottom_right,
-            bottom_right,
-        )
-    } else if x < bottom_left && y > height - bottom_left {
-        check(x, y, bottom_left, height - bottom_left, bottom_left)
-    } else {
-        true
-    }
 }
 
 fn intersect(a: RectF, b: RectF) -> RectF {
@@ -1796,6 +1780,96 @@ mod tests {
         assert_eq!(&surface.pixels_rgba8()[0..4], &[255, 0, 0, 255]);
         assert_eq!(&surface.pixels_rgba8()[4..8], &[0, 0, 255, 255]);
         assert_eq!(&surface.pixels_rgba8()[12..16], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn rounded_clip_preserves_fractional_pixel_coverage_at_all_corners() {
+        let rect = RectF {
+            x: 0.0,
+            y: 0.0,
+            width: 80.0,
+            height: 80.0,
+        };
+        let instance = BoxInstance {
+            node: NodeId::new(0, 1),
+            rect,
+            view_bounds: rect,
+            background: Some(ColorRgba8::rgba(0, 0, 255, 255)),
+            border: Border::default(),
+            outline: Outline::default(),
+            corner_radii: CornerRadii::default(),
+            shadows: ShadowList::default(),
+            opacity: 1.0,
+            clip: ClipId(1),
+            spatial: SpatialId(0),
+        };
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for inset in [2.0, 2.5] {
+                let clip = RenderClip {
+                    id: ClipId(1),
+                    rect: RectF {
+                        x: inset * scale,
+                        y: inset * scale,
+                        width: (36.0 - 2.0 * inset) * scale,
+                        height: (36.0 - 2.0 * inset) * scale,
+                    },
+                    corner_radii: CornerRadii::all((14.0 - inset) * scale),
+                };
+                let mut pixels = vec![0; 80 * 80 * 4];
+                draw_box(
+                    &mut RasterTarget {
+                        pixels: &mut pixels,
+                        width: 80,
+                        height: 80,
+                        origin: crate::core::PointI::default(),
+                        blend_mode: BlendMode::Alpha,
+                        color_space: ColorSpace::Srgb,
+                        rounded_clips: [None; 2],
+                    },
+                    &instance,
+                    None,
+                    Some(&clip),
+                    rect,
+                );
+                let mut partial = 0;
+                for y in 0..80 {
+                    for x in 0..80 {
+                        let px = x as f32 + 0.5;
+                        let py = y as f32 + 0.5;
+                        if !clip.rect.contains(PointF { x: px, y: py }) {
+                            continue;
+                        }
+                        let radius = (14.0 - inset) * scale;
+                        let cx = if px < clip.rect.x + clip.rect.width / 2.0 {
+                            clip.rect.x + radius
+                        } else {
+                            clip.rect.right() - radius
+                        };
+                        let cy = if py < clip.rect.y + clip.rect.height / 2.0 {
+                            clip.rect.y + radius
+                        } else {
+                            clip.rect.bottom() - radius
+                        };
+                        // Independently evaluate the circular corners, away from straight edges.
+                        if (px < cx) == (cx < clip.rect.x + clip.rect.width / 2.0)
+                            && (py < cy) == (cy < clip.rect.y + clip.rect.height / 2.0)
+                        {
+                            let expected = ((0.5 - ((px - cx).hypot(py - cy) - radius))
+                                .clamp(0.0, 1.0)
+                                * 255.0)
+                                .round() as u8;
+                            let alpha = pixels[(y * 80 + x) * 4 + 3];
+                            assert!(
+                                alpha.abs_diff(expected) <= 1,
+                                "clip coverage at {x},{y}, scale={scale}, inset={inset}: {alpha} != {expected}"
+                            );
+                            partial += usize::from(expected > 0 && expected < 255);
+                        }
+                    }
+                }
+                assert!(partial > 0, "must exercise partially covered pixels");
+            }
+        }
     }
 
     #[test]

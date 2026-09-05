@@ -678,3 +678,23 @@ its existing analytic geometry and blending state and combines disjoint body cov
 Tests cover all pixels of a rounded box with transparent, translucent, and opaque colors and local
 opacity, plus the flush control corner regression. The offline shader builder regenerates and
 validates SPIR-V, reflection, and manifest hashes; live GPU presentation is left to the user.
+
+### Fractional rounded clipping (2026-09-05)
+
+The retained rounded clip previously made a binary inside/outside decision while the frame border
+used analytic antialiasing. A partially covered inner-curve pixel could remain fully opaque yet
+contain no control color, exposing the title-bar fill as a visible fringe. Rounded clips now supply
+fractional coverage to boxes, images, glyphs, and materials in both backends. The software path
+uses the existing output-pixel rounded contour; Vulkan uses the same signed-distance/fwidth filter
+as the analytic box edge. Rectangular scissors and geometric input containment are unchanged.
+
+The reference invariants above still apply: Qt's `qsgbasicinternalrectanglenode.cpp` explicitly
+models inner antialias geometry, and Vello's `fine.wgsl` applies area coverage before blending a
+source. The [GLSL derivative specification](https://github.khronos.org/Vulkan-Site/glsl/latest/chapters/builtinfunctions.html)
+defines `fwidth` as the pixel-local derivative magnitude used by the existing Vulkan box filter.
+Expanding the clip radius was rejected because it changes geometry rather than restoring missing
+fractional coverage. New checks require control color at the reproduced boundary pixel and compare
+all four circular corners against independent coverage calculations at 1x, 1.25x, 1.5x, and 2x,
+including fractional insets. Shader artifacts are rebuilt, reflected, validated, and hash-checked.
+These are CPU pixel and shader-validation results; the reported live Vulkan appearance has not
+been visually verified on the user's device.
