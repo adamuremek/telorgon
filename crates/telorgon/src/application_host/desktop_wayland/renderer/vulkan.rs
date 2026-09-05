@@ -236,11 +236,12 @@ pub(in crate::application_host::desktop_wayland) fn vulkan_staging_budget_bytes(
 }
 
 pub(in crate::application_host::desktop_wayland) struct VulkanDesktopRenderer {
+    // Drain submitted work before scene and target handles are destroyed.
+    completion_worker: VulkanCompletionWorker,
     device: VulkanDevice,
     scenes: BTreeMap<DesktopSceneKey, VulkanScene>,
     targets: Vec<VulkanDmaBufScanoutTarget>,
     content_version: u64,
-    completion_worker: VulkanCompletionWorker,
     target_versions: Vec<u64>,
     damage_history: VecDeque<(u64, Option<RectI>)>,
     dma_buf_importer: Option<DmaBufImporter>,
@@ -249,86 +250,24 @@ pub(in crate::application_host::desktop_wayland) struct VulkanDesktopRenderer {
 }
 
 impl VulkanDesktopRenderer {
-    pub(super) fn new(buffers: &[GbmBuffer<'_, '_>], extent: SizeI) -> AppResult<Self> {
-        let frames_in_flight = buffers.len().max(2);
-        let staging_budget_bytes = vulkan_staging_budget_bytes(extent, frames_in_flight)?;
-        let config = VulkanConfig {
-            enable_validation: false,
-            frames_in_flight,
-            staging_budget_bytes,
-            ..VulkanConfig::default()
-        };
-        let instance = VulkanInstance::load(&config, &[]).map_err(app_error)?;
-        let mut adapters = instance.adapters().map_err(app_error)?;
-        adapters.sort_by_key(|adapter| std::cmp::Reverse(adapter.score));
-        let mut failures = Vec::new();
-        for adapter in adapters.into_iter().filter(|adapter| adapter.supported) {
-            let selection = DeviceSelection {
-                adapter_index: adapter.index,
-            };
-            let device =
-                match VulkanDevice::create_owned(instance.clone(), &config, &selection, None) {
-                    Ok(device) => device,
-                    Err(error) => {
-                        failures.push(format!("{}: {error}", adapter.name));
-                        continue;
-                    }
-                };
-            let targets = buffers
-                .iter()
-                .map(|buffer| {
-                    let format = buffer.format();
-                    let mut planes = buffer.export_planes().map_err(app_error)?;
-                    if planes.len() != 1 {
-                        return Err(AppError::new(
-                            "Vulkan scanout currently requires one GBM DMA-BUF plane",
-                        ));
-                    }
-                    let plane = planes.pop().expect("one plane checked");
-                    unsafe {
-                        VulkanDmaBufScanoutTarget::import(
-                            &device,
-                            plane.fd,
-                            format.fourcc,
-                            format.modifier,
-                            buffer.size(),
-                            u64::from(plane.offset),
-                            plane.stride,
-                        )
-                    }
-                    .map_err(app_error)
-                })
-                .collect::<AppResult<Vec<_>>>();
-            let targets = match targets {
-                Ok(targets) => targets,
-                Err(error) => {
-                    failures.push(format!("{}: {error}", adapter.name));
-                    continue;
-                }
-            };
-            let target_count = targets.len();
-            let dma_buf_importer = DmaBufImporter::new(&device).ok();
-            return Ok(Self {
-                device,
-                scenes: BTreeMap::new(),
-                targets,
-                content_version: 0,
-                completion_worker: VulkanCompletionWorker::new()?,
-                target_versions: vec![0; target_count],
-                damage_history: VecDeque::new(),
-                dma_buf_importer,
-                pending_dma_bufs: BTreeMap::new(),
-                next_dma_buf_content_version: 1,
-            });
-        }
-        Err(AppError::new(if failures.is_empty() {
-            "no supported Vulkan adapter was found".to_owned()
-        } else {
-            format!(
-                "no Vulkan adapter could import the KMS scanout buffers: {}",
-                failures.join("; ")
-            )
-        }))
+    fn from_targets(
+        device: VulkanDevice,
+        targets: Vec<VulkanDmaBufScanoutTarget>,
+    ) -> AppResult<Self> {
+        let target_count = targets.len();
+        let dma_buf_importer = DmaBufImporter::new(&device).ok();
+        Ok(Self {
+            device,
+            scenes: BTreeMap::new(),
+            targets,
+            content_version: 0,
+            completion_worker: VulkanCompletionWorker::new()?,
+            target_versions: vec![0; target_count],
+            damage_history: VecDeque::new(),
+            dma_buf_importer,
+            pending_dma_bufs: BTreeMap::new(),
+            next_dma_buf_content_version: 1,
+        })
     }
 
     pub(super) fn dma_buf_formats(&self) -> Vec<DmaBufFormat> {
@@ -1026,5 +965,82 @@ mod tests {
             inverted.transform_point(point),
             crate::core::PointF { x: 5.0, y: 37.0 }
         );
+    }
+}
+
+/// One device per startup attempt, reused while evaluating scanout candidates.
+pub(super) struct PreparedVulkan {
+    device: VulkanDevice,
+}
+impl PreparedVulkan {
+    pub(super) fn new(
+        fd: &OwnedFd,
+        extent: SizeI,
+        slots: usize,
+    ) -> crate::render::RenderResult<Self> {
+        let config = VulkanConfig {
+            enable_validation: false,
+            frames_in_flight: slots,
+            staging_budget_bytes: vulkan_staging_budget_bytes(extent, slots).map_err(|e| {
+                crate::render::RenderError::new(
+                    crate::render::RenderErrorKind::InvalidTarget,
+                    e.to_string(),
+                )
+            })?,
+            ..VulkanConfig::default()
+        };
+        let instance = VulkanInstance::load(&config, &[])?;
+        let adapter_index = instance.drm_adapter(fd)?;
+        let device = VulkanDevice::create_owned(
+            instance,
+            &config,
+            &DeviceSelection { adapter_index },
+            None,
+        )?;
+        eprintln!(
+            "telorgon-kms: matched Vulkan adapter {}",
+            device.capabilities().adapter_name
+        );
+        Ok(Self { device })
+    }
+    pub(super) fn modifiers(
+        &self,
+        fourcc: u32,
+        extent: SizeI,
+    ) -> crate::render::RenderResult<Vec<u64>> {
+        VulkanDmaBufScanoutTarget::supported_modifiers(&self.device, fourcc, extent)
+    }
+    pub(super) fn import(
+        &self,
+        buffer: &GbmBuffer<'_, '_>,
+    ) -> crate::render::RenderResult<VulkanDmaBufScanoutTarget> {
+        let format = buffer.format();
+        let mut planes = buffer.export_planes().map_err(|e| {
+            crate::render::RenderError::new(crate::render::RenderErrorKind::Internal, e.to_string())
+        })?;
+        if planes.len() != 1 {
+            return Err(crate::render::RenderError::new(
+                crate::render::RenderErrorKind::Unsupported,
+                "Vulkan scanout requires one memory plane",
+            ));
+        }
+        let plane = planes.pop().unwrap();
+        unsafe {
+            VulkanDmaBufScanoutTarget::import(
+                &self.device,
+                plane.fd,
+                format.fourcc,
+                format.modifier,
+                buffer.size(),
+                u64::from(plane.offset),
+                plane.stride,
+            )
+        }
+    }
+    pub(super) fn finish(
+        &self,
+        targets: Vec<VulkanDmaBufScanoutTarget>,
+    ) -> AppResult<VulkanDesktopRenderer> {
+        VulkanDesktopRenderer::from_targets(self.device.clone(), targets)
     }
 }

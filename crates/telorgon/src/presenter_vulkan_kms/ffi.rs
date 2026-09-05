@@ -159,6 +159,15 @@ pub const DRM_MODE_ATOMIC_ALLOW_MODESET: u32 = 0x0400;
 pub const DRM_MODE_PAGE_FLIP_EVENT: u32 = 0x01;
 pub const DRM_MODE_FB_MODIFIERS: u32 = 0x02;
 pub const DRM_EVENT_CONTEXT_VERSION: c_int = 4;
+#[repr(C)]
+pub struct drmModePropertyBlobRes {
+    pub id: u32,
+    pub length: u32,
+    pub data: *mut c_void,
+}
+
+pub const DRM_CAP_DUMB_BUFFER: u64 = 1;
+pub const DRM_CAP_ADDFB2_MODIFIERS: u64 = 0x10;
 pub const DRM_CAP_CURSOR_WIDTH: u64 = 0x8;
 pub const DRM_CAP_CURSOR_HEIGHT: u64 = 0x9;
 
@@ -167,10 +176,13 @@ pub const GBM_BO_USE_CURSOR: u32 = 1 << 1;
 pub const GBM_BO_USE_RENDERING: u32 = 1 << 2;
 pub const GBM_BO_USE_WRITE: u32 = 1 << 3;
 pub const GBM_BO_USE_LINEAR: u32 = 1 << 4;
-pub const GBM_BO_TRANSFER_WRITE: u32 = 1 << 0;
+pub const GBM_BO_TRANSFER_WRITE: u32 = 1 << 1;
+pub const GBM_BO_TRANSFER_READ_WRITE: u32 = (1 << 0) | GBM_BO_TRANSFER_WRITE;
 
 #[link(name = "drm")]
 unsafe extern "C" {
+    pub fn drmModeGetPropertyBlob(fd: c_int, id: u32) -> *mut drmModePropertyBlobRes;
+    pub fn drmModeFreePropertyBlob(blob: *mut drmModePropertyBlobRes);
     pub fn drmGetCap(fd: c_int, capability: u64, value: *mut u64) -> c_int;
     pub fn drmHandleEvent(fd: c_int, context: *mut drmEventContext) -> c_int;
     pub fn drmModeGetResources(fd: c_int) -> *mut drmModeRes;
@@ -247,15 +259,6 @@ pub type c_ulong = usize;
 unsafe extern "C" {
     pub fn gbm_create_device(fd: c_int) -> *mut gbm_device;
     pub fn gbm_device_destroy(device: *mut gbm_device);
-    pub fn gbm_bo_create_with_modifiers2(
-        device: *mut gbm_device,
-        width: c_uint,
-        height: c_uint,
-        format: c_uint,
-        modifiers: *const u64,
-        count: c_uint,
-        flags: c_uint,
-    ) -> *mut gbm_bo;
     pub fn gbm_bo_create(
         device: *mut gbm_device,
         width: c_uint,
@@ -285,4 +288,21 @@ unsafe extern "C" {
     ) -> *mut c_void;
     pub fn gbm_bo_unmap(buffer: *mut gbm_bo, map_data: *mut c_void);
     pub fn gbm_device_get_backend_name(device: *mut gbm_device) -> *const c_char;
+}
+
+#[link(name = "dl")]
+unsafe extern "C" {
+    pub fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+}
+unsafe extern "C" {
+    pub fn __errno_location() -> *mut c_int;
+    pub fn mmap(
+        addr: *mut c_void,
+        length: usize,
+        prot: c_int,
+        flags: c_int,
+        fd: c_int,
+        offset: std::ffi::c_long,
+    ) -> *mut c_void;
+    pub fn munmap(addr: *mut c_void, length: usize) -> c_int;
 }

@@ -26,10 +26,9 @@ use crate::platform_linux::{
     KeyDirection, LibInputContext, LinuxInputEventKind, LinuxSeat, SeatState, XkbKeyboard,
 };
 use crate::presenter_vulkan_kms::{
-    AtomicRequest, ConnectorStatus, DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR,
-    DRM_FORMAT_XRGB8888, DRM_PLANE_TYPE_CURSOR, DRM_PLANE_TYPE_PRIMARY, FrameSlot, FrameSlotState,
-    GbmBuffer, GbmDevice, KmsCrtcId, KmsDevice, KmsFramebuffer, KmsObjectProperties, KmsPlaneId,
-    KmsPropertyObject, KmsTopology, ScanoutFormat,
+    AtomicRequest, ConnectorStatus, DRM_FORMAT_ARGB8888, DRM_PLANE_TYPE_CURSOR, FrameSlot,
+    FrameSlotState, GbmBuffer, GbmDevice, KmsCrtcId, KmsDevice, KmsFramebuffer,
+    KmsObjectProperties, KmsPlaneId, KmsPropertyObject, KmsTopology,
 };
 use crate::render::{ImageAlphaMode, ImageId, ImagePixelFormat, RenderSceneDelta};
 use crate::runtime::CompositionDriver;
@@ -78,7 +77,7 @@ use input::*;
 use interaction::*;
 use layers::*;
 use pointer_visual::*;
-use renderer::{DesktopRenderResult, DesktopRenderer, DmaBufPublication};
+use renderer::{DesktopRenderResult, DmaBufPublication};
 #[cfg(test)]
 use renderer::{
     VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT, VULKAN_STAGING_MIN_BYTES_PER_SLOT,
@@ -140,64 +139,46 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let extent = mode.size();
     let refresh_period =
         Duration::from_nanos(1_000_000_000_000_u64 / u64::from(mode.refresh_millihertz().max(1)));
-    let (crtc_index, crtc_raw) = topology
-        .crtcs
-        .iter()
-        .copied()
-        .enumerate()
-        .find(|(index, _)| {
-            let mask = 1_u32.checked_shl(*index as u32).unwrap_or(0);
-            connector.possible_crtcs_mask & mask != 0
-                && topology.planes.iter().any(|plane| {
-                    plane.possible_crtcs_mask & mask != 0
-                        && plane.formats.contains(&DRM_FORMAT_XRGB8888)
-                        && is_plane_type(&kms, plane.id.get(), DRM_PLANE_TYPE_PRIMARY)
-                })
-        })
-        .ok_or_else(|| AppError::new("no KMS CRTC has an XRGB8888 primary-plane candidate"))?;
-    let crtc = KmsCrtcId::from_raw(crtc_raw)
-        .ok_or_else(|| AppError::new("KMS returned CRTC identity zero"))?;
+    let mode_blob = kms.create_mode_blob(&mode).map_err(app_error)?;
+    let gbm = match GbmDevice::new(kms.fd()) {
+        Ok(gbm) => Some(gbm),
+        Err(error) if error.retryable() => {
+            eprintln!("telorgon-kms: {error}; evaluating CPU dumb-buffer support");
+            None
+        }
+        Err(error) => return Err(app_error(error)),
+    };
+    eprintln!(
+        "telorgon-kms: negotiating {renderer:?} scanout on {}",
+        config.drm_device.display()
+    );
+    let mut scanout = renderer::prepare(
+        &kms,
+        gbm.as_ref(),
+        &topology,
+        connector,
+        mode_blob.id(),
+        extent,
+        renderer,
+    )?;
+    let crtc_index = scanout.crtc_index;
+    let crtc = scanout.crtc;
     let plane = topology
         .planes
         .iter()
-        .find(|plane| {
-            plane.possible_crtcs_mask & (1_u32.checked_shl(crtc_index as u32).unwrap_or(0)) != 0
-                && plane.formats.contains(&DRM_FORMAT_XRGB8888)
-                && is_plane_type(&kms, plane.id.get(), DRM_PLANE_TYPE_PRIMARY)
-        })
-        .ok_or_else(|| AppError::new("no compatible KMS plane was found"))?;
-    let connector_properties =
-        KmsTopology::object_properties(&kms, connector.id.get(), KmsPropertyObject::Connector)
-            .map_err(app_error)?;
-    let crtc_properties = KmsTopology::object_properties(&kms, crtc.get(), KmsPropertyObject::Crtc)
-        .map_err(app_error)?;
-    let plane_properties =
-        KmsTopology::object_properties(&kms, plane.id.get(), KmsPropertyObject::Plane)
-            .map_err(app_error)?;
-    let mode_blob = kms.create_mode_blob(&mode).map_err(app_error)?;
-    let gbm = GbmDevice::new(kms.fd()).map_err(app_error)?;
-    let scanout_format = ScanoutFormat {
-        fourcc: DRM_FORMAT_XRGB8888,
-        modifier: DRM_FORMAT_MOD_LINEAR,
-    };
-    let mut scanout_buffers = vec![
-        gbm.allocate(extent, scanout_format, &[DRM_FORMAT_MOD_LINEAR])
-            .map_err(app_error)?,
-        gbm.allocate(extent, scanout_format, &[DRM_FORMAT_MOD_LINEAR])
-            .map_err(app_error)?,
-        gbm.allocate(extent, scanout_format, &[DRM_FORMAT_MOD_LINEAR])
-            .map_err(app_error)?,
-    ];
-    let framebuffers = scanout_buffers
-        .iter()
-        .map(|buffer| kms.add_framebuffer(buffer).map_err(app_error))
-        .collect::<AppResult<Vec<_>>>()?;
+        .find(|plane| plane.id == scanout.plane)
+        .expect("selected plane exists");
+    let connector_properties = &scanout.connector_properties;
+    let crtc_properties = &scanout.crtc_properties;
+    let plane_properties = &scanout.plane_properties;
+    let scanout_buffers = &mut scanout.buffers;
+    let framebuffers = &scanout.framebuffers;
+    let desktop_renderer = &mut scanout.renderer;
     let mut frame_slots = framebuffers
         .iter()
         .enumerate()
         .map(|(index, framebuffer)| FrameSlot::new(index, framebuffer.id()))
         .collect::<Vec<_>>();
-    let mut desktop_renderer = DesktopRenderer::new(renderer, &scanout_buffers, extent)?;
     let mut desktop_scene = DesktopComposition::new(extent);
     let mut frame_surface_revisions = vec![Vec::<(u32, u64)>::new(); frame_slots.len()];
     let cursor_plane = topology.planes.iter().find(|candidate| {
@@ -208,7 +189,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut hardware_cursor = cursor_plane.and_then(|cursor_plane| {
         KmsTopology::object_properties(&kms, cursor_plane.id.get(), KmsPropertyObject::Plane)
             .map_err(app_error)
-            .and_then(|properties| HardwareCursor::new(&gbm, &kms, cursor_plane.id, properties))
+            .and_then(|properties| {
+                gbm.as_ref()
+                    .ok_or_else(|| AppError::new("GBM hardware cursor unavailable"))
+                    .and_then(|gbm| HardwareCursor::new(gbm, &kms, cursor_plane.id, properties))
+            })
             .ok()
     });
     #[cfg(feature = "profiler")]
@@ -1856,11 +1841,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             let mut request = if let Some(slot_index) = primary_slot {
                 kms.primary_modeset_request(
                     connector.id,
-                    &connector_properties,
+                    connector_properties,
                     crtc,
-                    &crtc_properties,
+                    crtc_properties,
                     plane.id,
-                    &plane_properties,
+                    plane_properties,
                     mode_blob.id(),
                     frame_slots[slot_index].framebuffer,
                     extent.width as u32,
@@ -1872,7 +1857,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 // A plane-disable sets its CRTC_ID to zero. Retaining ACTIVE in cursor-only
                 // requests keeps the affected CRTC explicit so PAGE_FLIP_EVENT has one owner.
                 request
-                    .include_active_crtc(crtc, &crtc_properties)
+                    .include_active_crtc(crtc, crtc_properties)
                     .map_err(app_error)?;
                 request
             };
@@ -2239,8 +2224,6 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         crate::profiler::counter!("render.damage_area", rect_area(scanout_region));
                     }
                     scanout_buffers[scanout_index]
-                        .map_write()
-                        .map_err(app_error)?
                         .write_rgba8_region(
                             desktop_renderer
                                 .software_pixels()

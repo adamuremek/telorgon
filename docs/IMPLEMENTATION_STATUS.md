@@ -66,6 +66,13 @@ production-qualified.
 > The older mount/action runtime remains an advanced/internal compatibility layer, not the ordinary
 > `Component` API.
 
+> Linux scanout startup now negotiates renderer-specific buffers with exact
+> Vulkan/KMS modifier matching, verified DRM adapter identity, CPU GBM/dumb-buffer
+> fallback, bounded rollback and native allocation diagnostics. Both the invalid
+> modifier sentinel and GBM transfer-write ABI are corrected. Portable regression
+> tests and compilation are covered; this is not hardware qualification. See
+> [Linux scanout negotiation](LINUX_SCANOUT_NEGOTIATION.md).
+>
 > Linux Wayland compositor closeout: Telorgon now owns bounded official-protocol XML parsing, native
 > `libwayland-server` descriptors and dispatch, surface/xdg/subsurface/seat/output state, SHM
 > presentation, capability-gated DMA-BUF and explicit/implicit sync bridges, libseat/libinput/XKB input, and

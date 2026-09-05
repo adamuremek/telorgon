@@ -98,3 +98,105 @@ impl DeviceSelection {
             })
     }
 }
+
+#[cfg(target_os = "linux")]
+impl VulkanInstance {
+    /// Resolve the display's actual device before allocating/importing scanout targets.
+    pub(crate) fn drm_adapter(&self, fd: &std::os::fd::OwnedFd) -> RenderResult<usize> {
+        use crate::render::{RenderError, RenderErrorKind};
+        use std::os::unix::fs::MetadataExt;
+        let unsupported = |message: String| RenderError::new(RenderErrorKind::Unsupported, message);
+        let file = std::fs::File::from(fd.try_clone().map_err(|e| unsupported(e.to_string()))?);
+        let rdev = file
+            .metadata()
+            .map_err(|e| unsupported(e.to_string()))?
+            .rdev();
+        let (major, minor) = linux_device_numbers(rdev);
+        let sysfs = |major: i64, minor: i64| {
+            std::fs::canonicalize(format!("/sys/dev/char/{major}:{minor}/device")).ok()
+        };
+        let display_path = sysfs(major as i64, minor as i64);
+        let devices = unsafe { self.inner.raw.enumerate_physical_devices() }
+            .map_err(|e| vk_error("scanout adapter enumeration failed", e))?;
+        for (index, physical) in devices.into_iter().enumerate() {
+            let extensions = unsafe {
+                self.inner
+                    .raw
+                    .enumerate_device_extension_properties(physical)
+            }
+            .map_err(|e| vk_error("scanout adapter extension query failed", e))?;
+            let has = |name: &CStr| {
+                extensions
+                    .iter()
+                    .any(|p| unsafe { CStr::from_ptr(p.extension_name.as_ptr()) } == name)
+            };
+            if has(ash::ext::physical_device_drm::NAME) {
+                let mut drm = vk::PhysicalDeviceDrmPropertiesEXT::default();
+                let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut drm);
+                unsafe {
+                    self.inner
+                        .raw
+                        .get_physical_device_properties2(physical, &mut properties)
+                };
+                for (present, node_major, node_minor) in [
+                    (drm.has_primary, drm.primary_major, drm.primary_minor),
+                    (drm.has_render, drm.render_major, drm.render_minor),
+                ] {
+                    if present == vk::TRUE
+                        && ((node_major == major as i64 && node_minor == minor as i64)
+                            || display_path.as_ref().is_some_and(|path| {
+                                sysfs(node_major, node_minor).as_ref() == Some(path)
+                            }))
+                    {
+                        return Ok(index);
+                    }
+                }
+            }
+            // Verified PCI identity fallback for drivers predating physical_device_drm.
+            if has(ash::ext::pci_bus_info::NAME) {
+                let mut pci = vk::PhysicalDevicePCIBusInfoPropertiesEXT::default();
+                let mut properties = vk::PhysicalDeviceProperties2::default().push_next(&mut pci);
+                unsafe {
+                    self.inner
+                        .raw
+                        .get_physical_device_properties2(physical, &mut properties)
+                };
+                let address = format!(
+                    "{:04x}:{:02x}:{:02x}.{:x}",
+                    pci.pci_domain, pci.pci_bus, pci.pci_device, pci.pci_function
+                );
+                if display_path
+                    .as_ref()
+                    .and_then(|path| path.file_name())
+                    .is_some_and(|name| name == address.as_str())
+                {
+                    return Ok(index);
+                }
+            }
+        }
+        Err(unsupported(format!(
+            "no Vulkan adapter matches DRM device {major}:{minor}; cross-device scanout is unavailable"
+        )))
+    }
+}
+
+#[cfg(any(target_os = "linux", test))]
+fn linux_device_numbers(device: u64) -> (u64, u64) {
+    (
+        ((device >> 8) & 0xfff) | ((device >> 32) & 0xfffff000),
+        (device & 0xff) | ((device >> 12) & 0xffffff00),
+    )
+}
+
+#[cfg(test)]
+mod drm_identity_tests {
+    #[test]
+    fn drm_primary_and_render_nodes_are_not_interchangeable() {
+        assert_eq!(super::linux_device_numbers((226 << 8) | 1), (226, 1));
+        assert_eq!(super::linux_device_numbers((226 << 8) | 128), (226, 128));
+        assert_eq!(
+            super::linux_device_numbers((1 << 32) | (226 << 8)),
+            (226, 1 << 20)
+        );
+    }
+}

@@ -82,6 +82,17 @@ impl KmsDevice {
         self.page_flip_events.swap(0, Ordering::AcqRel)
     }
 
+    pub fn capability(&self, capability: u64) -> Result<u64, KmsError> {
+        let mut value = 0;
+        if unsafe { ffi::drmGetCap(self.fd.as_raw_fd(), capability, &mut value) } != 0 {
+            return Err(KmsError::last_os_error(
+                KmsErrorKind::Native,
+                "DRM capability query failed",
+            ));
+        }
+        Ok(value)
+    }
+
     pub fn cursor_size(&self) -> Result<SizeI, KmsError> {
         let mut width = 0_u64;
         let mut height = 0_u64;
@@ -120,13 +131,24 @@ impl KmsDevice {
         &'device self,
         buffer: &GbmBuffer<'_, '_>,
     ) -> Result<KmsFramebuffer<'device>, KmsError> {
+        self.add_framebuffer_with_layout(buffer, false)
+    }
+
+    pub(crate) fn add_framebuffer_with_layout<'device>(
+        &'device self,
+        buffer: &GbmBuffer<'_, '_>,
+        implicit: bool,
+    ) -> Result<KmsFramebuffer<'device>, KmsError> {
         let size = buffer.size();
-        let format = buffer.format();
+        let mut format = buffer.format();
+        if implicit {
+            format.modifier = DRM_FORMAT_MOD_INVALID;
+        }
         let count = buffer.plane_count()?;
         let mut handles = [0_u32; 4];
         let mut pitches = [0_u32; 4];
         let mut offsets = [0_u32; 4];
-        let modifiers = [format.modifier; 4];
+
         for index in 0..count {
             handles[index] =
                 unsafe { ffi::gbm_bo_get_handle_for_plane(buffer.raw(), index as i32) };
@@ -140,6 +162,18 @@ impl KmsDevice {
                 ));
             }
         }
+        self.add_framebuffer_layout(size, format, handles, pitches, offsets)
+    }
+
+    pub(crate) fn add_framebuffer_layout<'device>(
+        &'device self,
+        size: SizeI,
+        format: super::ScanoutFormat,
+        handles: [u32; 4],
+        pitches: [u32; 4],
+        offsets: [u32; 4],
+    ) -> Result<KmsFramebuffer<'device>, KmsError> {
+        let modifiers = [format.modifier; 4];
         let mut id = 0;
         let result = if format.modifier == DRM_FORMAT_MOD_INVALID {
             unsafe {
@@ -172,10 +206,9 @@ impl KmsDevice {
             }
         };
         if result != 0 {
-            return Err(KmsError::native(
+            return Err(KmsError::last_os_error(
                 KmsErrorKind::Native,
-                "DRM could not create a framebuffer for the GBM buffer",
-                result,
+                "DRM framebuffer creation failed",
             ));
         }
         Ok(KmsFramebuffer {
@@ -307,7 +340,13 @@ impl KmsFramebuffer<'_> {
 impl Drop for KmsFramebuffer<'_> {
     fn drop(&mut self) {
         let result = unsafe { ffi::drmModeRmFB(self.device.fd.as_raw_fd(), self.id.get()) };
-        debug_assert_eq!(result, 0, "DRM framebuffer removal failed");
+        if result != 0 {
+            // Device/seat loss during rollback must not panic while unwinding.
+            eprintln!(
+                "telorgon-kms: {}",
+                KmsError::last_os_error(KmsErrorKind::Native, "DRM framebuffer removal failed")
+            );
+        }
     }
 }
 
@@ -584,8 +623,34 @@ impl KmsError {
         Self {
             kind,
             context: context.into(),
-            native_code: Some(native_code),
+            native_code: if native_code == -1 {
+                std::io::Error::last_os_error().raw_os_error()
+            } else {
+                Some(native_code)
+            },
         }
+    }
+
+    pub(crate) fn annotate(&mut self, detail: impl AsRef<str>) {
+        self.context.push_str(": ");
+        self.context.push_str(detail.as_ref());
+    }
+
+    pub fn last_os_error(kind: KmsErrorKind, context: impl Into<String>) -> Self {
+        let error = std::io::Error::last_os_error();
+        Self {
+            kind,
+            context: context.into(),
+            native_code: error.raw_os_error(),
+        }
+    }
+
+    /// Stop negotiation on resource exhaustion, lost devices, or seat/permission errors.
+    pub fn retryable(&self) -> bool {
+        !matches!(
+            self.native_code.map(i32::saturating_abs),
+            Some(1 | 5 | 6 | 9 | 12 | 13 | 16 | 19 | 23 | 24 | 28)
+        ) && self.kind != KmsErrorKind::InvalidState
     }
 
     pub const fn kind(&self) -> KmsErrorKind {
@@ -599,7 +664,15 @@ impl KmsError {
 
 impl fmt::Display for KmsError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.context)
+        formatter.write_str(&self.context)?;
+        if let Some(code) = self.native_code {
+            write!(
+                formatter,
+                " (native={code}: {})",
+                std::io::Error::from_raw_os_error(code.saturating_abs())
+            )?;
+        }
+        Ok(())
     }
 }
 

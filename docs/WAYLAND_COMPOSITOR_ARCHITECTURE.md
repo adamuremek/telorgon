@@ -248,6 +248,12 @@ control, pointer, and cursor-shape visual path therefore remains ordinary Telorg
 
 ## Rendering and presentation
 
+Primary scanout uses [startup negotiation](LINUX_SCANOUT_NEGOTIATION.md): Vulkan
+selects a matching DRM adapter and a jointly supported explicit layout; software
+uses CPU-mappable GBM or DRM dumb buffers. Both paths validate a complete buffer
+pool with KMS before selection, and Auto rebuilds a separate software pool after
+a compatible Vulkan startup failure. Linux hardware qualification remains open.
+
 The operational managed path is entirely Telorgon-rendered:
 
 1. The compositor copies a committed SHM buffer with checked offset/stride/extent arithmetic. Once

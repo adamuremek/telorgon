@@ -1,9 +1,10 @@
+mod scanout;
+pub(super) use scanout::prepare;
 mod software;
 mod vulkan;
 
-use crate::application_host::{AppResult, Renderer};
-use crate::core::{RectI, SizeI};
-use crate::presenter_vulkan_kms::GbmBuffer;
+use crate::application_host::AppResult;
+use crate::core::RectI;
 
 use super::scene::DesktopFrame;
 use software::SoftwareDesktopRenderer;
@@ -37,21 +38,6 @@ pub(super) enum DesktopRenderer {
 }
 
 impl DesktopRenderer {
-    pub(super) fn new(
-        renderer: Renderer,
-        buffers: &[GbmBuffer<'_, '_>],
-        extent: SizeI,
-    ) -> AppResult<Self> {
-        match renderer {
-            Renderer::Vulkan => VulkanDesktopRenderer::new(buffers, extent).map(Self::Vulkan),
-            Renderer::Auto => Ok(match VulkanDesktopRenderer::new(buffers, extent) {
-                Ok(renderer) => Self::Vulkan(renderer),
-                Err(_) => Self::Software(SoftwareDesktopRenderer::new(buffers.len())),
-            }),
-            Renderer::Software => Ok(Self::Software(SoftwareDesktopRenderer::new(buffers.len()))),
-        }
-    }
-
     pub(super) fn is_vulkan(&self) -> bool {
         matches!(self, Self::Vulkan(_))
     }

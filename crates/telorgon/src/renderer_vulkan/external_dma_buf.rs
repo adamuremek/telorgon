@@ -385,6 +385,60 @@ mod linux {
     }
 
     impl VulkanDmaBufScanoutTarget {
+        /// Exact render-target candidates, queried before GBM allocation.
+        pub(crate) fn supported_modifiers(
+            device: &VulkanDevice,
+            fourcc: u32,
+            extent: SizeI,
+        ) -> RenderResult<Vec<u64>> {
+            if !device.inner.owned_dma_buf_targets {
+                return Ok(Vec::new());
+            }
+            let mut result = Vec::new();
+            for candidate in format_candidates()
+                .into_iter()
+                .filter(|c| c.drm_fourcc == fourcc)
+            {
+                for properties in query_modifiers(device, candidate.format) {
+                    if properties.drm_format_modifier == super::DRM_FORMAT_MOD_INVALID
+                        || properties.drm_format_modifier_plane_count != 1
+                        || !properties
+                            .drm_format_modifier_tiling_features
+                            .contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT)
+                    {
+                        continue;
+                    }
+                    let Some(support) = try_query_external_image_support(
+                        device,
+                        candidate.format,
+                        properties.drm_format_modifier,
+                        vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                    )?
+                    else {
+                        continue;
+                    };
+                    if support
+                        .external
+                        .external_memory_features
+                        .contains(vk::ExternalMemoryFeatureFlags::IMPORTABLE)
+                        && support
+                            .external
+                            .compatible_handle_types
+                            .contains(vk::ExternalMemoryHandleTypeFlags::DMA_BUF_EXT)
+                        && extent.width > 0
+                        && extent.height > 0
+                        && extent.width as u32 <= support.max_extent.width
+                        && extent.height as u32 <= support.max_extent.height
+                    {
+                        result.push(properties.drm_format_modifier);
+                    }
+                }
+            }
+            result.sort_unstable();
+            result.dedup();
+            Ok(result)
+        }
+
         /// Imports a single-plane GBM allocation for Vulkan rendering and DRM/KMS scanout.
         ///
         /// # Safety

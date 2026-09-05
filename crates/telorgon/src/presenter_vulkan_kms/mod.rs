@@ -11,7 +11,11 @@ mod gbm;
 #[cfg(target_os = "linux")]
 mod kms;
 #[cfg(target_os = "linux")]
+mod plane_formats;
+#[cfg(target_os = "linux")]
 mod topology;
+#[cfg(target_os = "linux")]
+pub use plane_formats::plane_formats;
 
 #[cfg(target_os = "linux")]
 pub use gbm::{GbmBuffer, GbmDevice, GbmPlane, GbmWriteMapping};
@@ -30,3 +34,8 @@ pub use topology::{
 };
 
 pub const NATIVE_KMS_AVAILABLE: bool = cfg!(target_os = "linux");
+
+#[cfg(target_os = "linux")]
+mod scanout;
+#[cfg(target_os = "linux")]
+pub use scanout::{DumbBuffer, ScanoutBuffer};
