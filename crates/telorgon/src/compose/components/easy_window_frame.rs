@@ -893,4 +893,83 @@ mod tests {
         assert_eq!(icon.patch.image_tint, Some(Some(hovered.icon_tint)));
         assert_eq!(root.transition.duration_ms, 90);
     }
+    #[test]
+    fn rounded_controls_keep_their_shape_during_hover_and_interrupted_transitions() {
+        use crate::application_host::AppRuntimeCore;
+        use crate::core::{MonotonicInstant, SizeI};
+        use crate::ui::CornerRadii;
+
+        let mut design = DESIGN;
+        let radius = CornerRadii::all(7.0);
+        for control in [
+            &mut design.controls.minimize,
+            &mut design.controls.maximize,
+            &mut design.controls.restore,
+            &mut design.controls.close,
+        ] {
+            control.style.resting.decoration = BoxDecoration::new()
+                .background(Background::Color(ColorRgba8::rgba(30, 40, 50, 255)))
+                .corner_radii(radius);
+            control.style.hovered = Some(WindowControlVisual {
+                decoration: control
+                    .style
+                    .resting
+                    .decoration
+                    .background(Background::Color(ColorRgba8::rgba(120, 140, 160, 255))),
+                ..control.style.resting
+            });
+            control.style.transition = Some(TransitionSpec {
+                duration_ms: 100,
+                easing: Easing::Linear,
+                repeat: false,
+            });
+        }
+        let mut runtime = AppRuntimeCore::from_composed_with_extent(
+            easy_window_frame(design).compose(WindowChromeModel::new(42, "Rounded")),
+            SizeI {
+                width: 640,
+                height: 480,
+            },
+        )
+        .unwrap();
+        runtime.prepare_frame(MonotonicInstant::ZERO, true).unwrap();
+        let nodes: Vec<_> = runtime
+            .ui()
+            .style_bindings()
+            .iter()
+            .filter(|binding| binding.local_style.is_some())
+            .map(|binding| binding.state_root)
+            .collect();
+        assert_eq!(nodes.len(), 3);
+        let mut saw_intermediate_color = false;
+        for ms in 1..=350 {
+            if let Some(hovered) = match ms {
+                1 | 61 => Some(true),
+                41 | 201 => Some(false),
+                _ => None,
+            } {
+                for &node in &nodes {
+                    runtime.ui_mut().route_interaction_flag(
+                        node,
+                        InteractionFlags::HOVERED,
+                        hovered,
+                    );
+                }
+            }
+            runtime
+                .prepare_frame(MonotonicInstant::from_nanos(ms * 1_000_000), true)
+                .unwrap();
+            for &node in &nodes {
+                let decoration = runtime.ui().box_styles.get(node).unwrap().decoration;
+                assert_eq!(decoration.corner_radii, radius, "radius changed at {ms}ms");
+                if let Background::Color(color) = decoration.background {
+                    saw_intermediate_color |= color.r > 30 && color.r < 120;
+                }
+            }
+        }
+        assert!(
+            saw_intermediate_color,
+            "the check must sample an active color transition"
+        );
+    }
 }

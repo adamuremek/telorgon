@@ -209,11 +209,16 @@ impl StyleProcessor {
         now: MonotonicInstant,
         preference: MotionPreference,
     ) -> bool {
-        let current = self
-            .tracks
-            .get(&key)
-            .map(|track| sample_track(*track, now, preference).0)
-            .unwrap_or_else(|| select_owned_properties(snapshot(ui, key.node), target));
+        // A previous track may own fewer properties than the new target (for example when
+        // a local control style replaces a catalog style). Preserve mounted values for newly
+        // animated properties instead of interpolating missing values from their defaults.
+        let mut current = select_owned_properties(snapshot(ui, key.node), target);
+        if let Some(track) = self.tracks.get(&key) {
+            current.overlay(select_owned_properties(
+                sample_track(*track, now, preference).0,
+                target,
+            ));
+        }
         if preference == MotionPreference::Reduced && spec.repeat {
             spec.duration_ms = 0;
             spec.repeat = false;
