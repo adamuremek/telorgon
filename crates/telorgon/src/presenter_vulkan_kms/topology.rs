@@ -165,9 +165,8 @@ impl KmsTopology {
         {
             return Err(malformed());
         }
-        let ids = unsafe { slice::from_raw_parts(native.props, native.count_props as usize) };
-        let values =
-            unsafe { slice::from_raw_parts(native.prop_values, native.count_props as usize) };
+        let ids = checked_slice(native.props, native.count_props as i32)?;
+        let values = checked_slice(native.prop_values, native.count_props as i32)?;
         let mut properties = Vec::with_capacity(ids.len());
         for (id, value) in ids.iter().zip(values) {
             let Some(property_raw) =
@@ -313,7 +312,7 @@ fn query_planes(device: &KmsDevice) -> Result<Vec<KmsPlane>, KmsError> {
     if native.count_planes > 65_536 || (native.count_planes != 0 && native.planes.is_null()) {
         return Err(malformed());
     }
-    let ids = unsafe { slice::from_raw_parts(native.planes, native.count_planes as usize) };
+    let ids = checked_slice(native.planes, native.count_planes as i32)?;
     let mut planes = Vec::with_capacity(ids.len());
     for id in ids {
         let Some(raw) = NonNull::new(unsafe { ffi::drmModeGetPlane(device.fd().as_raw_fd(), *id) })
@@ -325,8 +324,7 @@ fn query_planes(device: &KmsDevice) -> Result<Vec<KmsPlane>, KmsError> {
             && (plane.count_formats == 0 || !plane.formats.is_null())
             && let Some(id) = KmsPlaneId::from_raw(plane.plane_id)
         {
-            let formats =
-                unsafe { slice::from_raw_parts(plane.formats, plane.count_formats as usize) };
+            let formats = checked_slice(plane.formats, plane.count_formats as i32)?;
             planes.push(KmsPlane {
                 id,
                 possible_crtcs_mask: plane.possible_crtcs,
@@ -342,6 +340,11 @@ fn checked_slice<'a, T>(pointer: *const T, count: i32) -> Result<&'a [T], KmsErr
     if !(0..=65_536).contains(&count) || (pointer.is_null() && count != 0) {
         return Err(malformed());
     }
+    // Native DRM collections may use NULL for an empty array. Rust slices must
+    // have a non-null, aligned pointer even when their length is zero.
+    if count == 0 {
+        return Ok(&[]);
+    }
     Ok(unsafe { slice::from_raw_parts(pointer, count as usize) })
 }
 
@@ -350,4 +353,35 @@ fn malformed() -> KmsError {
         KmsErrorKind::Native,
         "DRM returned malformed collection metadata",
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::checked_slice;
+
+    #[test]
+    fn empty_native_arrays_accept_null() {
+        assert!(checked_slice::<u32>(std::ptr::null(), 0).unwrap().is_empty());
+        assert!(checked_slice::<u64>(std::ptr::null(), 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_native_arrays_accept_nonnull() {
+        let values = [42_u32];
+        assert!(checked_slice(values.as_ptr(), 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn nonempty_native_arrays_preserve_values() {
+        let values = [7_u32, 11];
+        assert_eq!(checked_slice(values.as_ptr(), 2).unwrap(), &values);
+    }
+
+    #[test]
+    fn invalid_native_array_metadata_is_rejected() {
+        assert!(checked_slice::<u32>(std::ptr::null(), 1).is_err());
+        assert!(checked_slice::<u32>(std::ptr::null(), -1).is_err());
+        let value = 1_u32;
+        assert!(checked_slice(&value, 65_537).is_err());
+    }
 }
