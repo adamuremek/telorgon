@@ -173,7 +173,6 @@ impl KmsDevice {
         pitches: [u32; 4],
         offsets: [u32; 4],
     ) -> Result<KmsFramebuffer<'device>, KmsError> {
-        let modifiers = [format.modifier; 4];
         let mut id = 0;
         let result = if format.modifier == DRM_FORMAT_MOD_INVALID {
             unsafe {
@@ -190,6 +189,7 @@ impl KmsDevice {
                 )
             }
         } else {
+            let modifiers = framebuffer_modifiers(handles, format.modifier);
             unsafe {
                 ffi::drmModeAddFB2WithModifiers(
                     self.fd.as_raw_fd(),
@@ -677,3 +677,47 @@ impl fmt::Display for KmsError {
 }
 
 impl std::error::Error for KmsError {}
+
+// AddFB2 requires zero modifiers in unused slots, even for non-linear layouts.
+// Active planes have nonzero handles; multiple planes may share the same handle.
+fn framebuffer_modifiers(handles: [u32; 4], modifier: u64) -> [u64; 4] {
+    handles.map(|handle| if handle == 0 { 0 } else { modifier })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::framebuffer_modifiers;
+
+    #[test]
+    fn tiled_rgb_framebuffer_leaves_unused_modifiers_zero() {
+        // Layout observed in the Quadro RTX 4000 startup failure. The kernel
+        // rejects nonzero modifiers in slots 1..4 for this single-plane buffer.
+        let modifier = 0x0300_0000_0060_6014;
+        assert_eq!(
+            framebuffer_modifiers([7, 0, 0, 0], modifier),
+            [modifier, 0, 0, 0]
+        );
+    }
+
+    #[test]
+    fn framebuffer_modifier_is_retained_for_every_active_plane() {
+        let modifier = 0x0100_0000_0000_0002;
+        assert_eq!(
+            framebuffer_modifiers([7, 7, 0, 0], modifier),
+            [modifier, modifier, 0, 0]
+        );
+        assert_eq!(
+            framebuffer_modifiers([7, 8, 9, 0], modifier),
+            [modifier, modifier, modifier, 0]
+        );
+        assert_eq!(
+            framebuffer_modifiers([7, 8, 9, 10], modifier),
+            [modifier; 4]
+        );
+    }
+
+    #[test]
+    fn linear_framebuffer_modifiers_remain_zero() {
+        assert_eq!(framebuffer_modifiers([7, 0, 0, 0], 0), [0; 4]);
+    }
+}

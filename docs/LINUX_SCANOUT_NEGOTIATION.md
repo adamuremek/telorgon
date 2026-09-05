@@ -118,3 +118,26 @@ pressure and software mapping. This change does not implement hotplug/session
 reconstruction, multi-output policy, multi-plane/YUV scanout, cross-GPU copies,
 HDR or a guarantee that unsupported hardware can render. Reconstruction code,
 when added, must run this transaction again for its new device/output generation.
+
+## Framebuffer modifier-slot correction
+
+The 2026-09-05 NVIDIA startup log reached framebuffer creation but every tiled
+candidate failed with EINVAL. `kms.rs::add_framebuffer_layout` repeated the
+nonzero modifier into all four AddFB2 slots, including unused slots. It now sets
+modifiers only where the corresponding buffer handle is nonzero. Shared handles
+still receive a modifier in every active plane. Linear and implicit-layout paths
+retain their existing behavior; no vendor-specific selection is added.
+
+Review: inspected `presenter_vulkan_kms/kms.rs`, `gbm.rs`, and `scanout.rs`, including
+GBM metadata extraction, dumb-buffer registration, and framebuffer cleanup. The
+adjacent reference library remains unavailable; this narrow ABI correction uses
+Linux's authoritative `drivers/gpu/drm/drm_framebuffer.c::framebuffer_check`, which
+rejects nonzero modifiers in unused slots with EINVAL:
+https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/drm_framebuffer.c
+No two-implementation comparison is claimed for this correction. Buffer ownership,
+rollback, and GPU/KMS retirement are unchanged. Dropping modifier flags or forcing
+LINEAR was rejected because either would change the negotiated layout contract.
+
+Regression tests cover the observed nonzero single-plane layout, active planes
+with shared or distinct handles, all four active slots, and linear buffers.
+These are portable ABI tests; successful hardware presentation remains unverified.
