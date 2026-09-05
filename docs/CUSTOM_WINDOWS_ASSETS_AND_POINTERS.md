@@ -639,3 +639,24 @@ semantic pointer retention, window-frame type-state and hit regions, and exact p
 lookup. Host builds compile the Winit icon/frame/pointer integration, and an
 `x86_64-unknown-linux-gnu` feature check compiles the Wayland protocol, compositor, and KMS path
 without launching an application or server.
+
+### Flush controls and the inner window curve
+
+Easy-frame title-bar children are clipped by a full-window container inside the root border,
+with radius `max(frame_radius - frame_border_width, 0)`. Square, full-height controls can therefore
+sit flush against the right edge without covering the curved border. The contour uses the inner
+window extent rather than the title-bar extent so a short bar does not flatten a larger radius.
+Resize regions remain outside this visual-only container.
+
+Reference review (2026-09-05): inspected Vello's `../other-rendering-libs/vello/vello/src/scene.rs`
+(`push_clip_layer`) and Qt Quick's
+`../other-rendering-libs/qtdeclarative/src/quick/scenegraph/coreapi/qsgnode.cpp` (`QSGClipNode`).
+Both distinguish a subtree's clip geometry from a rectangular optimization. The
+[Vulkan scissor specification](https://docs.vulkan.org/spec/latest/chapters/fragops.html#fragops-scissor)
+confirms that scissoring only bounds a rectangle. Telorgon reuses its existing analytic rounded
+clip in both renderers; no GPU ABI or backend lifetime changes are needed. Rejected alternatives:
+rounding each button (changes shared-edge styling), clipping to the outer curve (allows border
+coverage), or using a title-bar-sized rounded rectangle (changes the curve for short bars).
+The CPU framebuffer regression checks a flush square button, curved and straight border pixels,
+transparent outer corners, zero border width, and square windows. Hardware presentation remains
+user-run.

@@ -297,7 +297,14 @@ impl Component for EasyWindowFrameComponent {
         window_frame()
             .decoration(frame_decoration)
             .overflow(crate::ui::Overflow::Clip)
-            .children(title_bar)
+            .children(title_bar.map(|title_bar| {
+                // Use the full inner window contour, not a radius normalized to the shorter
+                // title bar. This keeps square controls inside the curved border at any bar height.
+                stack()
+                    .overflow(crate::ui::Overflow::Clip)
+                    .decoration(BoxDecoration::new().corner_radius(inner_radius))
+                    .child(title_bar)
+            }))
             .children(resize)
             .content_slot(
                 window_content_slot()
@@ -971,5 +978,90 @@ mod tests {
             saw_intermediate_color,
             "the check must sample an active color transition"
         );
+    }
+    #[cfg(feature = "application-software")]
+    #[test]
+    fn square_flush_controls_preserve_the_rounded_window_border() {
+        use crate::application_host::AppRuntimeCore;
+        use crate::core::{MonotonicInstant, RectI, SizeI};
+        use crate::render::RenderBackend;
+        use crate::renderer_software::{SoftwareCompositeLayer, SoftwareRenderer, SoftwareSurface};
+
+        let extent = SizeI {
+            width: 200,
+            height: 100,
+        };
+        for (radius, border) in [(14.0, 2.0), (14.0, 0.0), (0.0, 2.0)] {
+            let mut design = DESIGN;
+            design.active.frame_border_width = border;
+            design.active.frame_border = ColorRgba8::rgba(255, 0, 0, 255);
+            design.active.frame_background = ColorRgba8::rgba(0, 255, 0, 255);
+            design.normal.frame_radius = radius;
+            design.normal.shadow = None;
+            design.title_bar.height = 32.0;
+            design.title_bar.padding = Insets::ZERO;
+            design.title_bar.show_client_icon = false;
+            design.controls.gap = 0.0;
+            design.controls.close.style.height = Dimension::FILL;
+            design.controls.close.style.resting.decoration = BoxDecoration::new()
+                .background(Background::Color(ColorRgba8::rgba(0, 0, 255, 255)));
+            let mut runtime = AppRuntimeCore::from_composed_with_extent(
+                easy_window_frame(design).compose(WindowChromeModel::new(42, "").active(true)),
+                extent,
+            )
+            .unwrap();
+            runtime.prepare_frame(MonotonicInstant::ZERO, true).unwrap();
+            let mut scene = SoftwareRenderer.create_scene().unwrap();
+            SoftwareRenderer
+                .apply_scene_delta(&mut scene, &runtime.scene_snapshot())
+                .unwrap();
+            let mut surface = SoftwareSurface::default();
+            SoftwareRenderer
+                .render_composite(
+                    &mut surface,
+                    &[SoftwareCompositeLayer {
+                        scene: &scene,
+                        target: RectI {
+                            x: 0,
+                            y: 0,
+                            width: extent.width,
+                            height: extent.height,
+                        },
+                        clip: None,
+                        rounded_clips: [None; 2],
+                    }],
+                    extent,
+                    None,
+                    ColorRgba8::rgba(0, 0, 0, 0),
+                )
+                .unwrap();
+            let pixel = |x: usize, y: usize| {
+                let index = (y * extent.width as usize + x) * 4;
+                &surface.pixels_rgba8()[index..index + 4]
+            };
+            assert_eq!(pixel(195, 20), [0, 0, 255, 255], "button interior");
+            if radius > 0.0 {
+                assert_eq!(
+                    pixel(199, 0),
+                    [0, 0, 0, 0],
+                    "outer corner must stay transparent"
+                );
+                if border > 0.0 {
+                    assert_eq!(
+                        pixel(196, 6),
+                        [255, 0, 0, 255],
+                        "button painted over curved border"
+                    );
+                    assert_eq!(
+                        pixel(194, 6),
+                        [0, 0, 255, 255],
+                        "button should follow inner curve"
+                    );
+                }
+            }
+            if border > 0.0 {
+                assert_eq!(pixel(199, 20), [255, 0, 0, 255], "right border");
+            }
+        }
     }
 }
