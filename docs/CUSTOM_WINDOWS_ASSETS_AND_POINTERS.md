@@ -208,8 +208,8 @@ const DISABLED: WindowControlVisual = WindowControlVisual {
 };
 
 const BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
-    width: 38.0,
-    height: 30.0,
+    width: Dimension::Pixels(38.0),
+    height: Dimension::Pixels(30.0),
     icon_size: 15.0,
     resting: RESTING,
     hovered: Some(HOVERED),
@@ -341,6 +341,18 @@ nonfinite or negative metrics early. At runtime the easy frame selects active/in
 normal/maximized/tiled/fullscreen geometry, client/fallback app icons, capability-filtered controls,
 maximize versus restore artwork, resizable tiled edges, and every declared control state. The state
 styles are code-local bindings, so no theme-catalog entry is required.
+
+Control button `width` and `height` accept the composition `Dimension` primitives: `Pixels`,
+`Percent` (a fraction from 0 to 1), weighted `Fill`, and `Shrink`. Migrate numeric struct fields to
+`Dimension::Pixels(value)` (or `value.into()` outside constants). To span the title bar vertically,
+use `height: Dimension::FILL` for each control and zero vertical title-bar padding. Fill respects
+padding; fixed and percentage heights are centered within the remaining height. Chrome controls
+have no inherited 32px minimum, so compact bars can use smaller buttons; keep icons small enough to fit.
+
+Controls participate directly in the title-bar row. Percentage widths resolve against the bar's
+padded width; fill weights share remaining width with the flexible spacer (weight 1). Pixel and
+shrink widths leave the spacer to push controls to the right. The title-bar height itself remains
+a pixel metric because it also determines the client content inset.
 
 Easy-frame layout is derived from the actual border and title bar. The app content begins at
 `(frame_border_width, frame_border_width + title_bar.height)` when the bar is visible, and at

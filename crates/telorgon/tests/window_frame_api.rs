@@ -40,8 +40,8 @@ const CONTROL_DISABLED: WindowControlVisual = WindowControlVisual {
 };
 
 const STANDARD_BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
-    width: 38.0,
-    height: 30.0,
+    width: Dimension::Pixels(38.0),
+    height: Dimension::Pixels(30.0),
     icon_size: 15.0,
     resting: CONTROL_RESTING,
     hovered: Some(CONTROL_HOVERED),
@@ -694,4 +694,146 @@ fn low_level_template_retains_full_composition_and_authorized_action_freedom() {
         .unwrap();
     assert_eq!(resize.priority, 500);
     assert!(resize.hit_bounds.height > resize.bounds.height);
+}
+
+#[test]
+fn control_dimensions_follow_the_padded_bar_and_preserve_hit_targets() {
+    for bar_height in [24.0, 40.0, 60.0] {
+        for padding in [0.0, 3.0] {
+            for height in [
+                Dimension::FILL,
+                Dimension::Percent(0.5),
+                Dimension::Pixels(16.0),
+                Dimension::Shrink,
+            ] {
+                for maximized in [false, true] {
+                    let mut design = TEST_CHROME;
+                    design.title_bar.height = bar_height;
+                    design.title_bar.padding = Insets::symmetric(padding, 8.0);
+                    design.title_bar.show_client_icon = false;
+                    for control in [
+                        &mut design.controls.minimize,
+                        &mut design.controls.maximize,
+                        &mut design.controls.restore,
+                        &mut design.controls.close,
+                    ] {
+                        control.style.height = height;
+                    }
+                    let mut model = WindowChromeModel::new(42, "Sizing").active(true);
+                    if maximized {
+                        model.state = WindowChromeState::Maximized;
+                    }
+                    let snapshot = chrome_snapshot(design, model);
+                    let available = bar_height - 2.0 * padding;
+                    for action in [
+                        WindowAction::Minimize,
+                        WindowAction::ToggleMaximize,
+                        WindowAction::Close,
+                    ] {
+                        let role = WindowChromeRole::Action(action);
+                        let bounds = snapshot
+                            .regions
+                            .iter()
+                            .find(|r| r.role == role)
+                            .unwrap()
+                            .bounds;
+                        let expected = match height {
+                            Dimension::Fill(_) => available,
+                            Dimension::Percent(fraction) => available * fraction,
+                            Dimension::Pixels(value) => value,
+                            Dimension::Shrink => {
+                                assert!(bounds.height > 0.0 && bounds.height <= available);
+                                bounds.height
+                            }
+                        };
+                        assert_eq!(
+                            bounds.height, expected,
+                            "{height:?}, bar={bar_height}, padding={padding}"
+                        );
+                        assert_eq!(bounds.y, 1.0 + padding + (available - expected) / 2.0);
+                        assert_eq!(bounds.width, 38.0);
+                        assert_eq!(
+                            snapshot.hit_test(bounds.x + bounds.width / 2.0, bounds.y + 0.5),
+                            Some(role)
+                        );
+                        assert_eq!(
+                            snapshot.hit_test(bounds.x + bounds.width / 2.0, bounds.bottom() - 0.5),
+                            Some(role)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn control_widths_support_shrink_percent_and_weighted_fill() {
+    for width in [Dimension::Shrink, Dimension::Percent(0.2), Dimension::FILL] {
+        let mut design = TEST_CHROME;
+        design.controls.minimize.style.width = width;
+        design.controls.maximize.style.width = width;
+        design.controls.close.style.width = if width == Dimension::FILL {
+            Dimension::Fill(2.0)
+        } else {
+            width
+        };
+        let snapshot = chrome_snapshot(design, WindowChromeModel::new(43, "Widths").active(true));
+        let bounds = |action| {
+            snapshot
+                .regions
+                .iter()
+                .find(|r| r.role == WindowChromeRole::Action(action))
+                .unwrap()
+                .bounds
+        };
+        let first = bounds(WindowAction::Minimize);
+        let second = bounds(WindowAction::ToggleMaximize);
+        let last = bounds(WindowAction::Close);
+        assert!(first.width > 0.0);
+        assert_eq!(first.width, second.width);
+        assert_eq!(second.x, first.right() + design.controls.gap);
+        assert_eq!(last.x, second.right() + design.controls.gap);
+        if width == Dimension::FILL {
+            assert_eq!(last.width, first.width * 2.0);
+        }
+        assert!(last.right() <= 631.0);
+    }
+}
+
+#[test]
+fn control_dimension_validation_rejects_invalid_values() {
+    for dimension in [
+        Dimension::Pixels(-1.0),
+        Dimension::Pixels(0.0),
+        Dimension::Pixels(f32::NAN),
+        Dimension::Fill(0.0),
+        Dimension::Fill(f32::INFINITY),
+        Dimension::Percent(-0.1),
+        Dimension::Percent(1.1),
+    ] {
+        for height in [false, true] {
+            let mut design = TEST_CHROME;
+            if height {
+                design.controls.restore.style.height = dimension;
+            } else {
+                design.controls.restore.style.width = dimension;
+            }
+            assert_eq!(
+                design.validate(),
+                Err(WindowChromeDesignError::InvalidControlMetric)
+            );
+        }
+    }
+    for dimension in [
+        Dimension::Shrink,
+        Dimension::FILL,
+        Dimension::Percent(0.5),
+        Dimension::Pixels(24.0),
+    ] {
+        let mut design = TEST_CHROME;
+        design.controls.close.style.height = dimension;
+        design.controls.close.style.width = dimension;
+        assert!(design.validate().is_ok());
+    }
 }

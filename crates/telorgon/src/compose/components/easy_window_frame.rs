@@ -4,15 +4,15 @@ use std::sync::Arc;
 use crate::application_host::WindowFrameTemplate;
 use crate::assets::{IconAsset, ImageSource};
 use crate::compose::{
-    Alignment, Component, ComponentFields, Element, Insets, View, button, column, image, row,
-    spacer, stack, text, window_content_slot, window_frame,
+    Alignment, Component, ComponentFields, Dimension, Element, Insets, View, button, column, image,
+    row, spacer, stack, text, window_content_slot, window_frame,
 };
 use crate::core::ColorRgba8;
 use crate::theme::{
     CompiledComponentStyle, CompiledSlotStyle, CompiledStateStyle, InteractionState, TransitionSpec,
 };
 use crate::ui::{
-    Background, BoxDecoration, ComponentStyleId, InteractionFlags, Shadow, SizeRule,
+    Background, BoxDecoration, ComponentStyleId, InteractionFlags, Shadow, SizeRule, SizeRule2D,
     StylePropertyPatch, StyleSlotId, ThemeDomainId,
 };
 use crate::window_chrome::{
@@ -65,8 +65,10 @@ pub struct WindowControlVisual {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WindowControlButtonStyle {
-    pub width: f32,
-    pub height: f32,
+    /// Uses the title bar as its sizing parent; fill shares remaining width with the spacer.
+    pub width: Dimension,
+    /// Fill uses the title bar height remaining after vertical padding.
+    pub height: Dimension,
     pub icon_size: f32,
     pub resting: WindowControlVisual,
     pub hovered: Option<WindowControlVisual>,
@@ -149,14 +151,20 @@ impl WindowChromeDesign {
             self.controls.restore,
             self.controls.close,
         ] {
-            for value in [
-                control.style.width,
-                control.style.height,
-                control.style.icon_size,
-            ] {
-                if finite_nonnegative(value).is_none() || value == 0.0 {
+            for dimension in [control.style.width, control.style.height] {
+                let valid = match dimension {
+                    Dimension::Shrink => true,
+                    Dimension::Pixels(value) | Dimension::Fill(value) => {
+                        value.is_finite() && value > 0.0
+                    }
+                    Dimension::Percent(value) => value.is_finite() && value > 0.0 && value <= 1.0,
+                };
+                if !valid {
                     return Err(WindowChromeDesignError::InvalidControlMetric);
                 }
+            }
+            if !control.style.icon_size.is_finite() || control.style.icon_size <= 0.0 {
+                return Err(WindowChromeDesignError::InvalidControlMetric);
             }
         }
         Ok(self)
@@ -364,15 +372,24 @@ fn build_title_bar(
         .window_title();
     let icon = window_icon(model, design.title_bar);
     let controls = window_controls(model, design.controls);
+    let mut children = Vec::new();
+    if let Some(icon) = icon {
+        children.push(icon);
+        children.push(spacer().width(design.title_bar.gap).into_element());
+    }
+    children.push(title.into_element());
+    children.push(spacer().width(design.title_bar.gap).into_element());
+    children.push(spacer().into_element());
+    if !controls.is_empty() {
+        children.push(spacer().width(design.title_bar.gap).into_element());
+    }
+    children.extend(controls);
+    // Keep controls in the bar's row so every Dimension resolves against the same parent.
     let title_bar = row()
         .height(design.title_bar.height)
         .padding(design.title_bar.padding)
-        .gap(design.title_bar.gap)
         .align_items(Alignment::Center)
-        .children(icon)
-        .child(title)
-        .child(spacer())
-        .children(controls);
+        .children(children);
     Some(if model.capabilities.move_window {
         title_bar.window_drag_region()
     } else {
@@ -409,11 +426,9 @@ fn window_icon(model: &WindowChromeModel, style: WindowTitleBarStyle) -> Option<
     )
 }
 
-fn window_controls(model: &WindowChromeModel, design: WindowControlsDesign) -> Option<Element> {
+fn window_controls(model: &WindowChromeModel, design: WindowControlsDesign) -> Vec<Element> {
     let mut controls = Vec::with_capacity(3);
-    let mut controls_width = 0.0;
     if model.capabilities.minimize {
-        controls_width += design.minimize.style.width;
         controls.push(control("Minimize", design.minimize, WindowAction::Minimize));
     }
     if model.capabilities.maximize {
@@ -422,21 +437,19 @@ fn window_controls(model: &WindowChromeModel, design: WindowControlsDesign) -> O
         } else {
             ("Maximize", design.maximize)
         };
-        controls_width += control_design.style.width;
         controls.push(control(label, control_design, WindowAction::ToggleMaximize));
     }
     if model.capabilities.close {
-        controls_width += design.close.style.width;
         controls.push(control("Close", design.close, WindowAction::Close));
     }
-    (!controls.is_empty()).then(|| {
-        let gap_width = design.gap * controls.len().saturating_sub(1) as f32;
-        row()
-            .width(controls_width + gap_width)
-            .gap(design.gap)
-            .children(controls)
-            .into_element()
-    })
+    let mut children = Vec::with_capacity(5);
+    for control in controls {
+        if !children.is_empty() {
+            children.push(spacer().width(design.gap).into_element());
+        }
+        children.push(control);
+    }
+    children
 }
 
 fn control(label: &'static str, design: WindowControlDesign, action: WindowAction) -> Element {
@@ -455,8 +468,13 @@ fn compiled_control_style(style: WindowControlButtonStyle) -> Arc<CompiledCompon
     let root_slot = StyleSlotId::named("root");
     let icon_slot = StyleSlotId::named("icon");
     let mut root = visual_root_patch(style.resting);
-    root.width = Some(SizeRule::Px(style.width));
-    root.height = Some(SizeRule::Px(style.height));
+    root.width = Some(style.width.into());
+    root.height = Some(style.height.into());
+    // Chrome controls follow their authored dimensions, including bars shorter than 32px.
+    root.min_size = Some(SizeRule2D {
+        width: SizeRule::Px(0.0),
+        height: SizeRule::Px(0.0),
+    });
     let icon = visual_icon_patch(style.resting);
 
     let mut slots = BTreeMap::new();
@@ -722,8 +740,8 @@ mod tests {
         icon_tint: ColorRgba8::rgba(255, 255, 255, 255),
     };
     const BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
-        width: 38.0,
-        height: 30.0,
+        width: Dimension::Pixels(38.0),
+        height: Dimension::Pixels(30.0),
         icon_size: 15.0,
         resting: VISUAL,
         hovered: None,
