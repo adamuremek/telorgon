@@ -1048,6 +1048,11 @@ mod tests {
                 );
                 if border > 0.0 {
                     assert_eq!(
+                        pixel(195, 6)[3],
+                        255,
+                        "inner antialias seam must remain opaque"
+                    );
+                    assert_eq!(
                         pixel(196, 6),
                         [255, 0, 0, 255],
                         "button painted over curved border"

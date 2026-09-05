@@ -3,7 +3,7 @@ interface_major = 4
 interface_minor = 0
 target = "vulkan1.3-spirv1.6"
 source_config_hash = "eb7f93861289f94c5a8d59a8a54d91cc63dc42b629a39418c7ab3292b785f232"
-bundle_hash = "a346671e23338bb2b2ad9e61414cd371140d280a5412e5d5e437b49f7109e582"
+bundle_hash = "ef42107c4738f36021bf064213e6582baf2e71adbca7a9994a32bce29d0a7bb0"
 
 [[shader]]
 name = "box_vertex"
@@ -17,9 +17,9 @@ entry_point = "main"
 [[shader]]
 name = "box_fragment"
 source = "shaders/vulkan/box/box.frag"
-source_hash = "daf19b2368daba13199e70c17784f215a32a4304c18445dec8543e35e0849e44"
+source_hash = "9a0e90aa32156d7e39d57d48ada0e050614089e3c3558d70e4795e64c122f2e4"
 artifact = "box.frag.spv"
-artifact_hash = "50c7e41a87ca9d62ff123f0d6fde5b264371021a8e919685e901262755dd80cc"
+artifact_hash = "b2c50fe41d2b42c412754cfe6ca1321ae3bbd186c9868fc1771e4fb942d06369"
 stage = "fragment"
 entry_point = "main"
 

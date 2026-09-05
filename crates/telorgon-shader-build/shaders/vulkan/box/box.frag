@@ -102,9 +102,12 @@ void main(){float placement_amount=placement_coverage();if(placement_amount<=0.0
     vec4 inner_radii=max(vec4(0),item.radii-vec4(max(widths.x,widths.w),max(widths.x,widths.y),max(widths.z,widths.y),max(widths.z,widths.w)));
     float inner=min(outer,coverage(p-inner_origin,inner_size,inner_radii));
     uint flags=item.border_l_spatial_clip_flags.w;
-    if((flags&1u)!=0u)result=over(result,premul(item.fill_border_t_r_b.x,inner,item.opacity));
+    // Fill and border are disjoint coverage of one shape, not overlapping layers.
+    vec4 body=vec4(0);
+    if((flags&1u)!=0u)body+=premul(item.fill_border_t_r_b.x,inner,item.opacity);
     float ring=clamp(outer-inner,0.0,1.0);
-    if((flags&2u)!=0u&&ring>0.0)result=over(result,premul(border_color(item,p),ring,item.opacity));
+    if((flags&2u)!=0u&&ring>0.0)body+=premul(border_color(item,p),ring,item.opacity);
+    result=over(result,body);
     if(result.a<=0.0)discard;
     output_color=(result)*placement_amount;
 }

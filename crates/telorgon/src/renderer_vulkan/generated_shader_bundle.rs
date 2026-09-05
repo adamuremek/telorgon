@@ -3,12 +3,12 @@
 pub(crate) const BUNDLE_INTERFACE_MAJOR: u32 = 4;
 pub(crate) const BUNDLE_INTERFACE_MINOR: u32 = 0;
 pub(crate) const BUNDLE_HASH: &str =
-    "a346671e23338bb2b2ad9e61414cd371140d280a5412e5d5e437b49f7109e582";
+    "ef42107c4738f36021bf064213e6582baf2e71adbca7a9994a32bce29d0a7bb0";
 pub(crate) const BOX_VERTEX_HASH: &str =
     "74a5ca1a74dade29acd48781047899fd7ae626e32c39ccd49862134b011ecbfe";
 pub(crate) const BOX_VERTEX: &[u8] = include_bytes!("shaders/vulkan/box.vert.spv");
 pub(crate) const BOX_FRAGMENT_HASH: &str =
-    "50c7e41a87ca9d62ff123f0d6fde5b264371021a8e919685e901262755dd80cc";
+    "b2c50fe41d2b42c412754cfe6ca1321ae3bbd186c9868fc1771e4fb942d06369";
 pub(crate) const BOX_FRAGMENT: &[u8] = include_bytes!("shaders/vulkan/box.frag.spv");
 pub(crate) const GLYPH_VERTEX_HASH: &str =
     "deaec55e693a5a735813197cee82c05b283f84587b7131d57def08919ec4331a";

@@ -660,3 +660,21 @@ coverage), or using a title-bar-sized rounded rectangle (changes the curve for s
 The CPU framebuffer regression checks a flush square button, curved and straight border pixels,
 transparent outer corners, zero border width, and square windows. Hardware presentation remains
 user-run.
+
+### Border/fill antialias coverage (2026-09-05)
+
+An opaque rounded box must stay opaque across its internal border/fill boundary. The software
+renderer and Vulkan box shader now sum the premultiplied contributions of the fill (`inner`)
+and border (`outer - inner`) before compositing the body once over shadows and the destination.
+Treating those complementary areas as sequential source-over layers produced alpha 194/255 at
+a fully covered corner pixel. Moving or expanding the clip would hide rather than repair this error.
+
+Reference review: Qt's `../other-rendering-libs/qtdeclarative/src/quick/scenegraph/qsgbasicinternalrectanglenode.cpp`
+partitions fill, border, and antialias geometry; Vello's
+`../other-rendering-libs/vello/vello_shaders/shader/fine.wgsl` multiplies a source by area coverage
+before source-over. The [Vulkan blending equations](https://docs.vulkan.org/spec/latest/chapters/framebuffer.html#framebuffer-blending)
+explain why sequentially blending complementary coverage attenuates alpha twice. Telorgon retains
+its existing analytic geometry and blending state and combines disjoint body coverage in the shader.
+Tests cover all pixels of a rounded box with transparent, translucent, and opaque colors and local
+opacity, plus the flush control corner regression. The offline shader builder regenerates and
+validates SPIR-V, reflection, and manifest hashes; live GPU presentation is left to the user.

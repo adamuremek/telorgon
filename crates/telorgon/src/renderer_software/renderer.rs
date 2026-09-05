@@ -925,23 +925,31 @@ fn draw_box(
             let inner_radii = inset_radii(radii, border_widths);
             let inner =
                 rounded_coverage(local.x, local.y, inner_rect, inner_radii, scale_min).min(outer);
-            if let Some(background) = instance.background
-                && inner > 0.0
-            {
-                raster.blend_srgba(x, y, background, inner * instance.opacity);
-            }
+            // Fill and border partition one shape's coverage. Sum their premultiplied
+            // contributions before source-over; blending them separately opens an alpha seam.
             let ring = (outer - inner).clamp(0.0, 1.0);
-            if ring > 0.0 {
-                let color = border_color_at(
-                    local.x - instance.rect.x,
-                    local.y - instance.rect.y,
-                    instance.rect.width,
-                    instance.rect.height,
-                    border_widths,
-                    instance.border,
-                );
-                raster.blend_srgba(x, y, color, ring * instance.opacity);
+            let border_color = border_color_at(
+                local.x - instance.rect.x,
+                local.y - instance.rect.y,
+                instance.rect.width,
+                instance.rect.height,
+                border_widths,
+                instance.border,
+            );
+            let mut rgb = [0.0; 3];
+            let mut alpha = 0.0;
+            for (color, coverage) in [
+                (instance.background.unwrap_or_default(), inner),
+                (border_color, ring),
+            ] {
+                let amount =
+                    f32::from(color.a) / 255.0 * coverage * instance.opacity.clamp(0.0, 1.0);
+                alpha += amount;
+                for (channel, value) in rgb.iter_mut().zip([color.r, color.g, color.b]) {
+                    *channel += srgb_decode_byte(value) * amount;
+                }
             }
+            raster.blend_linear_premultiplied(x, y, rgb, alpha);
         }
     }
 }
@@ -1788,6 +1796,61 @@ mod tests {
         assert_eq!(&surface.pixels_rgba8()[0..4], &[255, 0, 0, 255]);
         assert_eq!(&surface.pixels_rgba8()[4..8], &[0, 0, 255, 255]);
         assert_eq!(&surface.pixels_rgba8()[12..16], &[0, 0, 0, 255]);
+    }
+
+    #[test]
+    fn border_and_fill_share_coverage_without_an_alpha_seam() {
+        let rect = RectF {
+            x: 0.0,
+            y: 0.0,
+            width: 32.0,
+            height: 32.0,
+        };
+        for alpha in [0, 128, 255] {
+            for opacity in [0.5, 1.0] {
+                let color = ColorRgba8::rgba(120, 80, 40, alpha);
+                let instance = BoxInstance {
+                    node: NodeId::new(0, 1),
+                    rect,
+                    view_bounds: rect,
+                    background: Some(color),
+                    border: Border::all(2.0, color),
+                    outline: Outline::default(),
+                    corner_radii: CornerRadii::all(14.0),
+                    shadows: ShadowList::default(),
+                    opacity,
+                    clip: ClipId(0),
+                    spatial: SpatialId(0),
+                };
+                let mut pixels = vec![0; 32 * 32 * 4];
+                draw_box(
+                    &mut RasterTarget {
+                        pixels: &mut pixels,
+                        width: 32,
+                        height: 32,
+                        origin: crate::core::PointI::default(),
+                        blend_mode: BlendMode::Alpha,
+                        color_space: ColorSpace::Srgb,
+                        rounded_clips: [None; 2],
+                    },
+                    &instance,
+                    None,
+                    None,
+                    rect,
+                );
+                for y in 0..32 {
+                    for x in 0..32 {
+                        let coverage =
+                            rounded_coverage(x as f32 + 0.5, y as f32 + 0.5, rect, [14.0; 4], 1.0);
+                        let expected = (f32::from(alpha) * opacity * coverage).round() as u8;
+                        assert!(
+                            pixels[(y * 32 + x) * 4 + 3].abs_diff(expected) <= 1,
+                            "coverage seam at {x},{y}, alpha={alpha}, opacity={opacity}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
