@@ -3,7 +3,7 @@ interface_major = 4
 interface_minor = 0
 target = "vulkan1.3-spirv1.6"
 source_config_hash = "eb7f93861289f94c5a8d59a8a54d91cc63dc42b629a39418c7ab3292b785f232"
-bundle_hash = "0df9349ba70e9cc3664ac85389b9c513b6f1bc4c6a65b6fd9c2633dcf69797be"
+bundle_hash = "bb67aabba2958470bb2d0449f361591b9cac24a68beb29818676bdb47c156bef"
 
 [[shader]]
 name = "box_vertex"
@@ -17,9 +17,9 @@ entry_point = "main"
 [[shader]]
 name = "box_fragment"
 source = "shaders/vulkan/box/box.frag"
-source_hash = "e5b3e2668b3f30a9da0b1b7107c531b81835b394df9c67b46f2ea27d1ee628e0"
+source_hash = "fff505c8f5f5040d6dcfe4dab3e2648b8ec4beb1ec114d5abb76c5ff0c1a9c07"
 artifact = "box.frag.spv"
-artifact_hash = "baf959f805900e638a5c0dcaa21b60cf5f7b0341db948acfa05aa35a13b46ea6"
+artifact_hash = "af0ba7374b5bd7459684fc400ab31b5b8a108a8f46660815c99d8fe4fff7dc37"
 stage = "fragment"
 entry_point = "main"
 
@@ -35,9 +35,9 @@ entry_point = "main"
 [[shader]]
 name = "glyph_fragment"
 source = "shaders/vulkan/box/glyph.frag"
-source_hash = "d02fc30216e8d91b64f42fe700e3b5847edfd7bdfe44b904ff2d6bd06863d955"
+source_hash = "31c3656d9edf7544e26e30b7eec0b345f9f270dd8f84c85ae5492e159912fd54"
 artifact = "glyph.frag.spv"
-artifact_hash = "e8baee0c79fb782f1fdfa9a11665e9847915c807be10d7cd4aaa33ce5ae45e24"
+artifact_hash = "9b5afe64fd6f43634ae5fa24686e75b9f7acd9966318ffc2e1725927bcbecbd2"
 stage = "fragment"
 entry_point = "main"
 
@@ -53,9 +53,9 @@ entry_point = "main"
 [[shader]]
 name = "image_fragment"
 source = "shaders/vulkan/box/image.frag"
-source_hash = "cb284d0db7055b39bead03df2c663b6182adfb15ff6100ad2553cce952a8f6fc"
+source_hash = "afd027055331bb7a1f6d13223831d0944a874d167b85c086235f17017b7253a5"
 artifact = "image.frag.spv"
-artifact_hash = "420a0ba09735f0410f55e9195a2b3a1292db64aaf7f198f7f90d1ae03efbaaae"
+artifact_hash = "a601aaf4de67eb271b1eb8e51ba061326e4f902819be304e088813f01a63305f"
 stage = "fragment"
 entry_point = "main"
 
@@ -71,8 +71,8 @@ entry_point = "main"
 [[shader]]
 name = "material_fragment"
 source = "shaders/vulkan/box/material.frag"
-source_hash = "160ad239b3ba7ed76d250d0a983bd0179b66a440cbfabdfa89600fe968eb744e"
+source_hash = "34a8ff8a8cfaecb80aa506a6eff7165c123ee251df30cea3226d588149c128cc"
 artifact = "material.frag.spv"
-artifact_hash = "3e59a733f3d181f4e86541a707dfb3bdf64fb672524c596c470549591cf2c368"
+artifact_hash = "bccb2d5cdb8e97cc18a4be9dc23ff7d6d841e246a08ae4319e0f8e19bafe726a"
 stage = "fragment"
 entry_point = "main"

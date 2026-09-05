@@ -32,8 +32,8 @@ float clip_coverage(uint slot,vec2 p){
     if(slot==0xffffffffu)return 1.0;
     GpuClip c=clips.values[slot];
     vec2 local=p-c.view_bounds.xy;
-    if(any(lessThan(local,vec2(0)))||any(greaterThan(local,c.view_bounds.zw)))return 0.0;
-    if(c.mode_mask_flags.x!=2u)return 1.0;
+    // Keep rounded coverage derivatives ahead of per-fragment bounds rejection.
+    if(c.mode_mask_flags.x!=2u)return all(greaterThanEqual(local,vec2(0)))&&all(lessThanEqual(local,c.view_bounds.zw))?1.0:0.0;
     vec2 half_size=c.view_bounds.zw*.5;
     float radius=local.x<half_size.x?(local.y<half_size.y?c.radii.x:c.radii.w):(local.y<half_size.y?c.radii.y:c.radii.z);
     radius=clamp(radius,0.0,min(half_size.x,half_size.y));
@@ -42,4 +42,21 @@ float clip_coverage(uint slot,vec2 p){
     // Match the analytic box edge rather than rounding coverage to a boolean.
     return clamp(.5-d/max(fwidth(d),1e-4),0.0,1.0);
 }
-void main(){float placement_amount=placement_coverage();if(placement_amount<=0.0)discard;GpuImageInstance item=images.values[instance_slot];placement_amount*=clip_coverage(item.tint_spatial_clip_texture.z,view_position);if(placement_amount<=0.0)discard;vec4 sampled=texture(source_texture,uv);uint alpha_mode=item.flags&3u;if(alpha_mode==2u)sampled.a=1.0;vec4 tint=unpack_srgba(item.tint_spatial_clip_texture.x);vec3 tint_linear=srgb_decode(tint.rgb);float opacity=clamp(item.opacity,0,1);float a=sampled.a*tint.a*opacity;vec3 rgb;if((item.flags&4u)!=0u){rgb=tint_linear*a;}else{rgb=alpha_mode==1u?sampled.rgb*tint_linear*tint.a*opacity:sampled.rgb*tint_linear*a;}output_color=(vec4(rgb,a))*placement_amount;}
+void main(){
+    GpuImageInstance item=images.values[instance_slot];
+    // Texture sampling also needs uniform control flow for its implicit derivatives.
+    vec4 sampled=texture(source_texture,uv);
+    float clip_amount=clip_coverage(item.tint_spatial_clip_texture.z,view_position);
+    float placement_amount=placement_coverage()*clip_amount;
+    if(placement_amount<=0.0)discard;
+    uint alpha_mode=item.flags&3u;
+    if(alpha_mode==2u)sampled.a=1.0;
+    vec4 tint=unpack_srgba(item.tint_spatial_clip_texture.x);
+    vec3 tint_linear=srgb_decode(tint.rgb);
+    float opacity=clamp(item.opacity,0,1);
+    float a=sampled.a*tint.a*opacity;
+    vec3 rgb;
+    if((item.flags&4u)!=0u){rgb=tint_linear*a;}
+    else{rgb=alpha_mode==1u?sampled.rgb*tint_linear*tint.a*opacity:sampled.rgb*tint_linear*a;}
+    output_color=vec4(rgb,a)*placement_amount;
+}

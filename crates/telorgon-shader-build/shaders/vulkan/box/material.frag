@@ -32,8 +32,8 @@ float clip_coverage(uint slot,vec2 p){
     if(slot==0xffffffffu)return 1.0;
     GpuClip c=clips.values[slot];
     vec2 local=p-c.view_bounds.xy;
-    if(any(lessThan(local,vec2(0)))||any(greaterThan(local,c.view_bounds.zw)))return 0.0;
-    if(c.mode_mask_flags.x!=2u)return 1.0;
+    // Keep rounded coverage derivatives ahead of per-fragment bounds rejection.
+    if(c.mode_mask_flags.x!=2u)return all(greaterThanEqual(local,vec2(0)))&&all(lessThanEqual(local,c.view_bounds.zw))?1.0:0.0;
     vec2 half_size=c.view_bounds.zw*.5;
     float radius=local.x<half_size.x?(local.y<half_size.y?c.radii.x:c.radii.w):(local.y<half_size.y?c.radii.y:c.radii.z);
     radius=clamp(radius,0.0,min(half_size.x,half_size.y));
@@ -42,4 +42,15 @@ float clip_coverage(uint slot,vec2 p){
     // Match the analytic box edge rather than rounding coverage to a boolean.
     return clamp(.5-d/max(fwidth(d),1e-4),0.0,1.0);
 }
-void main(){float placement_amount=placement_coverage();if(placement_amount<=0.0)discard;GpuMaterialInstance item=materials.values[instance_slot];placement_amount*=clip_coverage(item.params_spatial_clip.w,view_position);if(placement_amount<=0.0)discard;float t=item.material_variant==1u?unit_position.x:(item.material_variant==2u?unit_position.y:0.0);vec4 first=unpack_srgba(parameters.values[item.params_spatial_clip.x]);vec4 second=unpack_srgba(parameters.values[item.params_spatial_clip.x+1u]);vec4 color=mix(first,second,t);float a=color.a*clamp(item.opacity,0,1);output_color=(vec4(srgb_decode(color.rgb)*a,a))*placement_amount;}
+void main(){
+    GpuMaterialInstance item=materials.values[instance_slot];
+    float clip_amount=clip_coverage(item.params_spatial_clip.w,view_position);
+    float placement_amount=placement_coverage()*clip_amount;
+    if(placement_amount<=0.0)discard;
+    float t=item.material_variant==1u?unit_position.x:(item.material_variant==2u?unit_position.y:0.0);
+    vec4 first=unpack_srgba(parameters.values[item.params_spatial_clip.x]);
+    vec4 second=unpack_srgba(parameters.values[item.params_spatial_clip.x+1u]);
+    vec4 color=mix(first,second,t);
+    float a=color.a*clamp(item.opacity,0,1);
+    output_color=vec4(srgb_decode(color.rgb)*a,a)*placement_amount;
+}

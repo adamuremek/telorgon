@@ -3,28 +3,28 @@
 pub(crate) const BUNDLE_INTERFACE_MAJOR: u32 = 4;
 pub(crate) const BUNDLE_INTERFACE_MINOR: u32 = 0;
 pub(crate) const BUNDLE_HASH: &str =
-    "0df9349ba70e9cc3664ac85389b9c513b6f1bc4c6a65b6fd9c2633dcf69797be";
+    "bb67aabba2958470bb2d0449f361591b9cac24a68beb29818676bdb47c156bef";
 pub(crate) const BOX_VERTEX_HASH: &str =
     "74a5ca1a74dade29acd48781047899fd7ae626e32c39ccd49862134b011ecbfe";
 pub(crate) const BOX_VERTEX: &[u8] = include_bytes!("shaders/vulkan/box.vert.spv");
 pub(crate) const BOX_FRAGMENT_HASH: &str =
-    "baf959f805900e638a5c0dcaa21b60cf5f7b0341db948acfa05aa35a13b46ea6";
+    "af0ba7374b5bd7459684fc400ab31b5b8a108a8f46660815c99d8fe4fff7dc37";
 pub(crate) const BOX_FRAGMENT: &[u8] = include_bytes!("shaders/vulkan/box.frag.spv");
 pub(crate) const GLYPH_VERTEX_HASH: &str =
     "deaec55e693a5a735813197cee82c05b283f84587b7131d57def08919ec4331a";
 pub(crate) const GLYPH_VERTEX: &[u8] = include_bytes!("shaders/vulkan/glyph.vert.spv");
 pub(crate) const GLYPH_FRAGMENT_HASH: &str =
-    "e8baee0c79fb782f1fdfa9a11665e9847915c807be10d7cd4aaa33ce5ae45e24";
+    "9b5afe64fd6f43634ae5fa24686e75b9f7acd9966318ffc2e1725927bcbecbd2";
 pub(crate) const GLYPH_FRAGMENT: &[u8] = include_bytes!("shaders/vulkan/glyph.frag.spv");
 pub(crate) const IMAGE_VERTEX_HASH: &str =
     "0e78d740032e2754466bc6750bdca100dde5fbd0411e2a98b6bea5e9852babb3";
 pub(crate) const IMAGE_VERTEX: &[u8] = include_bytes!("shaders/vulkan/image.vert.spv");
 pub(crate) const IMAGE_FRAGMENT_HASH: &str =
-    "420a0ba09735f0410f55e9195a2b3a1292db64aaf7f198f7f90d1ae03efbaaae";
+    "a601aaf4de67eb271b1eb8e51ba061326e4f902819be304e088813f01a63305f";
 pub(crate) const IMAGE_FRAGMENT: &[u8] = include_bytes!("shaders/vulkan/image.frag.spv");
 pub(crate) const MATERIAL_VERTEX_HASH: &str =
     "783af7da04c758dc2db03d1187818f7a77548101504d07d1f29a8314a806fe3c";
 pub(crate) const MATERIAL_VERTEX: &[u8] = include_bytes!("shaders/vulkan/material.vert.spv");
 pub(crate) const MATERIAL_FRAGMENT_HASH: &str =
-    "3e59a733f3d181f4e86541a707dfb3bdf64fb672524c596c470549591cf2c368";
+    "bccb2d5cdb8e97cc18a4be9dc23ff7d6d841e246a08ae4319e0f8e19bafe726a";
 pub(crate) const MATERIAL_FRAGMENT: &[u8] = include_bytes!("shaders/vulkan/material.frag.spv");

@@ -583,6 +583,187 @@ fn mixed_scene_matches_the_software_reference_on_real_vulkan_hardware() {
     );
 }
 
+#[test]
+#[ignore = "requires TELORGON_TEST_MODE=developer-hardware and a non-CPU Vulkan 1.3 adapter"]
+fn flush_controls_have_no_diagonal_or_edge_seams_under_rounded_clipping() {
+    assert_eq!(
+        std::env::var("TELORGON_TEST_MODE").as_deref(),
+        Ok("developer-hardware"),
+        "hardware test must be selected explicitly"
+    );
+    let config = VulkanConfig {
+        enable_validation: true,
+        ..VulkanConfig::default()
+    };
+    let instance = VulkanInstance::load(&config, &[]).unwrap();
+    let adapters = instance.adapters().unwrap();
+    let selection = DeviceSelection::best(&adapters)
+        .unwrap_or_else(|| panic!("no eligible non-CPU Vulkan adapter; reports: {adapters:#?}"));
+    let device = VulkanDevice::create_owned(instance.clone(), &config, &selection, None).unwrap();
+
+    // The bright backing exposes even a single partially covered pixel along the two
+    // triangles' shared diagonal. Odd extents and fractional origins vary helper coverage.
+    for width in [200, 201] {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+            for inset in [1.0, 1.5] {
+                for radius in [0.0, 12.0] {
+                    let extent = SizeI {
+                        width: (width as f32 * scale).round() as i32,
+                        height: (100.0 * scale).round() as i32,
+                    };
+                    let logical = SizeF {
+                        width: width as f32,
+                        height: 100.0,
+                    };
+                    let target = OffscreenVulkanTarget::new(&device, extent).unwrap();
+                    let mut source = RenderScene::default();
+                    source.extent = logical;
+                    let root = NodeId::new(0, 1);
+                    source.spatial_nodes.upsert(
+                        root,
+                        RenderSpatialNode {
+                            id: SpatialId(0),
+                            transform: telorgon::core::Affine2D::IDENTITY,
+                        },
+                    );
+                    let clip_rect = RectF {
+                        x: inset,
+                        y: inset,
+                        width: logical.width - 2.0 * inset,
+                        height: logical.height - 2.0 * inset,
+                    };
+                    source.clips.upsert(
+                        root,
+                        RenderClip {
+                            id: ClipId(1),
+                            rect: clip_rect,
+                            corner_radii: telorgon::ui::CornerRadii::all(radius),
+                        },
+                    );
+                    let mut controls = Vec::new();
+                    for index in 0..3 {
+                        let node = NodeId::new(index + 1, 1);
+                        let rect = RectF {
+                            x: logical.width - inset - 38.0 - (2 - index) as f32 * 40.0,
+                            y: inset,
+                            width: 38.0,
+                            height: 31.0,
+                        };
+                        source.boxes.upsert(
+                            node,
+                            BoxInstance {
+                                node,
+                                rect,
+                                view_bounds: rect,
+                                background: Some(ColorRgba8::rgba(0, 0, 255, 255)),
+                                border: Default::default(),
+                                outline: Default::default(),
+                                corner_radii: Default::default(),
+                                shadows: Default::default(),
+                                opacity: 1.0,
+                                clip: ClipId(1),
+                                spatial: SpatialId(0),
+                            },
+                        );
+                        controls.push(rect);
+                    }
+                    source.set_draw_order(
+                        (0..3)
+                            .map(|index| {
+                                draw(
+                                    PrimitiveKind::Box,
+                                    PipelineKind::AnalyticBox,
+                                    index,
+                                    0,
+                                    ClipId(1),
+                                )
+                            })
+                            .collect(),
+                    );
+                    let mut scene = device.create_scene().unwrap();
+                    device
+                        .apply_scene_delta(&mut scene, &source.take_delta().unwrap())
+                        .unwrap();
+                    let mut frame = device.begin_owned_frame().unwrap();
+                    let pending = {
+                        let mut context = frame.context_mut();
+                        device
+                            .render(
+                                &mut scene,
+                                &mut context,
+                                &target.target(),
+                                &RenderRequest {
+                                    force: true,
+                                    load: TargetLoad::Clear(ColorRgba8::rgba(0, 255, 0, 255)),
+                                    store: TargetStore::Store,
+                                    region: None,
+                                },
+                            )
+                            .unwrap();
+                        context
+                            .record_readback(
+                                &target.target(),
+                                &ReadbackRequest {
+                                    region: RectI {
+                                        x: 0,
+                                        y: 0,
+                                        width: extent.width,
+                                        height: extent.height,
+                                    },
+                                    format: ReadbackFormat::Rgba8,
+                                },
+                            )
+                            .unwrap()
+                    };
+                    let receipt = frame.finish().unwrap().submit().unwrap();
+                    let pixels = pending
+                        .bind_to_submission(receipt)
+                        .unwrap()
+                        .wait(Duration::from_secs(10))
+                        .unwrap()
+                        .pixels;
+                    let sx = extent.width as f32 / logical.width;
+                    let sy = extent.height as f32 / logical.height;
+                    let mut checked = [0; 3];
+                    for y in 0..extent.height {
+                        for x in 0..extent.width {
+                            let px = x as f32 + 0.5;
+                            let py = y as f32 + 0.5;
+                            for (index, rect) in controls.iter().enumerate() {
+                                // Include fully covered top/bottom rows and every interior pixel,
+                                // including the shared diagonal; leave the curved AA band alone.
+                                if px < rect.x * sx + 0.5
+                                    || px > rect.right() * sx - 0.5
+                                    || py < rect.y * sy + 0.5
+                                    || py > rect.bottom() * sy - 0.5
+                                    || (px > (clip_rect.right() - radius) * sx
+                                        && py < (clip_rect.y + radius) * sy)
+                                {
+                                    continue;
+                                }
+                                let offset = ((y * extent.width + x) * 4) as usize;
+                                assert_eq!(
+                                    &pixels[offset..offset + 4],
+                                    &[0, 0, 255, 255],
+                                    "seam in control {index} at ({x},{y}): width={width}, scale={scale}, inset={inset}, radius={radius}"
+                                );
+                                checked[index] += 1;
+                            }
+                        }
+                    }
+                    assert!(checked.into_iter().all(|count| count > 500));
+                }
+            }
+        }
+    }
+    assert_eq!(
+        instance.diagnostics().error_count(),
+        0,
+        "validation messages: {:#?}",
+        instance.diagnostics().messages()
+    );
+}
+
 fn draw(
     kind: PrimitiveKind,
     pipeline: PipelineKind,

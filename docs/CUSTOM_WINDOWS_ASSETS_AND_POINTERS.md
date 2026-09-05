@@ -698,3 +698,31 @@ all four circular corners against independent coverage calculations at 1x, 1.25x
 including fractional insets. Shader artifacts are rebuilt, reflected, validated, and hash-checked.
 These are CPU pixel and shader-validation results; the reported live Vulkan appearance has not
 been visually verified on the user's device.
+
+### Rounded-clip derivative control flow (2026-09-05)
+
+Windowed controls exposed diagonal seams after fractional rounded clipping was enabled. The
+fragment shaders evaluated `fwidth` after a per-fragment clip-bounds return and after clipping
+discards; image/glyph texture sampling also followed those discards. This violates the
+[Vulkan derivative control-flow requirements](https://docs.vulkan.org/spec/latest/chapters/shaders.html#shaders-derivative-operations).
+The rounded-distance calculation now runs without the bounds return, and all explicit derivatives
+and implicit-derivative texture samples finish before any discard. The signed distance itself
+rejects pixels outside rounded bounds. Clip-mode branches remain per primitive. Rectangular
+clipping, geometry, `Dimension::FILL`, and the shader ABI are unchanged.
+
+Reference review: Qt Quick revision `3e2d6bd456a8e850bcf641de77d1d5d8bc8419ef`,
+`../other-rendering-libs/qtdeclarative/src/quick/scenegraph/shaders_ng/distancefieldtext_fwidth.frag`
+(`main`), samples and computes derivatives before applying coverage. Zed revision
+`f4178619acd0d47ea1f76a2025c42962c6d6638c`,
+`../other-rendering-libs/zed/crates/gpui_wgpu/src/shaders.wgsl` (`fs_path_rasterization`), computes
+coordinate derivatives before its clip return. Both preserve neighboring/helper invocations for
+derivative calculation. Telorgon retains its distance filter and source-over blending; increasing
+button height or overlapping triangles was rejected because neither corrects divergent shader
+execution. No reference code was copied.
+
+The layout regression includes odd and fractional title-bar heights in normal and maximized
+states. The opt-in Vulkan regression checks every fully covered pixel of three flush controls
+over a green backing, including their triangle diagonals and straight top/bottom edges, at odd/even
+window widths, fractional insets, square/rounded clips, and 1x/1.25x/1.5x/2x target scales.
+It is compiled only during this task; hardware execution and visual confirmation remain user-run.
+The offline shader builder compiles, validates, reflects, and regenerates the shipped artifacts.

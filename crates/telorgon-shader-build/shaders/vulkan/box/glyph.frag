@@ -32,8 +32,8 @@ float clip_coverage(uint slot,vec2 p){
     if(slot==0xffffffffu)return 1.0;
     GpuClip c=clips.values[slot];
     vec2 local=p-c.view_bounds.xy;
-    if(any(lessThan(local,vec2(0)))||any(greaterThan(local,c.view_bounds.zw)))return 0.0;
-    if(c.mode_mask_flags.x!=2u)return 1.0;
+    // Keep rounded coverage derivatives ahead of per-fragment bounds rejection.
+    if(c.mode_mask_flags.x!=2u)return all(greaterThanEqual(local,vec2(0)))&&all(lessThanEqual(local,c.view_bounds.zw))?1.0:0.0;
     vec2 half_size=c.view_bounds.zw*.5;
     float radius=local.x<half_size.x?(local.y<half_size.y?c.radii.x:c.radii.w):(local.y<half_size.y?c.radii.y:c.radii.z);
     radius=clamp(radius,0.0,min(half_size.x,half_size.y));
@@ -42,4 +42,14 @@ float clip_coverage(uint slot,vec2 p){
     // Match the analytic box edge rather than rounding coverage to a boolean.
     return clamp(.5-d/max(fwidth(d),1e-4),0.0,1.0);
 }
-void main(){float placement_amount=placement_coverage();if(placement_amount<=0.0)discard;GpuGlyphInstance item=glyphs.values[instance_slot];placement_amount*=clip_coverage(item.color_spatial_clip_page.z,view_position);if(placement_amount<=0.0)discard;float coverage=texture(atlas_texture,uv_texels/vec2(textureSize(atlas_texture,0))).r;vec4 color=unpack_srgba(item.color_spatial_clip_page.x);float a=color.a*coverage*clamp(item.opacity,0,1);output_color=(vec4(srgb_decode(color.rgb)*a,a))*placement_amount;}
+void main(){
+    GpuGlyphInstance item=glyphs.values[instance_slot];
+    // Sample before clipping so neighboring helper invocations supply valid derivatives.
+    float coverage=texture(atlas_texture,uv_texels/vec2(textureSize(atlas_texture,0))).r;
+    float clip_amount=clip_coverage(item.color_spatial_clip_page.z,view_position);
+    float placement_amount=placement_coverage()*clip_amount;
+    if(placement_amount<=0.0)discard;
+    vec4 color=unpack_srgba(item.color_spatial_clip_page.x);
+    float a=color.a*coverage*clamp(item.opacity,0,1);
+    output_color=vec4(srgb_decode(color.rgb)*a,a)*placement_amount;
+}

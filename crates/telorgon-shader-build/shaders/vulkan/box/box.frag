@@ -41,8 +41,9 @@ float clip_coverage(uint slot,vec2 p){
     if(slot==0xffffffffu)return 1.0;
     GpuClip c=clips.values[slot];
     vec2 local=p-c.view_bounds.xy;
-    if(any(lessThan(local,vec2(0)))||any(greaterThan(local,c.view_bounds.zw)))return 0.0;
-    if(c.mode_mask_flags.x!=2u)return 1.0;
+    // Only the per-primitive clip mode may branch before fwidth. A per-fragment bounds
+    // return would leave derivatives in divergent control flow (including helper lanes).
+    if(c.mode_mask_flags.x!=2u)return all(greaterThanEqual(local,vec2(0)))&&all(lessThanEqual(local,c.view_bounds.zw))?1.0:0.0;
     vec2 half_size=c.view_bounds.zw*.5;
     float radius=local.x<half_size.x?(local.y<half_size.y?c.radii.x:c.radii.w):(local.y<half_size.y?c.radii.y:c.radii.z);
     radius=clamp(radius,0.0,min(half_size.x,half_size.y));
@@ -88,9 +89,9 @@ uint border_color(GpuBoxInstance item,vec2 p){
     return item.border_l_spatial_clip_flags.x;
 }
 
-void main(){float placement_amount=placement_coverage();if(placement_amount<=0.0)discard;
+void main(){
     GpuBoxInstance item=boxes.values[instance_slot];
-    placement_amount*=clip_coverage(item.border_l_spatial_clip_flags.z,view_position);if(placement_amount<=0.0)discard;
+    float clip_amount=clip_coverage(item.border_l_spatial_clip_flags.z,view_position);
     vec2 size=item.rect.zw;
     vec2 p=local_position;
     vec4 result=vec4(0);
@@ -120,6 +121,8 @@ void main(){float placement_amount=placement_coverage();if(placement_amount<=0.0
     float ring=clamp(outer-inner,0.0,1.0);
     if((flags&2u)!=0u&&ring>0.0)body+=premul(border_color(item,p),ring,item.opacity);
     result=over(result,body);
-    if(result.a<=0.0)discard;
+    // Finish all derivative-dependent coverage before any per-fragment discard.
+    float placement_amount=placement_coverage()*clip_amount;
+    if(result.a<=0.0||placement_amount<=0.0)discard;
     output_color=(result)*placement_amount;
 }

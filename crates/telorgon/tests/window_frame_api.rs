@@ -698,7 +698,7 @@ fn low_level_template_retains_full_composition_and_authorized_action_freedom() {
 
 #[test]
 fn control_dimensions_follow_the_padded_bar_and_preserve_hit_targets() {
-    for bar_height in [24.0, 40.0, 60.0] {
+    for bar_height in [24.0, 31.0, 31.5, 40.0, 60.0] {
         for padding in [0.0, 3.0] {
             for height in [
                 Dimension::FILL,
