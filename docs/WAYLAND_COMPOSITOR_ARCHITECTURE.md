@@ -190,6 +190,17 @@ produces a fresh client enter instead of leaving a compositor cursor installed u
 client focus. The window-frame regression walks inward in subpixel steps at every corner (with
 and without a title bar where content is adjacent) and also checks the straight-edge transitions.
 
+Applications may register `Compositor::keyboard_shortcut_handler` for global desktop shortcuts.
+The callback receives a fresh `DesktopKeyEvent` before client delivery, with its evdev code,
+XKB symbol, and effective Control/Shift/Alt/Logo modifiers. `Forward` preserves normal delivery;
+`Consume` reserves that key's press, repeats, and release; `Quit` returns normally from the host.
+Modifier events continue updating XKB and the Wayland seat even for consumed keys. The handler is
+not called while a session lock is active and must remain short and nonblocking. Shortcut actions
+and process launching belong to the application, not the framework. Effective modifier lookup
+uses [XKB's named modifier API](https://xkbcommon.org/doc/current/group__state.html).
+Portable routing tests cover matched and ordinary keys, repeats, modifier changes before release,
+locked-session isolation, and quit propagation. Live seat/display qualification remains manual.
+
 Both cursor requests authorize against the focused client and its current pointer-enter serial,
 independently of the bounded general serial ledger. Nonmatching requests are ignored before cursor
 state or surface roles change; invalid cursor shapes and role conflicts remain protocol errors.

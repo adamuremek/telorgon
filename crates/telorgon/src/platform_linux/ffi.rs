@@ -161,6 +161,11 @@ unsafe extern "C" {
         buffer: *mut c_char,
         size: usize,
     ) -> c_int;
+    pub fn xkb_state_mod_name_is_active(
+        state: *mut xkb_state,
+        name: *const c_char,
+        components: c_uint,
+    ) -> c_int;
     pub fn xkb_state_serialize_mods(state: *mut xkb_state, components: c_uint) -> c_uint;
     pub fn xkb_state_serialize_layout(state: *mut xkb_state, components: c_uint) -> c_uint;
 }

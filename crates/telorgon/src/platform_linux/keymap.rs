@@ -212,6 +212,14 @@ impl XkbKeyboard {
         Ok(KeymapFile { fd, size })
     }
 
+    /// Tests an effective XKB modifier by name, including latched/locked state.
+    pub fn modifier_active(&self, name: &CStr) -> bool {
+        const EFFECTIVE: u32 = 1 << 3;
+        unsafe {
+            ffi::xkb_state_mod_name_is_active(self.state.as_ptr(), name.as_ptr(), EFFECTIVE) > 0
+        }
+    }
+
     pub fn modifiers(&self) -> XkbModifiers {
         const DEPRESSED: u32 = 1 << 0;
         const LATCHED: u32 = 1 << 1;

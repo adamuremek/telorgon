@@ -58,6 +58,7 @@ mod pointer_visual;
 mod renderer;
 mod scene;
 mod shm_copy;
+mod shortcuts;
 mod state;
 
 use client::{
@@ -109,8 +110,14 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         application.into_parts()?;
     let pointer_theme = pointer_config.load_theme(assets).map_err(app_error)?;
     let mut pointer_media = AssetMediaCache::new(assets).map_err(app_error)?;
-    let (mut background, window_frame, mut pointer, mut icons, shell_actions) =
-        compositor.into_runtime_parts();
+    let (
+        mut background,
+        window_frame,
+        mut pointer,
+        mut icons,
+        shell_actions,
+        mut keyboard_shortcut_handler,
+    ) = compositor.into_runtime_parts();
 
     let seat = LinuxSeat::open().map_err(app_error)?;
     seat.dispatch(0).map_err(app_error)?;
@@ -428,6 +435,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     #[cfg(feature = "profiler")]
     let mut previous_pointer_batch_us = None::<u64>;
     let mut keyboard = keyboard;
+    let mut shortcut_keys = shortcuts::ShortcutKeys::default();
 
     loop {
         let mut presentation_completed = false;
@@ -934,20 +942,39 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             KeyDirection::Up
                         };
                         keyboard.update_key(keycode, direction);
+                        let event = crate::application_host::DesktopKeyEvent {
+                            keycode,
+                            keysym: keyboard.symbol(keycode),
+                            control: keyboard.modifier_active(c"Control"),
+                            shift: keyboard.modifier_active(c"Shift"),
+                            alt: keyboard.modifier_active(c"Mod1"),
+                            logo: keyboard.modifier_active(c"Mod4"),
+                        };
+                        let action = shortcut_keys.route(
+                            event,
+                            pressed,
+                            session_locked,
+                            keyboard_shortcut_handler.as_deref_mut(),
+                        );
+                        if action == crate::application_host::DesktopKeyAction::Quit {
+                            return Ok(());
+                        }
                         let serial = display.next_serial();
-                        wayland
-                            .keyboard_key(
-                                1,
-                                time,
-                                keycode,
-                                if pressed {
-                                    WaylandButtonState::Pressed
-                                } else {
-                                    WaylandButtonState::Released
-                                },
-                                serial,
-                            )
-                            .map_err(app_error)?;
+                        if action == crate::application_host::DesktopKeyAction::Forward {
+                            wayland
+                                .keyboard_key(
+                                    1,
+                                    time,
+                                    keycode,
+                                    if pressed {
+                                        WaylandButtonState::Pressed
+                                    } else {
+                                        WaylandButtonState::Released
+                                    },
+                                    serial,
+                                )
+                                .map_err(app_error)?;
+                        }
                         let modifiers = keyboard.modifiers();
                         wayland
                             .keyboard_modifiers(

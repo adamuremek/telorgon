@@ -181,8 +181,9 @@ mod authoring {
 pub mod app {
     pub use super::authoring::*;
     pub use crate::application_host::{
-        Application, Compositor, LinuxDesktopConfig, Renderer, ShellWidget, ShellWidgetAnchor,
-        ShellWidgetExtent, Window, WindowDecorationMode, WindowFrameFactory, WindowFrameTemplate,
+        Application, Compositor, DesktopKeyAction, DesktopKeyEvent, LinuxDesktopConfig, Renderer,
+        ShellWidget, ShellWidgetAnchor, ShellWidgetExtent, Window, WindowDecorationMode,
+        WindowFrameFactory, WindowFrameTemplate,
     };
 }
 #[cfg(feature = "application-software")]

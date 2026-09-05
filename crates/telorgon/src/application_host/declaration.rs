@@ -665,12 +665,38 @@ impl fmt::Debug for CompositorVisual {
     }
 }
 
+/// One fresh Linux desktop key press, resolved through the active XKB state.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DesktopKeyEvent {
+    /// Linux evdev keycode (without the XKB offset).
+    pub keycode: u32,
+    pub keysym: u32,
+    pub control: bool,
+    pub shift: bool,
+    pub alt: bool,
+    pub logo: bool,
+}
+
+/// Disposition of a compositor shortcut's initiating key press.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DesktopKeyAction {
+    #[default]
+    Forward,
+    /// Consume this key's press, repeats, and release before client delivery.
+    Consume,
+    /// Return normally from the desktop host, releasing its owned resources.
+    Quit,
+}
+
+pub(crate) type DesktopKeyHandler = Box<dyn FnMut(DesktopKeyEvent) -> DesktopKeyAction>;
+
 /// Incomplete compositor declaration.
 pub struct Compositor {
     window_frame: Option<WindowFrameFactory>,
     pointer: Option<CompositorVisual>,
     icons: Vec<CompositorVisual>,
     shell_actions: Vec<ShellActionHandler>,
+    keyboard_shortcut_handler: Option<DesktopKeyHandler>,
 }
 
 impl Default for Compositor {
@@ -686,6 +712,7 @@ impl Compositor {
             pointer: None,
             icons: Vec::new(),
             shell_actions: Vec::new(),
+            keyboard_shortcut_handler: None,
         }
     }
 
@@ -722,6 +749,17 @@ impl Compositor {
         self
     }
 
+    /// Handles fresh key presses before client delivery, even with no focused window.
+    /// The host suppresses repeats/releases for consumed keys and disables this handler
+    /// while a session lock is active. Keep the callback short and nonblocking.
+    pub fn keyboard_shortcut_handler(
+        mut self,
+        handler: impl FnMut(DesktopKeyEvent) -> DesktopKeyAction + 'static,
+    ) -> Self {
+        self.keyboard_shortcut_handler = Some(Box::new(handler));
+        self
+    }
+
     /// Completes the compositor with its full-output visual rendered behind client windows.
     pub fn background<C: Component>(self, background: C) -> ReadyCompositor {
         ReadyCompositor {
@@ -730,6 +768,7 @@ impl Compositor {
             pointer: self.pointer,
             icons: self.icons,
             shell_actions: self.shell_actions,
+            keyboard_shortcut_handler: self.keyboard_shortcut_handler,
         }
     }
 
@@ -752,6 +791,10 @@ impl fmt::Debug for Compositor {
             .field("has_pointer", &self.pointer.is_some())
             .field("icons", &self.icons.len())
             .field("shell_actions", &self.shell_actions.len())
+            .field(
+                "has_keyboard_shortcut_handler",
+                &self.keyboard_shortcut_handler.is_some(),
+            )
             .finish()
     }
 }
@@ -763,6 +806,7 @@ pub struct ReadyCompositor {
     pointer: Option<CompositorVisual>,
     icons: Vec<CompositorVisual>,
     shell_actions: Vec<ShellActionHandler>,
+    keyboard_shortcut_handler: Option<DesktopKeyHandler>,
 }
 
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
@@ -772,6 +816,7 @@ type CompositorRuntimeParts = (
     Option<CompositionDriver>,
     Vec<(String, CompositionDriver)>,
     Vec<ShellActionHandler>,
+    Option<DesktopKeyHandler>,
 );
 
 impl ReadyCompositor {
@@ -829,6 +874,7 @@ impl ReadyCompositor {
                 .map(|visual| (visual.name, visual.content))
                 .collect(),
             self.shell_actions,
+            self.keyboard_shortcut_handler,
         )
     }
 }
@@ -842,6 +888,10 @@ impl fmt::Debug for ReadyCompositor {
             .field("has_pointer", &self.pointer.is_some())
             .field("icons", &self.icons.len())
             .field("shell_actions", &self.shell_actions.len())
+            .field(
+                "has_keyboard_shortcut_handler",
+                &self.keyboard_shortcut_handler.is_some(),
+            )
             .finish()
     }
 }
