@@ -47,8 +47,78 @@ impl ShortcutKeys {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::application_host::{KeyBindings, KeyChord, ShortcutKey};
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[test]
+    fn named_bindings_invoke_once_and_preserve_capture_and_lock_isolation() {
+        thread_local! {
+            static CALLS: Cell<usize> = const { Cell::new(0) };
+        }
+        fn launcher() {
+            CALLS.with(|calls| calls.set(calls.get() + 1));
+        }
+        fn terminal() {
+            CALLS.with(|calls| calls.set(calls.get() + 10));
+        }
+        CALLS.with(|calls| calls.set(0));
+        let bindings = KeyBindings::new()
+            .bind(KeyChord::new(ShortcutKey::Space).super_key(), launcher)
+            .bind(KeyChord::new(ShortcutKey::Enter).super_key(), terminal);
+        let mut handler = move |event| bindings.handle(event);
+        let mut keys = ShortcutKeys::default();
+        let event = DesktopKeyEvent {
+            keycode: 57,
+            keysym: 0x20,
+            logo: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            keys.route(event, true, false, Some(&mut handler)),
+            DesktopKeyAction::Consume
+        );
+        assert_eq!(
+            keys.route(event, true, false, Some(&mut handler)),
+            DesktopKeyAction::Consume
+        );
+        // A modifier change and session lock must not leak the captured release.
+        assert_eq!(
+            keys.route(
+                DesktopKeyEvent {
+                    logo: false,
+                    ..event
+                },
+                false,
+                true,
+                Some(&mut handler)
+            ),
+            DesktopKeyAction::Consume
+        );
+        assert_eq!(
+            keys.route(event, true, true, Some(&mut handler)),
+            DesktopKeyAction::Forward
+        );
+        assert_eq!(
+            keys.route(event, false, true, Some(&mut handler)),
+            DesktopKeyAction::Forward
+        );
+        CALLS.with(|calls| assert_eq!(calls.get(), 1));
+        assert_eq!(
+            keys.route(
+                DesktopKeyEvent {
+                    keycode: 28,
+                    keysym: 0xff0d,
+                    ..event
+                },
+                true,
+                false,
+                Some(&mut handler)
+            ),
+            DesktopKeyAction::Consume
+        );
+        CALLS.with(|calls| assert_eq!(calls.get(), 11));
+    }
 
     #[test]
     fn consumed_press_repeat_and_release_stay_out_of_clients() {

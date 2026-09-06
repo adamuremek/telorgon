@@ -190,7 +190,36 @@ produces a fresh client enter instead of leaving a compositor cursor installed u
 client focus. The window-frame regression walks inward in subpixel steps at every corner (with
 and without a title bar where content is adjacent) and also checks the straight-edge transitions.
 
-Applications may register `Compositor::keyboard_shortcut_handler` for global desktop shortcuts.
+Applications can declare global desktop shortcuts with named functions:
+
+```rust
+use telorgon::app::{Compositor, KeyBindings, KeyChord, ShortcutKey};
+
+fn open_launcher() { /* Request the application's launcher. */ }
+fn open_terminal() { /* Request the application's terminal. */ }
+
+let shortcuts = KeyBindings::new()
+    .bind(KeyChord::new(ShortcutKey::Space).super_key(), open_launcher)
+    .bind(KeyChord::new(ShortcutKey::Enter).super_key(), open_terminal);
+let compositor = Compositor::new().keybindings(shortcuts);
+```
+
+`KeyBindings` stores plain `fn()` pointers; it requires no action enum or handler trait.
+`KeyChord` supports `.control()`, `.shift()`, `.alt()`, and `.super_key()` and requires exact
+modifier and symbol matching. `ShortcutKey::ascii('q')` represents a printable ASCII symbol;
+shifted uppercase Q requires `ShortcutKey::ascii('Q')`. Other symbols are available through
+`ShortcutKey::from_keysym`. Symbol constants follow the
+[XKB keysym definitions](https://github.com/xkbcommon/libxkbcommon/blob/master/include/xkbcommon/xkbcommon-keysyms.h).
+These are layout-resolved symbols, so this adapter does not reinterpret them as physical chords
+for the separate neutral `ShortcutMatcher`. Duplicate chords (including symbol aliases) panic
+during binding construction. Matched functions run once per fresh press and consume the key
+through release; unmatched keys forward. Functions must remain short and nonblocking.
+The adapter reuses the existing host capture and session-lock routing. Calling `.keybindings()`
+or `.keyboard_shortcut_handler()` replaces the previous shortcut configuration: the last call wins.
+These function bindings have no captured application state or return disposition; applications
+needing custom forwarding or quit behavior can use the raw handler below.
+
+Applications may also register `Compositor::keyboard_shortcut_handler` for global desktop shortcuts.
 The callback receives a fresh `DesktopKeyEvent` before client delivery, with its evdev code,
 XKB symbol, and effective Control/Shift/Alt/Logo modifiers. `Forward` preserves normal delivery;
 `Consume` reserves that key's press, repeats, and release; `Quit` returns normally from the host.

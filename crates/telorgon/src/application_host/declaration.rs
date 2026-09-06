@@ -12,7 +12,9 @@ use crate::core::{ColorRgba8, SizeI};
 use crate::runtime::CompositionDriver;
 use crate::window_chrome::{ShellActionId, WindowChromeModel, WindowContentStyle};
 
-use crate::application_host::{AppError, AppResult, WindowDecorationMode, WindowOptions};
+use crate::application_host::{
+    AppError, AppResult, KeyBindings, WindowDecorationMode, WindowOptions,
+};
 
 /// Renderer policy selected by an application declaration.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -749,7 +751,17 @@ impl Compositor {
         self
     }
 
+    /// Installs named-function shortcuts. Replaces any previous bindings or raw key handler.
+    ///
+    /// Matched keys are consumed through release; unmatched keys forward normally.
+    /// See [`KeyBindings`] for a complete example.
+    pub fn keybindings(mut self, bindings: KeyBindings) -> Self {
+        self.keyboard_shortcut_handler = Some(Box::new(move |event| bindings.handle(event)));
+        self
+    }
+
     /// Handles fresh key presses before client delivery, even with no focused window.
+    /// Replaces any previous bindings or raw key handler.
     /// The host suppresses repeats/releases for consumed keys and disables this handler
     /// while a session lock is active. Keep the callback short and nonblocking.
     pub fn keyboard_shortcut_handler(
@@ -1319,6 +1331,37 @@ mod tests {
         let debug = format!("{application:?}");
         assert!(debug.contains("has_content: true"));
         assert!(debug.contains("renderer: Auto"));
+    }
+
+    #[test]
+    fn keybindings_reach_ready_compositor_and_last_registration_wins() {
+        use crate::application_host::{KeyChord, ShortcutKey};
+        fn noop() {}
+        let bindings = KeyBindings::new().bind(KeyChord::new(ShortcutKey::Space), noop);
+        let event = DesktopKeyEvent {
+            keysym: 0x20,
+            ..Default::default()
+        };
+        let mut ready = Compositor::new()
+            .keyboard_shortcut_handler(|_| DesktopKeyAction::Quit)
+            .keybindings(bindings.clone())
+            .background(Root);
+        assert_eq!(
+            ready.keyboard_shortcut_handler.as_mut().unwrap()(event),
+            DesktopKeyAction::Consume
+        );
+        let mut raw = Compositor::new()
+            .keybindings(bindings)
+            .keyboard_shortcut_handler(|_| DesktopKeyAction::Quit);
+        assert_eq!(
+            raw.keyboard_shortcut_handler.as_mut().unwrap()(event),
+            DesktopKeyAction::Quit
+        );
+        let mut empty = raw.keybindings(KeyBindings::new());
+        assert_eq!(
+            empty.keyboard_shortcut_handler.as_mut().unwrap()(event),
+            DesktopKeyAction::Forward
+        );
     }
 
     #[test]

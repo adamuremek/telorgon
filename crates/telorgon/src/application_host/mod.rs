@@ -26,6 +26,7 @@ mod error;
 mod headless;
 mod input;
 mod interaction;
+mod keybindings;
 #[cfg(any(
     feature = "application-software",
     all(feature = "application-vulkan-windows", target_os = "windows")
@@ -72,6 +73,7 @@ pub use error::{AppError, AppResult};
 pub use headless::HeadlessRuntime;
 pub use input::{LISTEN_ACTION, LISTEN_FOCUS, LISTEN_KEY, LISTEN_POINTER, PlatformInput};
 pub use interaction::{InteractionDiagnostics, InteractionRouter};
+pub use keybindings::{KeyBindings, KeyChord, ShortcutKey};
 pub use runtime::{
     AppRuntime, AppRuntimeCore, ComposedAppRuntime, InputFlushOutcome, PreparedFrame,
 };

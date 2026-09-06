@@ -125,6 +125,15 @@ production-qualified.
 
 ## Current classification
 
+The Linux compositor supports `Compositor::keybindings(KeyBindings)` with named `fn()` handlers,
+exact layout-resolved `KeyChord` matching, and `ShortcutKey` named/ASCII/raw-XKB symbols. The
+adapter uses existing fresh-press, repeat/release capture, and session-lock routing; duplicate
+chords panic during declaration, and the last builder shortcut configuration replaces the prior
+one. This is separate from physical application command scopes. Portable tests cover dispatch,
+exact matching, duplicate aliases, builder installation, capture, and locked-session isolation;
+live seat/display qualification remains manual. See the usage example in
+`WAYLAND_COMPOSITOR_ARCHITECTURE.md`.
+
 | Area | Status | Current evidence and boundary |
 | --- | --- | --- |
 | Platform conformance host | Modeled, limited | `telorgon-platform-conformance` now provides an explicit manual monotonic clock, hard-bounded ownership-returning capture, a bounded multi-view canonical lifecycle driver, a deterministic stamped event host, and object-safe fake haptics/restoration service adapters. Replaying the same two-view observations and event inputs produces identical ordered updates and events. Capture saturation rejects before view mutation or stamp advancement; fake restoration keeps admission distinct from explicitly observed current truth and retains consumed opaque tokens by request identity until terminal completion. The crate has no Winit, native API, renderer, ambient clock, background thread, executor, timer, event loop, automatic dispatch, or fallback service. Broader fake services, input/text/accessibility/transfer conformance modules, runtime/scene/semantics replay comparison, scheduling assertions, and every native qualification remain planned |
