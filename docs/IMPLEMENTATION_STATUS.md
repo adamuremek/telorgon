@@ -126,7 +126,10 @@ production-qualified.
 ## Current classification
 
 The Linux compositor supports `Compositor::keybindings(KeyBindings)` with named `fn()` handlers,
-exact layout-resolved `KeyChord` matching, and `ShortcutKey` named/ASCII/raw-XKB symbols. The
+exact modifier matching, and layout-resolved `ShortcutKey` named/ASCII/raw-XKB symbols. Named
+`A`–`Z` letters match either ASCII case; `.shift()` alone controls the required Shift modifier.
+`Digit0`–`Digit9`, `F1`–`F12`, existing named keys, and ASCII/raw-XKB constructors match exact
+symbols. Binding validation rejects overlapping named/exact letter chords in either order. The
 adapter uses existing fresh-press, repeat/release capture, and session-lock routing; duplicate
 chords panic during declaration, and the last builder shortcut configuration replaces the prior
 one. This is separate from physical application command scopes. Portable tests cover dispatch,

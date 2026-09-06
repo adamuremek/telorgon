@@ -200,18 +200,23 @@ fn open_terminal() { /* Request the application's terminal. */ }
 
 let shortcuts = KeyBindings::new()
     .bind(KeyChord::new(ShortcutKey::Space).super_key(), open_launcher)
-    .bind(KeyChord::new(ShortcutKey::Enter).super_key(), open_terminal);
+    .bind(KeyChord::new(ShortcutKey::T).control(), open_terminal);
 let compositor = Compositor::new().keybindings(shortcuts);
 ```
 
 `KeyBindings` stores plain `fn()` pointers; it requires no action enum or handler trait.
 `KeyChord` supports `.control()`, `.shift()`, `.alt()`, and `.super_key()` and requires exact
-modifier and symbol matching. `ShortcutKey::ascii('q')` represents a printable ASCII symbol;
-shifted uppercase Q requires `ShortcutKey::ascii('Q')`. Other symbols are available through
-`ShortcutKey::from_keysym`. Symbol constants follow the
+modifier matching. `ShortcutKey::A`–`Z` match either ASCII case, including when Caps Lock changes
+the resolved case. For example, `KeyChord::new(ShortcutKey::Q).control().shift()` binds Ctrl+Shift+Q;
+without `.shift()` it binds Ctrl+Q. `Digit0`–`Digit9`, `F1`–`F12`, and the existing `Space`, `Enter`,
+`Escape`, `Tab`, and `Backspace` constants match exact symbols. Digits refer to layout-resolved
+digits, not physical number-row positions; shifted punctuation needs its own symbol binding.
+`ShortcutKey::ascii('q')` and `ShortcutKey::from_keysym` retain exact, case-sensitive matching.
+Symbol constants follow the
 [XKB keysym definitions](https://github.com/xkbcommon/libxkbcommon/blob/master/include/xkbcommon/xkbcommon-keysyms.h).
 These are layout-resolved symbols, so this adapter does not reinterpret them as physical chords
-for the separate neutral `ShortcutMatcher`. Duplicate chords (including symbol aliases) panic
+for the separate neutral `ShortcutMatcher`. Overlapping chords (including named letters paired
+with exact upper/lowercase symbols under the same modifiers) panic
 during binding construction. Matched functions run once per fresh press and consume the key
 through release; unmatched keys forward. Functions must remain short and nonblocking.
 The adapter reuses the existing host capture and session-lock routing. Calling `.keybindings()`
