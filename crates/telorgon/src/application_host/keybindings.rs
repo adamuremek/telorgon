@@ -180,6 +180,7 @@ impl KeyChord {
 /// Matched keys run once per fresh press and consume that key's press, repeats, and release.
 /// Unmatched keys forward normally. The desktop host disables shortcuts during session lock.
 /// Functions run on the host thread and must remain short and nonblocking.
+/// Bind [`crate::request_exit`] directly, or call it from a handler, to quit cleanly.
 ///
 /// ```
 /// use telorgon::app::{Compositor, KeyBindings, KeyChord, ShortcutKey};

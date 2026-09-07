@@ -238,6 +238,13 @@ when lifecycle permits, and blocks on the calling thread until the application e
 start a hidden server or unmanaged background process. Multi-window APIs create additional declared
 views through the same managed host.
 
+`telorgon::request_exit()` requests clean shutdown of all currently running managed GUI and Linux
+compositor hosts in the process. It is thread-safe and wakes idle hosts through their existing
+event-loop wake mechanisms. Calls return immediately; they do not interrupt callbacks or terminate
+the process. Hosts return through their normal shutdown paths. Repeated requests are coalesced,
+calls without a running host do nothing, and requests do not carry over to subsequent runs.
+Embedded and headless runtimes remain under their caller's lifecycle control.
+
 The builder exposes policy and preferences, never backend-native objects. An advanced managed API
 may accept explicitly constructed service/presenter factories, but the normal API must not require
 knowledge of Vulkan swapchains or Winit event types.

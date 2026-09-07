@@ -22,6 +22,7 @@ mod desktop_wayland_state_tests;
 #[path = "desktop_wayland/transparency_tests.rs"]
 mod desktop_wayland_transparency_tests;
 mod error;
+mod exit;
 #[cfg(feature = "application-software")]
 mod headless;
 mod input;
@@ -69,6 +70,7 @@ pub use declaration::{
 };
 pub use delta_queue::SceneDeltaQueue;
 pub use error::{AppError, AppResult};
+pub use exit::request_exit;
 #[cfg(feature = "application-software")]
 pub use headless::HeadlessRuntime;
 pub use input::{LISTEN_ACTION, LISTEN_FOCUS, LISTEN_KEY, LISTEN_POINTER, PlatformInput};

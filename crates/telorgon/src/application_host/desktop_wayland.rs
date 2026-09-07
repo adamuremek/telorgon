@@ -253,6 +253,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     // source with it so input, seat changes, DRM flips, and GPU completions wake the same owner
     // thread without a fixed Wayland-only sleep.
     let runtime_wake = EventNotifier::new("desktop runtime wake")?;
+    let exit_request = super::exit::HostExit::register({
+        let wake = runtime_wake.clone();
+        move || wake.notify()
+    });
     let shm_copy_worker = ShmCopyWorker::new(runtime_wake.clone())?;
     background.set_wake({
         let wake = runtime_wake.clone();
@@ -438,6 +442,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut shortcut_keys = shortcuts::ShortcutKeys::default();
 
     loop {
+        if exit_request.requested() {
+            return Ok(());
+        }
         let mut presentation_completed = false;
         let mut presented_surface_revisions = Vec::new();
         let mut pointer_motion_seen = false;
@@ -492,6 +499,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             None
         };
         display.dispatch_and_flush(wait).map_err(app_error)?;
+        if exit_request.requested() {
+            return Ok(());
+        }
 
         if seat_ready.swap(false, Ordering::AcqRel) {
             seat.dispatch(0).map_err(app_error)?;
@@ -956,7 +966,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             session_locked,
                             keyboard_shortcut_handler.as_deref_mut(),
                         );
-                        if action == crate::application_host::DesktopKeyAction::Quit {
+                        if action == crate::application_host::DesktopKeyAction::Quit
+                            || exit_request.requested()
+                        {
                             return Ok(());
                         }
                         let serial = display.next_serial();

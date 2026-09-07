@@ -56,6 +56,7 @@ pub(crate) mod test_alloc {
 pub mod accessibility;
 pub mod application_components;
 pub mod application_host;
+pub use application_host::request_exit;
 pub mod application_primitives;
 pub mod assets;
 #[cfg(all(feature = "application-vulkan-windows", target_os = "windows"))]

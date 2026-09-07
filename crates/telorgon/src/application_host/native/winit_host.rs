@@ -169,6 +169,10 @@ where
     S: NativeRuntimeSource + 'static,
     P: NativePresentation + 'static,
 {
+    let proxy = event_loop.event_loop.create_proxy();
+    let _exit_request = crate::application_host::exit::HostExit::register(move || {
+        let _ = proxy.send_event(HostEvent::ExitRequested);
+    });
     #[cfg(feature = "profiler")]
     let _profile_view = crate::profiler::enter_view(Some(crate::profiler::ProfileViewId::PRIMARY));
     #[cfg(feature = "profiler")]
@@ -1713,6 +1717,7 @@ where
             return;
         }
         match event {
+            HostEvent::ExitRequested => event_loop.exit(),
             HostEvent::RuntimeWake => {
                 self.host_wake_pending = false;
                 self.poll_presentation(event_loop);

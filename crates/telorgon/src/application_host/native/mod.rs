@@ -5,6 +5,7 @@ use std::time::Instant;
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum HostEvent {
+    ExitRequested,
     RuntimeWake,
     #[cfg(all(feature = "application-vulkan-windows", target_os = "windows"))]
     PresentationWake,

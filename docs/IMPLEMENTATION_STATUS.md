@@ -125,6 +125,13 @@ production-qualified.
 
 ## Current classification
 
+`telorgon::request_exit()` now requests clean shutdown of running managed GUI and Linux compositor
+hosts, including from a plain shortcut function or another thread. GUI hosts receive a Winit user
+event; compositor hosts reuse their runtime notifier and check the request around dispatch and
+after shortcut handlers. Requests are coalesced and scoped to active runs; embedded/headless hosts
+are unaffected. Registry tests cover cross-thread wakes, multiple hosts, repeat requests, and
+run isolation. Live GUI/compositor shutdown qualification remains manual.
+
 The Linux compositor supports `Compositor::keybindings(KeyBindings)` with named `fn()` handlers,
 exact modifier matching, and layout-resolved `ShortcutKey` named/ASCII/raw-XKB symbols. Named
 `A`–`Z` letters match either ASCII case; `.shift()` alone controls the required Shift modifier.

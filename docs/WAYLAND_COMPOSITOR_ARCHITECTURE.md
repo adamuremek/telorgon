@@ -199,6 +199,7 @@ fn open_launcher() { /* Request the application's launcher. */ }
 fn open_terminal() { /* Request the application's terminal. */ }
 
 let shortcuts = KeyBindings::new()
+    .bind(KeyChord::new(ShortcutKey::Q).control().shift(), telorgon::request_exit)
     .bind(KeyChord::new(ShortcutKey::Space).super_key(), open_launcher)
     .bind(KeyChord::new(ShortcutKey::T).control(), open_terminal);
 let compositor = Compositor::new().keybindings(shortcuts);
@@ -221,8 +222,11 @@ during binding construction. Matched functions run once per fresh press and cons
 through release; unmatched keys forward. Functions must remain short and nonblocking.
 The adapter reuses the existing host capture and session-lock routing. Calling `.keybindings()`
 or `.keyboard_shortcut_handler()` replaces the previous shortcut configuration: the last call wins.
-These function bindings have no captured application state or return disposition; applications
-needing custom forwarding or quit behavior can use the raw handler below.
+These function bindings have no captured application state or return disposition. To quit cleanly,
+bind `telorgon::request_exit` directly or call it from a named handler. It wakes running managed GUI
+and compositor hosts and requests normal event-loop shutdown after the callback returns. It is
+thread-safe, coalesces repeated requests, and does nothing when no host is running. For custom key
+forwarding behavior, use the raw handler below.
 
 Applications may also register `Compositor::keyboard_shortcut_handler` for global desktop shortcuts.
 The callback receives a fresh `DesktopKeyEvent` before client delivery, with its evdev code,
