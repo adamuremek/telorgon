@@ -245,6 +245,15 @@ the process. Hosts return through their normal shutdown paths. Repeated requests
 calls without a running host do nothing, and requests do not carry over to subsequent runs.
 Embedded and headless runtimes remain under their caller's lifecycle control.
 
+Managed GUI and DE entrypoints initialize one process-wide session launch service before callbacks.
+Child environments are explicit snapshots; the host never needs to mutate global display exports.
+DE exit quiesces launching and requests normal client close while continuing event dispatch for save
+prompts. A client-close timeout cancels logout; after windows close, supervised children receive a
+bounded graceful termination request without automatic force-kill. SIGTERM/SIGINT use the same DE
+exit request. Recovery offers saved launch specifications, not arbitrary application memory. See
+[Managed sessions and process launching](SESSION_AND_PROCESS_LAUNCHING.md) for the current API,
+platform restrictions, persistence contract, and qualification gaps.
+
 The builder exposes policy and preferences, never backend-native objects. An advanced managed API
 may accept explicitly constructed service/presenter factories, but the normal API must not require
 knowledge of Vulkan swapchains or Winit event types.

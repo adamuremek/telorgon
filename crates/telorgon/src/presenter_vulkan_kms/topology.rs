@@ -361,8 +361,16 @@ mod tests {
 
     #[test]
     fn empty_native_arrays_accept_null() {
-        assert!(checked_slice::<u32>(std::ptr::null(), 0).unwrap().is_empty());
-        assert!(checked_slice::<u64>(std::ptr::null(), 0).unwrap().is_empty());
+        assert!(
+            checked_slice::<u32>(std::ptr::null(), 0)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            checked_slice::<u64>(std::ptr::null(), 0)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

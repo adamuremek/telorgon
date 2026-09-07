@@ -21,8 +21,11 @@ strip = "none"
 
 [workspace.dependencies]
 async-process = "2.5"
+blocking = "1.6"
+zbus = { version = "5.19", default-features = false, features = ["async-io", "blocking-api"] }
 futures-lite = "2.6"
 libc = "0.2"
+signal-hook-registry = "1.4"
 telorgon-macros = { version = "=0.1.25", path = "crates/telorgon-macros" }
 ash = { version = "0.38", default-features = false, features = ["std", "loaded"] }
 ash-window = "0.13"

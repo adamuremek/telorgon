@@ -72,13 +72,17 @@ impl Default for LinuxDesktopConfig {
 
 impl LinuxDesktopConfig {
     fn validate(&self) -> AppResult<()> {
-        self.session.validate().map_err(|e| AppError::new(e.to_string()))?;
-        if self.drm_device.as_ref().is_some_and(|path| !path.is_absolute())
+        self.session
+            .validate()
+            .map_err(|e| AppError::new(e.to_string()))?;
+        if self
+            .drm_device
+            .as_ref()
+            .is_some_and(|path| !path.is_absolute())
             || self.seat_name.trim().is_empty()
-            || self
-                .socket_name
-                .as_ref()
-                .is_some_and(|name| name.trim().is_empty() || name.contains(['/', '\\']) || name == "." || name == "..")
+            || self.socket_name.as_ref().is_some_and(|name| {
+                name.trim().is_empty() || name.contains(['/', '\\']) || name == "." || name == ".."
+            })
             || self.output_scale <= 0
             || self.window_border < 0
             || self.titlebar_height < 0
@@ -236,12 +240,27 @@ impl ReadyGuiApplication {
             validate_application_name(&self.name)?;
             let config = self.session.clone().unwrap_or_else(|| {
                 // Stable across compiler versions and processes; display names need not be valid IDs.
-                let hash = self.name.bytes().fold(0xcbf29ce484222325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+                let hash = self.name.bytes().fold(0xcbf29ce484222325u64, |hash, byte| {
+                    (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+                });
                 crate::session::SessionConfig::new(format!("gui-{hash:016x}"))
             });
-            let env = crate::session::Environment::gui().map_err(|e| AppError::new(e.to_string()))?;
-            let _session = crate::session::SessionOwner::start(env, config).map_err(|e| AppError::new(e.to_string()))?;
-            return crate::application_host::native::run_gui(self);
+            let env =
+                crate::session::Environment::gui().map_err(|e| AppError::new(e.to_string()))?;
+            if config.publish_user_service_environment {
+                return Err(AppError::new(
+                    "GUI applications cannot publish the shared desktop environment; configure publication on the DE entry point",
+                ));
+            }
+            let session = crate::session::SessionOwner::start_gui(env, config)
+                .map_err(|e| AppError::new(e.to_string()))?;
+            let result = crate::application_host::native::run_gui(self);
+            if result.is_ok() {
+                session.close();
+            } else {
+                session.abort();
+            }
+            return result;
         }
 
         #[cfg(not(any(

@@ -55,6 +55,7 @@ profiler = [
 
 [dependencies]
 async-process.workspace = true
+blocking.workspace = true
 futures-lite.workspace = true
 libc.workspace = true
 ash = { workspace = true, optional = true }
@@ -85,6 +86,10 @@ winit = { workspace = true, optional = true }
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, optional = true }
 windows-sys = { workspace = true, optional = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true
+signal-hook-registry.workspace = true
 
 [dev-dependencies]
 tower.workspace = true

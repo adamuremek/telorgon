@@ -62,6 +62,7 @@ All framework implementation source is under `crates/telorgon/src`:
 | `compositor_render` | `src/compositor_render` | SHM and DMA-BUF compositor-to-renderer bridge |
 | `profiler` | `src/profiler` | Compile-optional bounded event production and capture ownership |
 | `profiler_server` | `src/profiler_server` | Managed-only loopback profiler service and embedded viewer assets |
+| `session` | `src/session` | Child environments, managed command/application launches, supervision, and recovery journals |
 | `application_host` | `src/application_host` | Managed application preparation, orchestration, and backend assembly |
 | `assets` | `src/assets.rs`, `src/assets` | Typed embedded catalogs, bounded raster/SVG media, icon profiles, and pointer themes |
 | `window_chrome` | `src/window_chrome.rs` | Per-window metadata, semantic frame roles/actions, and layout-derived hit regions |

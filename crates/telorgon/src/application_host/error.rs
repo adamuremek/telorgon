@@ -21,6 +21,12 @@ impl fmt::Display for AppError {
 
 impl std::error::Error for AppError {}
 
+impl From<crate::session::Error> for AppError {
+    fn from(error: crate::session::Error) -> Self {
+        Self::new(error.to_string())
+    }
+}
+
 impl From<crate::runtime::RuntimeError> for AppError {
     fn from(error: crate::runtime::RuntimeError) -> Self {
         Self::new(error.to_string())

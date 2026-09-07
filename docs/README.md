@@ -70,6 +70,9 @@ features.
     the implemented composable frame contract, reusable box decoration, typed project media,
     application icons, pointer themes, Wayland invariants, and complete API examples.
 
+24. [Managed sessions and process launching](SESSION_AND_PROCESS_LAUNCHING.md) documents automatic
+    entrypoint setup, the global command/application API, shutdown, recovery, and qualification limits.
+
 ## Document roles
 
 | Role | Documents | Meaning |

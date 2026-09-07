@@ -236,17 +236,27 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             .add_explicit_synchronization(&display)
             .map_err(app_error)?;
     }
-    let socket = display.add_socket_in(&runtime_directory, config.socket_name.as_deref()).map_err(app_error)?;
-    let session = crate::session::SessionOwner::start(
+    let socket = display
+        .add_socket_in(&runtime_directory, config.socket_name.as_deref())
+        .map_err(app_error)?;
+    let mut session = crate::session::SessionOwner::start(
         launch_environment.desktop(&runtime_directory, &socket, &config.session.identity),
         config.session.clone(),
-    ).map_err(app_error)?;
-    eprintln!("telorgon-session: ready on {}", runtime_directory.join(&socket).display());
+    )
+    .map_err(app_error)?;
+    if config.session.publish_user_service_environment {
+        session.publish_services().map_err(app_error)?;
+    }
+    eprintln!(
+        "telorgon-session: ready on {}",
+        runtime_directory.join(&socket).display()
+    );
 
     // Libwayland already owns the compositor's poll loop. Register every external readiness
     // source with it so input, seat changes, DRM flips, and GPU completions wake the same owner
     // thread without a fixed Wayland-only sleep.
     let runtime_wake = EventNotifier::new("desktop runtime wake")?;
+    let termination_signals = event_source::TerminationSignals::new(runtime_wake.clone())?;
     let exit_request = super::exit::HostExit::register({
         let wake = runtime_wake.clone();
         move || wake.notify()
@@ -438,6 +448,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut close_requested = std::collections::BTreeSet::new();
 
     loop {
+        if termination_signals.take_requested() {
+            crate::request_exit();
+        }
         if exit_request.requested() {
             let started = *shutdown_started.get_or_insert_with(|| {
                 session.quiesce();
@@ -449,13 +462,17 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 return Ok(());
             }
             for surface in surfaces {
-                if close_requested.insert(surface) { wayland.close_toplevel(surface).map_err(app_error)?; }
+                if close_requested.insert(surface) {
+                    wayland.close_toplevel(surface).map_err(app_error)?;
+                }
             }
             display.flush_clients();
             if started.elapsed() >= config.session.shutdown_timeout {
                 // Keep the compositor and clients alive when an app refuses to close. Destroying
                 // the display or signalling its process here would discard unsaved-work dialogs.
-                eprintln!("telorgon-session: shutdown cancelled because application windows remain open");
+                eprintln!(
+                    "telorgon-session: shutdown cancelled because application windows remain open"
+                );
                 exit_request.cancel();
                 shutdown_started = None;
                 close_requested.clear();
@@ -516,8 +533,13 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             None
         };
         let wait = if shutdown_started.is_some() {
-            Some(wait.unwrap_or(Duration::from_millis(50)).min(Duration::from_millis(50)))
-        } else { wait };
+            Some(
+                wait.unwrap_or(Duration::from_millis(50))
+                    .min(Duration::from_millis(50)),
+            )
+        } else {
+            wait
+        };
         display.dispatch_and_flush(wait).map_err(app_error)?;
 
         if seat_ready.swap(false, Ordering::AcqRel) {
@@ -2446,23 +2468,47 @@ fn app_error(error: impl std::fmt::Display) -> AppError {
 fn select_drm_device<'seat>(
     seat: &'seat LinuxSeat,
     config: &LinuxDesktopConfig,
-) -> AppResult<(crate::platform_linux::SeatDevice<'seat>, KmsDevice, KmsTopology, std::path::PathBuf)> {
-    let candidates = if let Some(path) = &config.drm_device { vec![path.clone()] } else {
-        let mut paths = std::fs::read_dir("/dev/dri").map_err(app_error)?
-            .filter_map(|entry| entry.ok()).map(|entry| entry.path())
-            .filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
-                name.strip_prefix("card").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
-            })).collect::<Vec<_>>();
+) -> AppResult<(
+    crate::platform_linux::SeatDevice<'seat>,
+    KmsDevice,
+    KmsTopology,
+    std::path::PathBuf,
+)> {
+    let candidates = if let Some(path) = &config.drm_device {
+        vec![path.clone()]
+    } else {
+        let mut paths = std::fs::read_dir("/dev/dri")
+            .map_err(app_error)?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| {
+                        name.strip_prefix("card").is_some_and(|suffix| {
+                            !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit())
+                        })
+                    })
+            })
+            .collect::<Vec<_>>();
         paths.sort();
         paths
     };
     let mut failures = Vec::new();
     for path in candidates {
         let attempt = (|| {
-            let device = seat.open_device(path.to_str().ok_or_else(|| AppError::new("DRM device path is not UTF-8"))?).map_err(app_error)?;
-            let kms = KmsDevice::new(device.try_clone_fd().map_err(app_error)?).map_err(app_error)?;
+            let device = seat
+                .open_device(
+                    path.to_str()
+                        .ok_or_else(|| AppError::new("DRM device path is not UTF-8"))?,
+                )
+                .map_err(app_error)?;
+            let kms =
+                KmsDevice::new(device.try_clone_fd().map_err(app_error)?).map_err(app_error)?;
             let topology = KmsTopology::query(&kms).map_err(app_error)?;
-            if !topology.connectors.iter().any(|connector| connector.status == ConnectorStatus::Connected && !connector.modes.is_empty()) {
+            if !topology.connectors.iter().any(|connector| {
+                connector.status == ConnectorStatus::Connected && !connector.modes.is_empty()
+            }) {
                 return Err(AppError::new("no connected output with a mode"));
             }
             Ok((device, kms, topology))
@@ -2472,7 +2518,10 @@ fn select_drm_device<'seat>(
             Err(error) => failures.push(format!("{}: {error}", path.display())),
         }
     }
-    Err(AppError::new(format!("no usable seat-accessible KMS device; check the local VT, graphics driver and connected monitor. {}", failures.join("; "))))
+    Err(AppError::new(format!(
+        "no usable seat-accessible KMS device; check the local VT, graphics driver and connected monitor. {}",
+        failures.join("; ")
+    )))
 }
 
 #[cfg(test)]
@@ -2560,7 +2609,7 @@ mod tests {
     }
 
     #[test]
-    fn vulkan_staging_budget_applies_the_minimum_to_every_slot() {
+    fn vulkan_staging_budget_preserves_headroom_for_small_outputs() {
         let slots = 3;
         let budget = vulkan_staging_budget_bytes(
             SizeI {
@@ -2571,7 +2620,11 @@ mod tests {
         )
         .expect("small scanout staging budget should fit");
 
-        assert_eq!(budget, VULKAN_STAGING_MIN_BYTES_PER_SLOT * slots as u64);
+        assert_eq!(
+            budget,
+            (640 * 480 * 4 + VULKAN_STAGING_HEADROOM_BYTES_PER_SLOT) * slots as u64
+        );
+        assert!(budget >= VULKAN_STAGING_MIN_BYTES_PER_SLOT * slots as u64);
     }
 
     #[test]
@@ -2626,7 +2679,7 @@ mod tests {
                 x: 10,
                 y: 20,
                 width: 45,
-                height: 35,
+                height: 40,
             })
         );
     }

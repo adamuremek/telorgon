@@ -1,5 +1,44 @@
 use super::*;
 
+/// Signal handlers only set an atomic and write to an eventfd. request_exit() itself acquires
+/// locks, so it must run on the owner thread after the event loop wakes.
+pub(super) struct TerminationSignals {
+    requested: Arc<AtomicBool>,
+    registrations: Vec<signal_hook_registry::SigId>,
+}
+impl TerminationSignals {
+    pub(super) fn new(notifier: EventNotifier) -> AppResult<Self> {
+        let mut signals = Self {
+            requested: Arc::new(AtomicBool::new(false)),
+            registrations: Vec::new(),
+        };
+        for signal in [libc::SIGTERM, libc::SIGINT] {
+            let requested = signals.requested.clone();
+            let notifier = notifier.clone();
+            // SAFETY: AtomicBool::store and write(2) are the only operations in the handler.
+            let registration = unsafe {
+                signal_hook_registry::register(signal, move || {
+                    requested.store(true, Ordering::Release);
+                    notifier.notify();
+                })
+            }
+            .map_err(app_error)?;
+            signals.registrations.push(registration);
+        }
+        Ok(signals)
+    }
+    pub(super) fn take_requested(&self) -> bool {
+        self.requested.swap(false, Ordering::AcqRel)
+    }
+}
+impl Drop for TerminationSignals {
+    fn drop(&mut self) {
+        for registration in self.registrations.drain(..) {
+            signal_hook_registry::unregister(registration);
+        }
+    }
+}
+
 pub(super) struct InputReadyState {
     pub(super) ready: AtomicBool,
     #[cfg(feature = "profiler")]

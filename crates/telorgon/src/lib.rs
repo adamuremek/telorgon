@@ -181,13 +181,13 @@ mod authoring {
 /// A single `use telorgon::app::*` imports the component macro and traits, composition builders,
 /// common style/geometry values, the two `Application` constructors, and Telorgon's `Result` alias.
 pub mod app {
-    pub use crate::session;
     pub use super::authoring::*;
     pub use crate::application_host::{
         Application, Compositor, DesktopKeyAction, DesktopKeyEvent, KeyBindings, KeyChord,
         LinuxDesktopConfig, Renderer, ShellWidget, ShellWidgetAnchor, ShellWidgetExtent,
         ShortcutKey, Window, WindowDecorationMode, WindowFrameFactory, WindowFrameTemplate,
     };
+    pub use crate::session;
 }
 #[cfg(feature = "application-software")]
 pub use application_host::HeadlessRuntime;

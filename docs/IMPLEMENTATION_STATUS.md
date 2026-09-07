@@ -1,5 +1,13 @@
 # Telorgon Implementation Status
 
+> Managed session launching: both managed entrypoints initialize the global session API. Literal
+> command execution, bounded pipe capture/input, child supervision, crash retries, and persistent
+> recovery operate in real subprocess unit fixtures. Automatic DE socket selection has native
+> socket coverage. TTY/KMS logout, real-client save prompts, multi-GPU selection, and optional
+> shared D-Bus/systemd integration are implemented but await manual qualification. See
+> [Managed sessions and process launching](SESSION_AND_PROCESS_LAUNCHING.md) for ownership and
+> recovery limits; these additions are not production-qualified.
+
 ## Status vocabulary
 
 This document records what the repository currently demonstrates. It is deliberately separate from
