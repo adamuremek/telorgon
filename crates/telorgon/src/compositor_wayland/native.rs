@@ -975,6 +975,11 @@ impl<'display> NativeCompositor<'display> {
             .post_event(resource, "xdg_toplevel", "close", &mut [])
     }
 
+    /// Live xdg toplevels, including windows showing an unsaved-document prompt during logout.
+    pub fn toplevel_surfaces(&self) -> Vec<WaylandSurfaceId> {
+        self.state.toplevels.keys().copied().collect()
+    }
+
     pub fn keyboard_keymap(
         &mut self,
         seat: u32,

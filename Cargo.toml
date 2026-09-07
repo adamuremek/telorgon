@@ -20,6 +20,9 @@ incremental = true
 strip = "none"
 
 [workspace.dependencies]
+async-process = "2.5"
+futures-lite = "2.6"
+libc = "0.2"
 telorgon-macros = { version = "=0.1.25", path = "crates/telorgon-macros" }
 ash = { version = "0.38", default-features = false, features = ["std", "loaded"] }
 ash-window = "0.13"

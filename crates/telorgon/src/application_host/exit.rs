@@ -60,6 +60,9 @@ pub(crate) struct HostExit {
 }
 
 impl HostExit {
+    pub(crate) fn cancel(&self) {
+        self.requested.store(false, Ordering::Release);
+    }
     pub(crate) fn register(wake: impl Fn() + Send + Sync + 'static) -> Arc<Self> {
         HOSTS.register(wake)
     }

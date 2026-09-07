@@ -30,9 +30,11 @@ pub enum Renderer {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinuxDesktopConfig {
-    pub drm_device: PathBuf,
+    /// None selects a seat-accessible KMS device with a connected output.
+    pub drm_device: Option<PathBuf>,
     pub seat_name: String,
     pub socket_name: Option<String>,
+    pub session: crate::session::SessionConfig,
     pub output_scale: i32,
     pub window_border: i32,
     pub titlebar_height: i32,
@@ -47,9 +49,10 @@ pub struct LinuxDesktopConfig {
 impl Default for LinuxDesktopConfig {
     fn default() -> Self {
         Self {
-            drm_device: PathBuf::from("/dev/dri/card0"),
+            drm_device: None,
             seat_name: "seat0".to_owned(),
             socket_name: None,
+            session: crate::session::SessionConfig::default(),
             output_scale: 1,
             window_border: 4,
             titlebar_height: 32,
@@ -69,12 +72,13 @@ impl Default for LinuxDesktopConfig {
 
 impl LinuxDesktopConfig {
     fn validate(&self) -> AppResult<()> {
-        if !self.drm_device.is_absolute()
+        self.session.validate().map_err(|e| AppError::new(e.to_string()))?;
+        if self.drm_device.as_ref().is_some_and(|path| !path.is_absolute())
             || self.seat_name.trim().is_empty()
             || self
                 .socket_name
                 .as_ref()
-                .is_some_and(|name| name.trim().is_empty())
+                .is_some_and(|name| name.trim().is_empty() || name.contains(['/', '\\']) || name == "." || name == "..")
             || self.output_scale <= 0
             || self.window_border < 0
             || self.titlebar_height < 0
@@ -101,6 +105,7 @@ impl Application {
             renderer: Renderer::Auto,
             assets: AssetBundle::EMPTY,
             pointer: PointerConfiguration::default(),
+            session: None,
         }
     }
 
@@ -129,9 +134,15 @@ pub struct GuiApplication {
     renderer: Renderer,
     assets: AssetBundle,
     pointer: PointerConfiguration,
+    session: Option<crate::session::SessionConfig>,
 }
 
 impl GuiApplication {
+    /// Override the launch context's stable identity, recovery, and terminal configuration.
+    pub fn session(mut self, config: crate::session::SessionConfig) -> Self {
+        self.session = Some(config);
+        self
+    }
     /// Selects the renderer policy for this application.
     pub fn renderer(mut self, renderer: Renderer) -> Self {
         self.renderer = renderer;
@@ -162,6 +173,7 @@ impl GuiApplication {
             assets: self.assets,
             pointer: self.pointer,
             window,
+            session: self.session,
         }
     }
 }
@@ -185,9 +197,14 @@ pub struct ReadyGuiApplication {
     assets: AssetBundle,
     pointer: PointerConfiguration,
     window: ReadyWindow,
+    session: Option<crate::session::SessionConfig>,
 }
 
 impl ReadyGuiApplication {
+    pub fn session(mut self, config: crate::session::SessionConfig) -> Self {
+        self.session = Some(config);
+        self
+    }
     /// Replaces the renderer policy without changing the declared window.
     pub fn renderer(mut self, renderer: Renderer) -> Self {
         self.renderer = renderer;
@@ -216,6 +233,14 @@ impl ReadyGuiApplication {
             all(feature = "application-vulkan-windows", target_os = "windows")
         ))]
         {
+            validate_application_name(&self.name)?;
+            let config = self.session.clone().unwrap_or_else(|| {
+                // Stable across compiler versions and processes; display names need not be valid IDs.
+                let hash = self.name.bytes().fold(0xcbf29ce484222325u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3));
+                crate::session::SessionConfig::new(format!("gui-{hash:016x}"))
+            });
+            let env = crate::session::Environment::gui().map_err(|e| AppError::new(e.to_string()))?;
+            let _session = crate::session::SessionOwner::start(env, config).map_err(|e| AppError::new(e.to_string()))?;
             return crate::application_host::native::run_gui(self);
         }
 
@@ -1192,7 +1217,7 @@ mod tests {
     #[test]
     fn resize_preview_color_accepts_the_full_alpha_range() {
         let mut config = LinuxDesktopConfig::default();
-        config.drm_device = std::env::current_dir().unwrap().join("card0");
+        config.drm_device = Some(std::env::current_dir().unwrap().join("card0"));
         assert_eq!(config.resize_preview_color.a, 255);
         config.resize_preview_color = ColorRgba8 {
             r: 20,

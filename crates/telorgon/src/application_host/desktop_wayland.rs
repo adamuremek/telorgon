@@ -108,6 +108,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     };
     let (_name, compositor, widgets, renderer, config, assets, pointer_config, app_icon_profile) =
         application.into_parts()?;
+    let launch_environment = crate::session::Environment::inherited();
+    let runtime_directory = launch_environment.runtime_directory().map_err(app_error)?;
     let pointer_theme = pointer_config.load_theme(assets).map_err(app_error)?;
     let mut pointer_media = AssetMediaCache::new(assets).map_err(app_error)?;
     let (
@@ -122,14 +124,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let seat = LinuxSeat::open().map_err(app_error)?;
     seat.dispatch(0).map_err(app_error)?;
     let input = LibInputContext::new(&seat, &config.seat_name).map_err(app_error)?;
-    let drm_path = config
-        .drm_device
-        .to_str()
-        .ok_or_else(|| AppError::new("DRM device path is not UTF-8"))?;
-    let drm_seat_device = seat.open_device(drm_path).map_err(app_error)?;
-    let kms =
-        KmsDevice::new(drm_seat_device.try_clone_fd().map_err(app_error)?).map_err(app_error)?;
-    let topology = KmsTopology::query(&kms).map_err(app_error)?;
+    let (_drm_seat_device, kms, topology, drm_path) = select_drm_device(&seat, &config)?;
     let connector = topology
         .connectors
         .iter()
@@ -157,7 +152,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     };
     eprintln!(
         "telorgon-kms: negotiating {renderer:?} scanout on {}",
-        config.drm_device.display()
+        drm_path.display()
     );
     let mut scanout = renderer::prepare(
         &kms,
@@ -241,13 +236,12 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
             .add_explicit_synchronization(&display)
             .map_err(app_error)?;
     }
-    let _socket = match config.socket_name.as_deref() {
-        Some(name) => {
-            display.add_socket(name).map_err(app_error)?;
-            name.to_owned()
-        }
-        None => display.add_socket_auto().map_err(app_error)?,
-    };
+    let socket = display.add_socket_in(&runtime_directory, config.socket_name.as_deref()).map_err(app_error)?;
+    let session = crate::session::SessionOwner::start(
+        launch_environment.desktop(&runtime_directory, &socket, &config.session.identity),
+        config.session.clone(),
+    ).map_err(app_error)?;
+    eprintln!("telorgon-session: ready on {}", runtime_directory.join(&socket).display());
 
     // Libwayland already owns the compositor's poll loop. Register every external readiness
     // source with it so input, seat changes, DRM flips, and GPU completions wake the same owner
@@ -440,10 +434,33 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut previous_pointer_batch_us = None::<u64>;
     let mut keyboard = keyboard;
     let mut shortcut_keys = shortcuts::ShortcutKeys::default();
+    let mut shutdown_started = None::<Instant>;
+    let mut close_requested = std::collections::BTreeSet::new();
 
     loop {
         if exit_request.requested() {
-            return Ok(());
+            let started = *shutdown_started.get_or_insert_with(|| {
+                session.quiesce();
+                Instant::now()
+            });
+            let surfaces = wayland.toplevel_surfaces();
+            if surfaces.is_empty() {
+                session.close();
+                return Ok(());
+            }
+            for surface in surfaces {
+                if close_requested.insert(surface) { wayland.close_toplevel(surface).map_err(app_error)?; }
+            }
+            display.flush_clients();
+            if started.elapsed() >= config.session.shutdown_timeout {
+                // Keep the compositor and clients alive when an app refuses to close. Destroying
+                // the display or signalling its process here would discard unsaved-work dialogs.
+                eprintln!("telorgon-session: shutdown cancelled because application windows remain open");
+                exit_request.cancel();
+                shutdown_started = None;
+                close_requested.clear();
+                session.resume();
+            }
         }
         let mut presentation_completed = false;
         let mut presented_surface_revisions = Vec::new();
@@ -498,10 +515,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         } else {
             None
         };
+        let wait = if shutdown_started.is_some() {
+            Some(wait.unwrap_or(Duration::from_millis(50)).min(Duration::from_millis(50)))
+        } else { wait };
         display.dispatch_and_flush(wait).map_err(app_error)?;
-        if exit_request.requested() {
-            return Ok(());
-        }
 
         if seat_ready.swap(false, Ordering::AcqRel) {
             seat.dispatch(0).map_err(app_error)?;
@@ -966,10 +983,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             session_locked,
                             keyboard_shortcut_handler.as_deref_mut(),
                         );
-                        if action == crate::application_host::DesktopKeyAction::Quit
-                            || exit_request.requested()
-                        {
-                            return Ok(());
+                        if action == crate::application_host::DesktopKeyAction::Quit {
+                            crate::request_exit();
                         }
                         let serial = display.next_serial();
                         if action == crate::application_host::DesktopKeyAction::Forward {
@@ -2426,6 +2441,38 @@ fn is_plane_type(kms: &KmsDevice, plane: u32, expected: u64) -> bool {
 
 fn app_error(error: impl std::fmt::Display) -> AppError {
     AppError::new(error.to_string())
+}
+
+fn select_drm_device<'seat>(
+    seat: &'seat LinuxSeat,
+    config: &LinuxDesktopConfig,
+) -> AppResult<(crate::platform_linux::SeatDevice<'seat>, KmsDevice, KmsTopology, std::path::PathBuf)> {
+    let candidates = if let Some(path) = &config.drm_device { vec![path.clone()] } else {
+        let mut paths = std::fs::read_dir("/dev/dri").map_err(app_error)?
+            .filter_map(|entry| entry.ok()).map(|entry| entry.path())
+            .filter(|path| path.file_name().and_then(|name| name.to_str()).is_some_and(|name| {
+                name.strip_prefix("card").is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+            })).collect::<Vec<_>>();
+        paths.sort();
+        paths
+    };
+    let mut failures = Vec::new();
+    for path in candidates {
+        let attempt = (|| {
+            let device = seat.open_device(path.to_str().ok_or_else(|| AppError::new("DRM device path is not UTF-8"))?).map_err(app_error)?;
+            let kms = KmsDevice::new(device.try_clone_fd().map_err(app_error)?).map_err(app_error)?;
+            let topology = KmsTopology::query(&kms).map_err(app_error)?;
+            if !topology.connectors.iter().any(|connector| connector.status == ConnectorStatus::Connected && !connector.modes.is_empty()) {
+                return Err(AppError::new("no connected output with a mode"));
+            }
+            Ok((device, kms, topology))
+        })();
+        match attempt {
+            Ok((device, kms, topology)) => return Ok((device, kms, topology, path)),
+            Err(error) => failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    Err(AppError::new(format!("no usable seat-accessible KMS device; check the local VT, graphics driver and connected monitor. {}", failures.join("; "))))
 }
 
 #[cfg(test)]

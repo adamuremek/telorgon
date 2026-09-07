@@ -56,6 +56,28 @@ impl Display {
         )
     }
 
+    /// Bind in a validated runtime directory without mutating XDG_RUNTIME_DIR. Libwayland owns
+    /// socket locking, stale-socket handling and unlinking for each successful absolute-path bind.
+    pub fn add_socket_in(&self, directory: &std::path::Path, name: Option<&str>) -> ServerResult<String> {
+        let candidates: Vec<String> = match name {
+            Some(name) => vec![name.to_owned()],
+            None => (0..=32).map(|index| format!("wayland-{index}")).collect(),
+        };
+        let mut last_error = None;
+        for name in candidates {
+            if name.is_empty() || name.contains(['/', '\\']) || name == "." || name == ".." || !directory.is_absolute() {
+                return Err(WaylandServerError::new(WaylandServerErrorKind::Socket, "invalid runtime directory or socket name"));
+            }
+            let path = directory.join(&name);
+            let path = path.to_str().ok_or_else(|| WaylandServerError::new(WaylandServerErrorKind::Socket, "Wayland socket path is not UTF-8"))?;
+            match self.add_socket(path) {
+                Ok(()) => return Ok(name),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.expect("socket candidates are nonempty"))
+    }
+
     pub fn event_loop(&self) -> EventLoopRef<'_> {
         let raw = unsafe { ffi::wl_display_get_event_loop(self.raw.as_ptr()) };
         EventLoopRef {
