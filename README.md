@@ -35,6 +35,14 @@ See [the documentation index](docs/README.md) for architecture, implementation s
 qualification boundaries. Features described as operational are not necessarily
 production-qualified.
 
+## Linux desktop build dependencies
+
+Linux builds with `desktop-wayland-linux` require compatible Wayland development XML and
+`wayland-protocols` data during compilation. Protocol descriptors are generated as Rust tables;
+installed applications do not need protocol XML files. Other builds do not require that data.
+See [protocol build inputs and overrides](docs/WAYLAND_COMPOSITOR_ARCHITECTURE.md#protocol-source-and-advertisement-rules)
+for required versions, custom paths, and cross compilation. Native library dependencies still apply.
+
 ## License
 
 Telorgon-owned source code, documentation, themes, protocols, tests, and tools in this repository

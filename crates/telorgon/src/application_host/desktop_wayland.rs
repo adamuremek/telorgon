@@ -32,7 +32,7 @@ use crate::presenter_vulkan_kms::{
 };
 use crate::render::{ImageAlphaMode, ImageId, ImagePixelFormat, RenderSceneDelta};
 use crate::runtime::CompositionDriver;
-use crate::wayland_server::{Display, ProtocolCatalog, ProtocolSourcePaths};
+use crate::wayland_server::Display;
 use crate::{
     AssetBundle, AssetMediaCache, AssetRasterSize, PointerConfiguration, PointerGraphic,
     PointerIcon, PointerRequest, PointerResolution, PointerTheme, WindowAction, WindowChromeModel,
@@ -206,10 +206,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     });
 
     let display = Display::new().map_err(app_error)?;
-    let catalog =
-        ProtocolCatalog::load_desktop(&ProtocolSourcePaths::standard_linux()).map_err(app_error)?;
     let mut wayland =
-        NativeCompositor::new(&display, catalog, ClientLimits::default()).map_err(app_error)?;
+        NativeCompositor::new(&display, ClientLimits::default()).map_err(app_error)?;
     wayland
         .add_output(&display, 1, output_state(connector, mode_index, &config)?)
         .map_err(app_error)?;

@@ -9,7 +9,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use crate::core::{PointI, RectI};
 use crate::wayland_server::ffi;
 use crate::wayland_server::{
-    ClientRef, Display, Global, IncomingRequest, NativeProtocol, ProtocolCatalog, ResourceRef,
+    ClientRef, Display, Global, IncomingRequest, NativeProtocol, ResourceRef,
 };
 
 use crate::compositor_wayland::synchronization::{
@@ -526,11 +526,9 @@ impl Drop for NativeCompositor<'_> {
 impl<'display> NativeCompositor<'display> {
     pub fn new(
         display: &'display Display,
-        catalog: ProtocolCatalog,
         limits: ClientLimits,
     ) -> Result<Self, NativeCompositorError> {
-        let protocol =
-            NativeProtocol::new(catalog.merged_schema().map_err(error)?).map_err(error)?;
+        let protocol = NativeProtocol::desktop();
         let mut state = Box::new(NativeState {
             display: display.native_handle(),
             protocol,
@@ -3045,7 +3043,7 @@ impl NativeState {
             .seats
             .get(&seat)
             .ok_or_else(|| NativeCompositorError::new("unknown seat"))?;
-        let (interface, kind, enabled) = match request.message().name.as_str() {
+        let (interface, kind, enabled) = match request.message().name {
             "get_pointer" => (
                 "wl_pointer",
                 ResourceKind::Pointer(seat),
@@ -3133,7 +3131,7 @@ impl NativeState {
         context: &ResourceContext,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "create_data_source" => {
                 let object = self.peek_next_object()?;
                 self.create_resource(
@@ -3200,7 +3198,7 @@ impl NativeState {
             .data_devices
             .source_mut(source)
             .ok_or_else(|| NativeCompositorError::new("unknown wl_data_source"))?;
-        match request.message().name.as_str() {
+        match request.message().name {
             "offer" => source
                 .offer(
                     crate::compositor_wayland::MimeType::new(c_string(request, 0)?)
@@ -3230,7 +3228,7 @@ impl NativeState {
         seat: u32,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_selection" => {
                 let focus = self
                     .core
@@ -3381,7 +3379,7 @@ impl NativeState {
         offer: ProtocolObjectId,
         request: &mut IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "accept" => {
                 let is_drag = self
                     .core
@@ -3659,7 +3657,7 @@ impl NativeState {
         surface: WaylandSurfaceId,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        let mode = match request.message().name.as_str() {
+        let mode = match request.message().name {
             "set_mode" => match request.uint(0).map_err(error)? {
                 1 => crate::compositor_wayland::DecorationMode::ClientSide,
                 2 => crate::compositor_wayland::DecorationMode::ServerSide,
@@ -3754,7 +3752,7 @@ impl NativeState {
         context: &ResourceContext,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "create_icon" => {
                 let object = self.peek_next_object()?;
                 self.create_resource(
@@ -3849,7 +3847,7 @@ impl NativeState {
             resource.post_error(2, "the toplevel icon is immutable after assignment");
             return Ok(DispatchOutcome::default());
         }
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_name" => {
                 let name = c_string(request, 0)?;
                 if name.len() > 4_096 || name.contains('\0') {
@@ -4015,7 +4013,7 @@ impl NativeState {
             .viewports
             .get_mut(&surface)
             .ok_or_else(|| NativeCompositorError::new("unknown wp_viewport"))?;
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_source" => {
                 let values = [
                     request.fixed(0).map_err(error)?,
@@ -4096,7 +4094,7 @@ impl NativeState {
         context: &ResourceContext,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "get_activation_token" => {
                 let object = self.peek_next_object()?;
                 self.create_resource(
@@ -4155,7 +4153,7 @@ impl NativeState {
                 "activation token was already committed",
             ));
         }
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_serial" => {
                 let serial = request.uint(0).map_err(error)?;
                 let seat_resource = request
@@ -4310,7 +4308,7 @@ impl NativeState {
                 "session lock belongs to another client",
             ));
         }
-        match request.message().name.as_str() {
+        match request.message().name {
             "destroy" => {
                 if lock.locked_event_sent {
                     return Err(NativeCompositorError::new(
@@ -4625,7 +4623,7 @@ impl NativeState {
         context: &ResourceContext,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        let kind = match request.message().name.as_str() {
+        let kind = match request.message().name {
             "lock_pointer" => PointerConstraintKind::Locked,
             "confine_pointer" => PointerConstraintKind::Confined,
             _ => return Err(unsupported_request(request)),
@@ -4724,7 +4722,7 @@ impl NativeState {
             .pointer_constraints
             .get_mut(&object)
             .ok_or_else(|| NativeCompositorError::new("unknown locked pointer"))?;
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_region" => constraint.region = region.expect("set above"),
             "set_cursor_position_hint" => {
                 constraint.cursor_hint = Some(crate::core::PointF {
@@ -4843,7 +4841,7 @@ impl NativeState {
         surface: WaylandSurfaceId,
         request: &mut IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_acquire_fence" => {
                 if self.pending_acquire_fences.contains_key(&surface) {
                     return Err(NativeCompositorError::new(
@@ -4883,7 +4881,7 @@ impl NativeState {
         object: ProtocolObjectId,
         request: &mut IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "add" => {
                 let plane = NativeDmaBufPlane {
                     fd: request.take_fd(0).map_err(error)?,
@@ -5032,7 +5030,7 @@ impl NativeState {
         context: &ResourceContext,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "create_surface" => {
                 self.next_surface = next_nonzero(self.next_surface)?;
                 let surface = WaylandSurfaceId::from_raw(self.next_surface).expect("nonzero");
@@ -5075,7 +5073,7 @@ impl NativeState {
         surface: WaylandSurfaceId,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "attach" => {
                 let buffer = request
                     .object(0)
@@ -5193,7 +5191,7 @@ impl NativeState {
             .regions
             .get_mut(&object)
             .ok_or_else(|| NativeCompositorError::new("unknown region"))?;
-        match request.message().name.as_str() {
+        match request.message().name {
             "add" => {
                 if rectangles.len() >= Region::MAX_RECTANGLES {
                     return Err(NativeCompositorError::new(
@@ -5267,7 +5265,7 @@ impl NativeState {
         object: ProtocolObjectId,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "resize" => {
                 let new_size = request.int(0).map_err(error)?;
                 let pool = self
@@ -5369,7 +5367,7 @@ impl NativeState {
         surface: WaylandSurfaceId,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_position" => self
                 .core
                 .subsurfaces
@@ -5429,7 +5427,7 @@ impl NativeState {
         context: &ResourceContext,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "create_positioner" => {
                 let object = self.peek_next_object()?;
                 self.create_resource(
@@ -5488,7 +5486,7 @@ impl NativeState {
             .positioners
             .get_mut(&object)
             .ok_or_else(|| NativeCompositorError::new("unknown xdg_positioner"))?;
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_size" => {
                 positioner.size = Some(crate::core::SizeI {
                     width: request.int(0).map_err(error)?,
@@ -5545,7 +5543,7 @@ impl NativeState {
         surface: WaylandSurfaceId,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "get_toplevel" => {
                 self.surface_mut(surface)?
                     .assign_role(SurfaceRole::XdgToplevel)
@@ -5640,7 +5638,7 @@ impl NativeState {
         surface: WaylandSurfaceId,
         request: &IncomingRequest<'_>,
     ) -> Result<DispatchOutcome, NativeCompositorError> {
-        match request.message().name.as_str() {
+        match request.message().name {
             "grab" => {
                 let serial = request.uint(1).map_err(error)?;
                 self.core
@@ -5701,7 +5699,7 @@ impl NativeState {
         if !self.toplevels.contains_key(&surface) {
             return Err(NativeCompositorError::new("unknown xdg_toplevel"));
         }
-        match request.message().name.as_str() {
+        match request.message().name {
             "set_title" => self
                 .toplevels
                 .get_mut(&surface)

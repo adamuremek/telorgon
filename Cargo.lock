@@ -2695,6 +2695,7 @@ dependencies = [
  "rand",
  "raw-window-handle",
  "resvg",
+ "roxmltree 0.21.1",
  "rtrb",
  "serde",
  "serde_json",

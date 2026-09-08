@@ -33,6 +33,7 @@ application-vulkan-windows = [
     "dep:windows-sys",
 ]
 desktop-wayland-linux = [
+    "dep:roxmltree",
     "dep:ash",
     "dep:bytemuck",
     "dep:gpu-allocator",
@@ -92,4 +93,12 @@ zbus.workspace = true
 signal-hook-registry.workspace = true
 
 [dev-dependencies]
+roxmltree = "0.21.1"
 tower.workspace = true
+
+[build-dependencies]
+roxmltree = { version = "0.21.1", optional = true }
+
+[[test]]
+name = "wayland_protocol_generation"
+required-features = ["desktop-wayland-linux"]

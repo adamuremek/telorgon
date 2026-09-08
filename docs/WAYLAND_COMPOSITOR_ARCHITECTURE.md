@@ -60,7 +60,7 @@ official wayland.xml + wayland-protocols XML
                     |
                     v
 telorgon-wayland-server
-  XML schema validation, native wl_interface descriptors,
+  build-time XML validation -> compiled wl_interface descriptors,
   libwayland-server display/global/resource/event-loop ABI
                     |
                     v
@@ -82,10 +82,11 @@ telorgon-compositor-render          telorgon-platform-linux
              libdrm atomic KMS + GBM scanout buffers
 ```
 
-No layer above relies on generated Rust protocol packages. `telorgon-wayland-server` parses the
-installed official XML, constructs `wl_interface`/`wl_message` descriptors with stable storage,
-and passes decoded requests to Telorgon-owned state. `libwayland-server` remains the mature transport,
-resource, client, socket, and event-loop implementation.
+No layer above relies on external generated Rust protocol packages. The `telorgon` build script
+parses official XML and emits immutable Rust schema and `wl_interface`/`wl_message` tables.
+`wayland_server` compiles those tables into the library and passes decoded requests to Telorgon-owned
+state. `libwayland-server` remains the mature transport, resource, client, socket, and event-loop
+implementation.
 
 Within the managed host, `desktop_wayland.rs` is the single-owner orchestration loop. Its sibling
 modules isolate client publication, cursor-plane/KMS lifetime tracking, event sources and input
@@ -99,13 +100,53 @@ accesses Wayland objects or compositor state.
 
 ## Protocol source and advertisement rules
 
-`ProtocolCatalog::load_desktop` reads `/usr/share/wayland/wayland.xml` and the pinned paths under
-`/usr/share/wayland-protocols` by default. Parsing is bounded and rejects malformed XML, missing
-interfaces, versions older than the profile, duplicate interface names, invalid signatures, and
-unbounded schema counts. Native descriptors retain their strings and type arrays until every
-global/resource using them is destroyed.
+The `desktop-wayland-linux` feature on a Linux target requires protocol XML **at build time only**.
+`crates/telorgon/build.rs` reads `/usr/share/wayland/wayland.xml` and the 14 extension paths under
+`/usr/share/wayland-protocols` listed in `wayland_server/protocol.rs`. Install the Wayland development
+data and `wayland-protocols` packages with the interface versions required by that profile (including
+xdg-shell v7, cursor-shape v2, presentation-time v2, and linux-dmabuf v5). Package names vary by distro.
+The existing native link dependencies, including `libwayland-server`, remain required.
 
-Loading an XML schema does **not** advertise its globals. A global is created only where
+For custom installations and cross compilation, set build environment variables:
+
+```sh
+TELORGON_WAYLAND_XML=/path/to/wayland.xml \
+TELORGON_WAYLAND_PROTOCOLS_DIR=/path/to/wayland-protocols \
+cargo build -p telorgon --no-default-features --features desktop-wayland-linux
+```
+
+These are host-readable build inputs; select definitions compatible with the target profile.
+Other features and non-Linux targets do not open or require these files. The optional `roxmltree`
+build dependency parses XML; no scanner executable or C compilation is required for generation.
+The official `wayland-scanner` is used only by an explicitly selected reference-comparison test.
+Cargo watches each selected XML file, both override variables, the build modules, the Rust profile,
+and the checked-in wire contract. Changes, removals, or path overrides cause generation to rerun.
+The generator and wire contract are inside the published Cargo package.
+
+Generation rejects malformed/misnested XML, invalid names and numeric ranges, excessive source or
+collection sizes (including libwayland’s 20 wire-argument limit), missing/old profile interfaces, duplicate interfaces/messages/arguments, invalid
+argument types/nullability/interface annotations, invalid message versions, and unresolved typed
+references. `build/protocol-wire-contract.txt` pins request/event opcodes, names, signatures,
+destructor flags, and argument interface names through each profile source version. Future versions
+may append messages without changing this ABI. Intentional profile changes require an explicit
+review of this contract; builds never silently regenerate the checked-in baseline. Documentation and
+enumeration values are not dispatcher descriptor inputs and are not part of this compatibility check.
+
+`NativeProtocol::desktop()` returns a zero-allocation handle. Rust metadata uses static strings and
+slices; native tables, C strings, and per-wire-argument type pointers are immutable statics with
+process lifetime. Only private generated-data wrappers implement `Sync`, leaving arbitrary FFI
+values untouched. There is no lazy initialization, pointer patching, XML parsing, or `/usr/share`
+protocol access at runtime. The old `ProtocolCatalog`, `ProtocolSourcePaths`, parsing API, and native
+allocation/error API have been removed; `NativeCompositor::new` no longer takes a catalog.
+
+The cursor-shape `get_tablet_tool_v2.tablet_tool` argument retains its previous opaque/null native
+type entry because Telorgon does not load or advertise tablet protocols and rejects that request.
+This exact exception is checked by the generator; other unresolved interface references fail the
+build. Generic `new_id` expands to the three wire arguments `string, uint, new_id`, correcting the
+old unused `wl_registry.bind` metadata from `un` to the official `usun`. Registry dispatch remains
+owned by libwayland; Telorgon's supported requests and advertised versions are unchanged.
+
+Compiling a protocol descriptor does **not** advertise its globals. A global is created only where
 `NativeCompositor` has a dispatcher. Request and event `since` versions are checked against each
 resource's negotiated version. The machine-readable profile is
 [`protocols/telorgon-wayland-profile.toml`](../protocols/telorgon-wayland-profile.toml).
@@ -614,3 +655,49 @@ atomic modesetting and page-flip behavior, libseat transitions, input devices, m
 multiple outputs, failure recovery, and performance. The largest remaining gaps are
 multi-output/hotplug, direct retained client DMA-BUF sampling, page-flip timestamps,
 input-method/text-input integration, and newer DMA-BUF feedback/syncobj protocol generations.
+
+## Build-time descriptor reference audit (2026-09-08)
+
+The adjacent `../other-rendering-libs` checkout was unavailable. The relevant replacements inspected
+were the local Cargo registry's `wayland-scanner-0.31.11/src/c_interfaces.rs` (static native graph,
+`gen_messages`, `message_signature`) and the upstream C scanner's
+[`src/scanner.c`](https://raw.githubusercontent.com/wayland-mirror/wayland/main/src/scanner.c)
+(`emit_types`, `emit_messages`, `emit_code`, nullability validation). The installed official scanner
+1.24.0 also generated comparison descriptors for all selected XML files. No reference code was
+copied or added as a runtime dependency.
+
+Both implementations preserve XML opcode order, encode `since`/nullable arguments in signatures,
+expand untyped `new_id`, and retain immutable interface/message/type storage. These invariants agree
+with the official [message format](https://wayland.freedesktop.org/docs/book/Message_XML.html) and
+[server ABI](https://wayland.freedesktop.org/docs/html/apc.html). Telorgon adopts immutable static
+tables with a narrowly scoped `Sync` guarantee. Embedding XML for startup parsing, rebuilding an
+owned graph on each startup, adding a compositor framework, and requiring an external scanner for
+ordinary builds were rejected as unnecessary runtime work or build dependencies.
+
+`wayland_protocol_generation` compares every generated metadata field against independently read
+XML, traverses native signatures and type pointers after temporary handles disappear, exercises
+malformed/bounded input and ABI incompatibility rejection, and checks generic `new_id` wire slots.
+The explicitly selected `signatures_match_official_c_scanner` test compares all message signatures
+against the independent C generator. The self-contained descriptor test runs without reading XML
+and can be run directly from the compiled test binary with missing protocol paths. These tests do
+not create a display, socket, compositor server, GUI, or GPU/KMS output. Hardware and full client
+conformance qualification remain manual.
+
+Validation for this refactor passed on Linux:
+
+```sh
+cargo check -p telorgon --all-targets --no-default-features --features desktop-wayland-linux
+cargo test -p telorgon --no-default-features --features desktop-wayland-linux --test wayland_protocol_generation -- --include-ignored
+cargo test -p telorgon --lib --no-default-features --features desktop-wayland-linux compositor_wayland::
+cargo fmt --all -- --check
+```
+
+The descriptor suite passed 13 tests (including the optional C scanner comparison); 37 existing
+compositor state tests passed. Default, no-feature, and `embedded-vulkan` compilation also passed
+with both XML overrides set to nonexistent paths. Separate Cargo checks verified custom inputs,
+fresh unchanged builds, XML-edit rebuilds, rejection of a same-version ABI change, missing-file
+errors, and environment-change rebuilds. Package listing includes all build inputs. A filesystem
+trace of the descriptor-only test contained no protocol XML access. The non-Linux build-script
+branch was exercised with missing inputs, but no non-Linux Rust target was installed for a full
+cross-target check. Existing unrelated dead-code warnings remain. No GUI, server, or hardware run
+was performed.

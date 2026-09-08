@@ -81,7 +81,7 @@ production-qualified.
 > tests and compilation are covered; this is not hardware qualification. See
 > [Linux scanout negotiation](LINUX_SCANOUT_NEGOTIATION.md).
 >
-> Linux Wayland compositor closeout: Telorgon now owns bounded official-protocol XML parsing, native
+> Linux Wayland compositor closeout: Telorgon now owns bounded build-time official-protocol XML parsing, compiled static native
 > `libwayland-server` descriptors and dispatch, surface/xdg/subsurface/seat/output state, SHM
 > presentation, capability-gated DMA-BUF and explicit/implicit sync bridges, libseat/libinput/XKB input, and
 > atomic libdrm/GBM KMS presentation. Compositor backgrounds, default window frames, pointers, semantic

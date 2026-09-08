@@ -6,7 +6,6 @@
 mod error;
 pub mod protocol;
 mod schema;
-mod source;
 
 #[cfg(target_os = "linux")]
 pub mod ffi;
@@ -24,13 +23,11 @@ pub use native_protocol::NativeProtocol;
 pub use request::{IncomingRequest, RequestDecodeError};
 pub use schema::{
     ArgumentSchema, ArgumentType, InterfaceSchema, MessageKind, MessageSchema, ProtocolSchema,
-    ProtocolSchemaError,
 };
 #[cfg(target_os = "linux")]
 pub use server::{
     ClientCredentials, ClientRef, Display, EventLoopRef, EventSource, Global, ResourceRef,
 };
-pub use source::{LoadedProtocol, ProtocolCatalog, ProtocolSourceError, ProtocolSourcePaths};
 
 /// Whether the official native server ABI can exist on this compilation target.
 pub const NATIVE_SERVER_AVAILABLE: bool = cfg!(target_os = "linux");
