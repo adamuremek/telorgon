@@ -129,6 +129,8 @@ pub(super) fn refresh_window_frames(
     wake: &EventNotifier,
     now: u64,
     scale: crate::platform::ScaleFactor,
+    work_area: RectI,
+    configure_scheduler: &mut ConfigureScheduler,
 ) -> AppResult<()> {
     let Some(factory) = factory else {
         frames.clear();
@@ -266,33 +268,14 @@ pub(super) fn refresh_window_frames(
         }
         frame.model = model;
         frame.content_style = content_style;
-        frame.layer.prepare(frame.outer, now, created)?;
-        let mut snapshot =
-            WindowChromeSnapshot::derive(frame.layer.runtime.ui(), frame.layer.runtime.layout())
-                .map_err(app_error)?;
-        let content_width = snapshot.content.bounds.width.round().max(1.0) as i32;
-        let content_height = snapshot.content.bounds.height.round().max(1.0) as i32;
-        let corrected = SizeI {
-            width: frame
-                .outer
-                .width
-                .saturating_add(window.requested_size.width.saturating_sub(content_width))
-                .max(1),
-            height: frame
-                .outer
-                .height
-                .saturating_add(window.requested_size.height.saturating_sub(content_height))
-                .max(1),
-        };
-        if corrected != frame.outer {
-            frame.outer = corrected;
-            frame.layer.prepare(frame.outer, now, true)?;
-            snapshot = WindowChromeSnapshot::derive(
-                frame.layer.runtime.ui(),
-                frame.layer.runtime.layout(),
-            )
-            .map_err(app_error)?;
-        }
+        let snapshot = layout_window_frame(
+            &mut frame.layer,
+            &mut frame.outer,
+            window.requested_size,
+            window.maximized.then_some(work_area),
+            now,
+            created,
+        )?;
         let style = frame
             .layer
             .runtime
@@ -332,12 +315,62 @@ pub(super) fn refresh_window_frames(
 
     for (surface, outer, content_offset, snapshot) in updates {
         if let Some(window) = windows.get_mut(&surface) {
+            if window.maximized {
+                let content_size = SizeI {
+                    width: snapshot.content.bounds.width.round().max(1.0) as i32,
+                    height: snapshot.content.bounds.height.round().max(1.0) as i32,
+                };
+                if window.requested_size != content_size {
+                    window.requested_size = content_size;
+                    configure_scheduler.schedule_final(surface, content_size);
+                }
+            }
             window.chrome_outer = Some(outer);
             window.chrome_content_offset = Some(content_offset);
             window.chrome = Some(snapshot);
         }
     }
     Ok(())
+}
+
+fn layout_window_frame(
+    layer: &mut Layer,
+    outer: &mut SizeI,
+    requested_size: SizeI,
+    maximized_area: Option<RectI>,
+    now: u64,
+    force: bool,
+) -> AppResult<WindowChromeSnapshot> {
+    if let Some(work_area) = maximized_area {
+        // Maximization constrains the OUTER frame; the composed content slot determines
+        // the client configure size, including state-specific decoration changes.
+        *outer = SizeI {
+            width: work_area.width.max(1),
+            height: work_area.height.max(1),
+        };
+    }
+    layer.prepare(*outer, now, force)?;
+    let mut snapshot = WindowChromeSnapshot::derive(layer.runtime.ui(), layer.runtime.layout())
+        .map_err(app_error)?;
+    let content_width = snapshot.content.bounds.width.round().max(1.0) as i32;
+    let content_height = snapshot.content.bounds.height.round().max(1.0) as i32;
+    let corrected = SizeI {
+        width: outer
+            .width
+            .saturating_add(requested_size.width.saturating_sub(content_width))
+            .max(1),
+        height: outer
+            .height
+            .saturating_add(requested_size.height.saturating_sub(content_height))
+            .max(1),
+    };
+    if maximized_area.is_none() && corrected != *outer {
+        *outer = corrected;
+        layer.prepare(*outer, now, true)?;
+        snapshot = WindowChromeSnapshot::derive(layer.runtime.ui(), layer.runtime.layout())
+            .map_err(app_error)?;
+    }
+    Ok(snapshot)
 }
 
 fn toplevel_icon_image_id(surface: WaylandSurfaceId, revision: u64) -> ImageId {
@@ -761,4 +794,77 @@ pub(super) fn prepare_desktop_layers(
         ));
     }
     Ok(layers)
+}
+
+#[cfg(test)]
+mod maximize_tests {
+    use super::*;
+    use crate::compose::{Component, RuntimeTarget, View, window_content_slot, window_frame};
+
+    #[crate::component]
+    struct TestFrame {
+        #[input]
+        title_height: f32,
+    }
+
+    impl Component for TestFrame {
+        fn view(&self) -> impl View {
+            window_frame().content_slot(window_content_slot().margin(crate::compose::Insets::new(
+                self.title_height,
+                0.0,
+                0.0,
+                0.0,
+            )))
+        }
+    }
+
+    #[test]
+    fn maximize_uses_work_area_instead_of_legacy_client_size_and_restore_keeps_client_size() {
+        for title_height in [24.0, 32.0, 48.0] {
+            for scale in [1.0, 1.5, 3.0] {
+                let original = SizeI {
+                    width: 600,
+                    height: 400,
+                };
+                let mut outer = original;
+                let mut layer = Layer::new(
+                    CompositionDriver::for_target(
+                        TestFrame { title_height },
+                        RuntimeTarget::Compositor,
+                    ),
+                    outer,
+                    AssetBundle::default(),
+                    crate::platform::ScaleFactor::new(scale).unwrap(),
+                )
+                .unwrap();
+                let area = RectI {
+                    x: 0,
+                    y: 42,
+                    width: 1280,
+                    height: 758,
+                };
+                let legacy = SizeI {
+                    width: 1272,
+                    height: 718,
+                };
+                let snapshot =
+                    layout_window_frame(&mut layer, &mut outer, legacy, Some(area), 0, true)
+                        .unwrap();
+                assert_eq!(
+                    outer,
+                    SizeI {
+                        width: 1280,
+                        height: 758
+                    }
+                );
+                assert_eq!(snapshot.content.bounds.width, 1280.0);
+                assert_eq!(snapshot.content.bounds.height, 758.0 - title_height);
+                assert_eq!(snapshot.content.bounds.bottom(), 758.0);
+                let restored =
+                    layout_window_frame(&mut layer, &mut outer, original, None, 1, true).unwrap();
+                assert_eq!(restored.content.bounds.width, original.width as f32);
+                assert_eq!(restored.content.bounds.height, original.height as f32);
+            }
+        }
+    }
 }

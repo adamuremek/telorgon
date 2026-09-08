@@ -213,7 +213,8 @@ retired.
 - `Application::gui(name)` builds an ordinary managed GUI application and requires one `Window`
   with content before `.run()` is available.
 - `Application::desktop_environment(name)` builds a Linux desktop environment and requires a
-  compositor background plus at least one composed `ShellWidget` before `.run()` is available.
+  compositor background before `.run()` is available. Composed `ShellWidget`s are optional;
+  omitting them starts the desktop without panels or widget space reservations.
 
 Both modes select their renderer directly on the application builder. `Window`, `Compositor`, and
 `ShellWidget` use constructors to gather their own mode-specific configuration, and `.content(...)`

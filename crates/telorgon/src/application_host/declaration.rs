@@ -1077,6 +1077,15 @@ impl DesktopEnvironmentWithCompositor {
     }
 
     pub fn shell_widget(self, widget: ReadyShellWidget) -> ReadyDesktopEnvironment {
+        self.into_ready().shell_widget(widget)
+    }
+
+    /// Starts the desktop with its compositor background and no shell widgets.
+    pub fn run(self) -> AppResult<()> {
+        self.into_ready().run()
+    }
+
+    fn into_ready(self) -> ReadyDesktopEnvironment {
         ReadyDesktopEnvironment {
             name: self.name,
             renderer: self.renderer,
@@ -1085,7 +1094,7 @@ impl DesktopEnvironmentWithCompositor {
             pointer: self.pointer,
             app_icon: self.app_icon,
             compositor: self.compositor,
-            shell_widgets: vec![widget],
+            shell_widgets: Vec::new(),
         }
     }
 }
@@ -1347,6 +1356,26 @@ mod tests {
             .background(Root);
 
         assert!(compositor.validate().is_err());
+    }
+
+    #[test]
+    fn desktop_without_widgets_validates_and_has_no_reserved_widget_space() {
+        let desktop = Application::desktop_environment("Bare desktop")
+            .compositor(Compositor::new().background(Root))
+            .into_ready();
+        let (_, _, widgets, _, _, _, _, _) = desktop.into_parts().unwrap();
+        assert!(widgets.is_empty());
+
+        // Verify the direct entrypoint exists without starting a desktop in this test.
+        let _: fn(DesktopEnvironmentWithCompositor) -> AppResult<()> =
+            DesktopEnvironmentWithCompositor::run;
+        assert!(
+            Application::desktop_environment("")
+                .compositor(Compositor::new().background(Root))
+                .into_ready()
+                .into_parts()
+                .is_err()
+        );
     }
 
     #[test]

@@ -349,6 +349,10 @@ use `height: Dimension::FILL` for each control and zero vertical title-bar paddi
 padding; fixed and percentage heights are centered within the remaining height. Chrome controls
 have no inherited 32px minimum, so compact bars can use smaller buttons; keep icons small enough to fit.
 
+Maximized and fullscreen easy frames suppress `frame_border_width`; normal and tiled frames
+retain it. Maximized custom frames fill the shell work area, and the host derives the client size
+from their laid-out content slot. See [Maximized window geometry](MAXIMIZED_WINDOW_GEOMETRY.md).
+
 Controls participate directly in the title-bar row. Percentage widths resolve against the bar's
 padded width; fill weights share remaining width with the flexible spacer (weight 1). Pixel and
 shrink widths leave the spacer to push controls to the right. The title-bar height itself remains

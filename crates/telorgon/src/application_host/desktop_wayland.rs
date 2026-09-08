@@ -2197,6 +2197,16 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     &runtime_wake,
                     now,
                     output_scale,
+                    work_area,
+                    &mut configure_scheduler,
+                )?;
+                // Publish sizes derived from the actual maximized chrome before presenting it.
+                flush_resize_configures(
+                    &display,
+                    &mut wayland,
+                    &mut windows,
+                    &mut configure_scheduler,
+                    &mut resize_configure_budget,
                 )?;
             }
             let cursor_image = wayland

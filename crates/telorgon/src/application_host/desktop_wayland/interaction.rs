@@ -203,10 +203,20 @@ pub(super) fn set_window_maximized(
             x: work_area.x,
             y: work_area.y,
         };
-        window.requested_size = SizeI {
-            width: (work_area.width - config.window_border * 2).max(1),
-            height: (work_area.height - config.window_border * 2 - config.titlebar_height).max(1),
+        window.requested_size = if window.server_decorated {
+            SizeI {
+                width: (work_area.width - config.window_border * 2).max(1),
+                height: (work_area.height - config.window_border * 2 - config.titlebar_height)
+                    .max(1),
+            }
+        } else {
+            SizeI {
+                width: work_area.width.max(1),
+                height: work_area.height.max(1),
+            }
         };
+        // Custom frames are measured in their maximized state during refresh_window_frames;
+        // that authoritative content extent supersedes this legacy fallback configure.
     } else {
         window.maximized = false;
         if let Some((position, size)) = window.restore_geometry.take() {

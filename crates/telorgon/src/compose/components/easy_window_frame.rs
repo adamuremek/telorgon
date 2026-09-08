@@ -26,6 +26,7 @@ use super::WindowChromeViewExt;
 pub struct WindowChromePalette {
     pub frame_background: ColorRgba8,
     pub frame_border: ColorRgba8,
+    /// Visible border in normal/tiled states; maximized and fullscreen frames are borderless.
     pub frame_border_width: f32,
     pub title_color: ColorRgba8,
     pub title_weight: u16,
@@ -280,7 +281,13 @@ impl ComponentFields for EasyWindowFrameComponent {
 impl Component for EasyWindowFrameComponent {
     fn view(&self) -> impl View {
         let design = self.design;
-        let palette = design.palette(self.model.active);
+        let mut palette = design.palette(self.model.active);
+        if matches!(
+            self.model.state,
+            WindowChromeState::Maximized | WindowChromeState::Fullscreen
+        ) {
+            palette.frame_border_width = 0.0;
+        }
         let state = design.state(self.model.state);
         let inner_radius = (state.frame_radius - palette.frame_border_width).max(0.0);
         let mut frame_decoration = BoxDecoration::new()

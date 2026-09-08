@@ -750,7 +750,12 @@ fn control_dimensions_follow_the_padded_bar_and_preserve_hit_targets() {
                             bounds.height, expected,
                             "{height:?}, bar={bar_height}, padding={padding}"
                         );
-                        assert_eq!(bounds.y, 1.0 + padding + (available - expected) / 2.0);
+                        assert_eq!(
+                            bounds.y,
+                            if maximized { 0.0 } else { 1.0 }
+                                + padding
+                                + (available - expected) / 2.0
+                        );
                         assert_eq!(bounds.width, 38.0);
                         assert_eq!(
                             snapshot.hit_test(bounds.x + bounds.width / 2.0, bounds.y + 0.5),
@@ -836,5 +841,38 @@ fn control_dimension_validation_rejects_invalid_values() {
         design.controls.close.style.height = dimension;
         design.controls.close.style.width = dimension;
         assert!(design.validate().is_ok());
+    }
+}
+
+#[test]
+fn maximized_and_fullscreen_frames_fill_the_outer_bounds_without_a_border() {
+    for border in [1.0, 2.0, 6.0] {
+        for title_height in [24.0, 32.0, 48.0] {
+            let mut design = TEST_CHROME;
+            design.active.frame_border_width = border;
+            design.title_bar.height = title_height;
+            for state in [WindowChromeState::Maximized, WindowChromeState::Fullscreen] {
+                let snapshot = chrome_snapshot(
+                    design,
+                    WindowChromeModel::new(99, "Maximized")
+                        .active(true)
+                        .state(state),
+                );
+                let content = snapshot.content.bounds;
+                let frame = snapshot.frame.bounds;
+                assert_eq!(content.x, frame.x);
+                assert_eq!(content.right(), frame.right());
+                assert_eq!(content.bottom(), frame.bottom());
+                let top = if state == WindowChromeState::Fullscreen {
+                    0.0
+                } else {
+                    title_height
+                };
+                assert_eq!(content.y, frame.y + top);
+                assert_eq!(content.height, frame.height - top);
+            }
+            let normal = chrome_snapshot(design, WindowChromeModel::new(99, "Normal").active(true));
+            assert_eq!(normal.content.bounds.x, border);
+        }
     }
 }
