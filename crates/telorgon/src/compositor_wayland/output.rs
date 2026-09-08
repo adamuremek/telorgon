@@ -31,7 +31,7 @@ impl OutputMode {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutputDescription {
     pub name: String,
     pub description: String,
@@ -39,7 +39,8 @@ pub struct OutputDescription {
     pub model: String,
     pub physical_millimeters: SizeI,
     pub logical_position: PointI,
-    pub scale: i32,
+    /// Physical pixels per logical surface unit.
+    pub scale: crate::platform::ScaleFactor,
     pub transform: OutputTransform,
     pub modes: Vec<OutputMode>,
 }
@@ -47,7 +48,6 @@ pub struct OutputDescription {
 impl OutputDescription {
     pub fn validate(self) -> Result<Self, OutputError> {
         if self.name.trim().is_empty()
-            || self.scale <= 0
             || self.physical_millimeters.width < 0
             || self.physical_millimeters.height < 0
             || self.modes.is_empty()
@@ -65,7 +65,7 @@ impl OutputDescription {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct OutputState {
     pub description: OutputDescription,
     pub current_mode: usize,

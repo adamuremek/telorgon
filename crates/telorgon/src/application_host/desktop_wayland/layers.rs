@@ -12,8 +12,10 @@ impl Layer {
         driver: CompositionDriver,
         extent: SizeI,
         assets: AssetBundle,
+        scale: crate::platform::ScaleFactor,
     ) -> AppResult<Self> {
         let mut runtime = ComposedAppRuntime::from_composition_driver(driver, extent)?;
+        runtime.set_raster_scale(scale);
         let mut media = AssetMediaCache::new(assets).map_err(app_error)?;
         for resource in media.preload_render_resources().map_err(app_error)? {
             runtime.set_image_resource(resource)?;
@@ -126,6 +128,7 @@ pub(super) fn refresh_window_frames(
     fallback_icon: &crate::AppIconProfile,
     wake: &EventNotifier,
     now: u64,
+    scale: crate::platform::ScaleFactor,
 ) -> AppResult<()> {
     let Some(factory) = factory else {
         frames.clear();
@@ -223,7 +226,7 @@ pub(super) fn refresh_window_frames(
                 let wake = wake.clone();
                 move || wake.notify()
             });
-            let layer = Layer::new(driver, previous_outer, assets)?;
+            let layer = Layer::new(driver, previous_outer, assets, scale)?;
             frames.insert(
                 surface,
                 WindowFrameLayer {
@@ -600,7 +603,7 @@ pub(super) fn prepare_desktop_layers(
             } else {
                 DesktopImageUpdate::Unchanged
             },
-            window.size,
+            window.image_size,
             placement.target,
             placement.clip,
             window.alpha_mode,
@@ -629,7 +632,7 @@ pub(super) fn prepare_desktop_layers(
             } else {
                 DesktopImageUpdate::Unchanged
             },
-            icon.size,
+            icon.image_size,
             RectI {
                 x: drag_position.x.round() as i32,
                 y: drag_position.y.round() as i32,
@@ -673,8 +676,8 @@ pub(super) fn prepare_desktop_layers(
                 RectI {
                     x: pointer_position.x.round() as i32 - cursor.hotspot.x,
                     y: pointer_position.y.round() as i32 - cursor.hotspot.y,
-                    width: cursor.size.width,
-                    height: cursor.size.height,
+                    width: cursor.logical_size.width,
+                    height: cursor.logical_size.height,
                 },
                 None,
                 if cursor.premultiplied {

@@ -48,6 +48,7 @@ pub(in crate::application_host::desktop_wayland) struct DmaBufPublication {
     pub buffer_scale: i32,
     pub buffer_transform: BufferTransform,
     pub viewport: Option<ViewportState>,
+    pub output_scale: crate::platform::ScaleFactor,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +60,7 @@ pub(in crate::application_host::desktop_wayland) struct DmaBufRetirement {
 
 pub(in crate::application_host::desktop_wayland) struct DmaBufQueueResult {
     pub extent: SizeI,
+    pub raster_extent: SizeI,
     pub pixel_format: ImagePixelFormat,
     pub alpha_mode: ImageAlphaMode,
     pub image: ImageId,
@@ -294,6 +296,14 @@ impl VulkanDesktopRenderer {
             publication.viewport,
             publication.image.descriptor.flags.y_invert,
         )?;
+        let raster_extent = SizeI {
+            width: (extent.width as f32 * publication.output_scale.get())
+                .round()
+                .max(1.0) as i32,
+            height: (extent.height as f32 * publication.output_scale.get())
+                .round()
+                .max(1.0) as i32,
+        };
         let content_version = self.next_dma_buf_content_version;
         self.next_dma_buf_content_version = self
             .next_dma_buf_content_version
@@ -319,6 +329,7 @@ impl VulkanDesktopRenderer {
             });
         Ok(DmaBufQueueResult {
             extent,
+            raster_extent,
             pixel_format: ImagePixelFormat::Rgba8,
             alpha_mode,
             image: dma_buf_image_id(),
@@ -538,8 +549,16 @@ impl VulkanDesktopRenderer {
                 discarded.push(retirement);
                 continue;
             }
-            let target = VulkanMaterializationTarget::new(&self.device, pending.extent)
-                .map_err(app_error)?;
+            let raster_extent = SizeI {
+                width: (pending.extent.width as f32 * pending.publication.output_scale.get())
+                    .round()
+                    .max(1.0) as i32,
+                height: (pending.extent.height as f32 * pending.publication.output_scale.get())
+                    .round()
+                    .max(1.0) as i32,
+            };
+            let target =
+                VulkanMaterializationTarget::new(&self.device, raster_extent).map_err(app_error)?;
             let mut source = self.device.create_scene().map_err(app_error)?;
             let physical_extent = pending.publication.image.descriptor.size;
             let lease_generation = self

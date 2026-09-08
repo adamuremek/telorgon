@@ -3,8 +3,65 @@ use super::*;
 pub(super) struct RenderedCursor {
     pub(super) rgba: Vec<u8>,
     pub(super) size: SizeI,
+    pub(super) logical_size: SizeI,
     pub(super) hotspot: PointI,
     pub(super) premultiplied: bool,
+}
+
+impl RenderedCursor {
+    /// Hardware cursors consume physical pixels and a physical hotspot. The composited form
+    /// retains a logical hotspot, so switching paths cannot shift the pointer's active pixel.
+    pub(super) fn for_hardware(
+        &self,
+        scale: crate::platform::ScaleFactor,
+        maximum: SizeI,
+    ) -> AppResult<Self> {
+        let size = SizeI {
+            width: (self.logical_size.width as f32 * scale.get())
+                .round()
+                .max(1.0) as i32,
+            height: (self.logical_size.height as f32 * scale.get())
+                .round()
+                .max(1.0) as i32,
+        };
+        if size.width > maximum.width
+            || size.height > maximum.height
+            || self.size.width <= 0
+            || self.size.height <= 0
+            || self.logical_size.width <= 0
+            || self.logical_size.height <= 0
+            || (self.size.width as usize)
+                .checked_mul(self.size.height as usize)
+                .and_then(|pixels| pixels.checked_mul(4))
+                != Some(self.rgba.len())
+        {
+            return Err(AppError::new(
+                "cursor image cannot fit the hardware cursor plane",
+            ));
+        }
+        let mut rgba = vec![0; size.width as usize * size.height as usize * 4];
+        for y in 0..size.height as usize {
+            for x in 0..size.width as usize {
+                let sx = (x * self.size.width as usize / size.width as usize)
+                    .min(self.size.width as usize - 1);
+                let sy = (y * self.size.height as usize / size.height as usize)
+                    .min(self.size.height as usize - 1);
+                let src = (sy * self.size.width as usize + sx) * 4;
+                let dst = (y * size.width as usize + x) * 4;
+                rgba[dst..dst + 4].copy_from_slice(&self.rgba[src..src + 4]);
+            }
+        }
+        Ok(Self {
+            rgba,
+            size,
+            logical_size: self.logical_size,
+            premultiplied: self.premultiplied,
+            hotspot: PointI {
+                x: (self.hotspot.x as f32 * scale.get()).round() as i32,
+                y: (self.hotspot.y as f32 * scale.get()).round() as i32,
+            },
+        })
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -41,62 +98,69 @@ pub(super) fn render_cursor_image(
     pointer_config: &PointerConfiguration,
     pointer_theme: Option<&PointerTheme>,
     pointer_media: &mut AssetMediaCache,
+    output_scale: crate::platform::ScaleFactor,
 ) -> AppResult<Option<CursorVisual>> {
-    let rendered = match image {
-        CursorImage::TelorgonDefault => render_semantic_pointer(
-            PointerIcon::Default,
-            None,
-            pointer,
-            icons,
-            extent,
-            now,
-            pointer_config,
-            pointer_theme,
-            pointer_media,
-        )?,
-        CursorImage::Shape(shape) => render_semantic_pointer(
-            cursor_shape_pointer_icon(shape).unwrap_or(PointerIcon::Default),
-            cursor_shape_icon_name(shape),
-            pointer,
-            icons,
-            extent,
-            now,
-            pointer_config,
-            pointer_theme,
-            pointer_media,
-        )?,
-        CursorImage::ClientSurface {
-            surface,
-            hotspot_x,
-            hotspot_y,
-        } => match resolve_pointer(
-            PointerRequest::ClientSurface,
-            pointer_config.client_cursor_mode(),
-            pointer_config.pointer_overrides(),
-            pointer_theme,
-        ) {
-            PointerResolution::ClientSurface => windows.get(&surface).map(|cursor| {
-                CursorVisual::Image(RenderedCursor {
-                    rgba: client_pixels_rgba(cursor),
-                    size: cursor.size,
-                    hotspot: PointI {
-                        x: hotspot_x,
-                        y: hotspot_y,
-                    },
-                    premultiplied: true,
-                })
-            }),
-            PointerResolution::Graphic(graphic) => Some(CursorVisual::Image(render_asset_pointer(
-                graphic,
+    let rendered =
+        match image {
+            CursorImage::TelorgonDefault => render_semantic_pointer(
+                PointerIcon::Default,
+                None,
+                pointer,
+                icons,
                 extent,
                 now,
+                pointer_config,
+                pointer_theme,
                 pointer_media,
-            )?)),
-            PointerResolution::System(_) => render_composed_pointer(None, pointer, icons, extent),
-            PointerResolution::Hidden => None,
-        },
-        CursorImage::Hidden => None,
-    };
+                output_scale,
+            )?,
+            CursorImage::Shape(shape) => render_semantic_pointer(
+                cursor_shape_pointer_icon(shape).unwrap_or(PointerIcon::Default),
+                cursor_shape_icon_name(shape),
+                pointer,
+                icons,
+                extent,
+                now,
+                pointer_config,
+                pointer_theme,
+                pointer_media,
+                output_scale,
+            )?,
+            CursorImage::ClientSurface {
+                surface,
+                hotspot_x,
+                hotspot_y,
+            } => match resolve_pointer(
+                PointerRequest::ClientSurface,
+                pointer_config.client_cursor_mode(),
+                pointer_config.pointer_overrides(),
+                pointer_theme,
+            ) {
+                PointerResolution::ClientSurface => windows
+                    .get(&surface)
+                    .filter(|cursor| !cursor.pixels.is_empty())
+                    .map(|cursor| {
+                        CursorVisual::Image(RenderedCursor {
+                            rgba: client_pixels_rgba(cursor),
+                            size: cursor.image_size,
+                            logical_size: cursor.size,
+                            hotspot: PointI {
+                                x: hotspot_x,
+                                y: hotspot_y,
+                            },
+                            premultiplied: true,
+                        })
+                    }),
+                PointerResolution::Graphic(graphic) => Some(CursorVisual::Image(
+                    render_asset_pointer(graphic, extent, now, pointer_media, output_scale)?,
+                )),
+                PointerResolution::System(_) => {
+                    render_composed_pointer(None, pointer, icons, extent)
+                }
+                PointerResolution::Hidden => None,
+            },
+            CursorImage::Hidden => None,
+        };
     Ok(rendered)
 }
 
@@ -126,6 +190,7 @@ fn render_semantic_pointer(
     pointer_config: &PointerConfiguration,
     pointer_theme: Option<&PointerTheme>,
     pointer_media: &mut AssetMediaCache,
+    output_scale: crate::platform::ScaleFactor,
 ) -> AppResult<Option<CursorVisual>> {
     match resolve_pointer(
         PointerRequest::Semantic(icon),
@@ -138,6 +203,7 @@ fn render_semantic_pointer(
             extent,
             now,
             pointer_media,
+            output_scale,
         )?))),
         PointerResolution::System(icon) => {
             let rendered = render_composed_pointer(composed_icon_name, pointer, icons, extent);
@@ -157,6 +223,7 @@ fn render_semantic_pointer(
                 pointer_config,
                 pointer_theme,
                 pointer_media,
+                output_scale,
             )
         }
         PointerResolution::Hidden => Ok(None),
@@ -192,6 +259,7 @@ fn render_asset_pointer(
     fallback_extent: SizeI,
     now_nanoseconds: u64,
     media: &mut AssetMediaCache,
+    output_scale: crate::platform::ScaleFactor,
 ) -> AppResult<RenderedCursor> {
     let frame = if graphic.frames().len() == 1 {
         graphic.frames()[0]
@@ -227,14 +295,20 @@ fn render_asset_pointer(
                     .expect("pointer graphic has a frame")
             })
     };
-    let requested = if let Some(size) = graphic.physical_size() {
-        AssetRasterSize::new(u32::from(size), u32::from(size))
-    } else {
-        AssetRasterSize::new(
-            fallback_extent.width.max(1) as u32,
-            fallback_extent.height.max(1) as u32,
-        )
-    }
+    let logical_size = graphic
+        .physical_size()
+        .map_or(fallback_extent, |size| SizeI {
+            width: i32::from(size),
+            height: i32::from(size),
+        });
+    let requested = AssetRasterSize::new(
+        (logical_size.width as f32 * output_scale.get())
+            .round()
+            .max(1.0) as u32,
+        (logical_size.height as f32 * output_scale.get())
+            .round()
+            .max(1.0) as u32,
+    )
     .map_err(app_error)?;
     let decoded = match graphic.tint_color() {
         Some(tint) => media.tinted_cursor(frame.asset, Some(requested), tint),
@@ -242,8 +316,7 @@ fn render_asset_pointer(
     }
     .map_err(app_error)?;
     let hotspot = graphic.pointer_hotspot();
-    if i32::from(hotspot.x) >= decoded.extent.width || i32::from(hotspot.y) >= decoded.extent.height
-    {
+    if i32::from(hotspot.x) >= logical_size.width || i32::from(hotspot.y) >= logical_size.height {
         return Err(AppError::new(
             "pointer hotspot is outside the decoded cursor image",
         ));
@@ -251,6 +324,7 @@ fn render_asset_pointer(
     Ok(RenderedCursor {
         rgba: decoded.pixels_rgba8.to_vec(),
         size: decoded.extent,
+        logical_size,
         hotspot: PointI {
             x: i32::from(hotspot.x),
             y: i32::from(hotspot.y),
@@ -283,6 +357,8 @@ pub(super) fn cursor_image_signature(cursor: &RenderedCursor) -> u64 {
     let mut hasher = DefaultHasher::new();
     cursor.size.width.hash(&mut hasher);
     cursor.size.height.hash(&mut hasher);
+    cursor.logical_size.width.hash(&mut hasher);
+    cursor.logical_size.height.hash(&mut hasher);
     cursor.hotspot.x.hash(&mut hasher);
     cursor.hotspot.y.hash(&mut hasher);
     cursor.premultiplied.hash(&mut hasher);
@@ -441,5 +517,71 @@ pub(super) fn pointer_icon_cursor_shape(icon: PointerIcon) -> u32 {
         PointerIcon::ZoomOut => 34,
         PointerIcon::DndAsk => 35,
         PointerIcon::AllResize => 36,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cursor_hotspot_and_pixels_follow_output_density_with_bounded_hardware_fallback() {
+        let cursor = RenderedCursor {
+            rgba: vec![255; 2 * 2 * 4],
+            size: SizeI {
+                width: 2,
+                height: 2,
+            },
+            logical_size: SizeI {
+                width: 2,
+                height: 2,
+            },
+            hotspot: PointI { x: 1, y: 1 },
+            premultiplied: true,
+        };
+        for factor in [1.0, 1.5, 2.0] {
+            let scale = crate::platform::ScaleFactor::new(factor).unwrap();
+            let dense = cursor
+                .for_hardware(
+                    scale,
+                    SizeI {
+                        width: 4,
+                        height: 4,
+                    },
+                )
+                .unwrap();
+            assert_eq!(dense.size.width, (2.0 * factor) as i32);
+            assert_eq!(dense.hotspot.x, factor.round() as i32);
+            assert_eq!(
+                dense.rgba,
+                vec![255; dense.size.width as usize * dense.size.height as usize * 4]
+            );
+            assert_eq!(dense.logical_size, cursor.logical_size);
+        }
+        assert!(
+            cursor
+                .for_hardware(
+                    crate::platform::ScaleFactor::new(2.0).unwrap(),
+                    SizeI {
+                        width: 3,
+                        height: 3
+                    }
+                )
+                .is_err()
+        );
+        let missing_pixels = RenderedCursor {
+            rgba: Vec::new(),
+            ..cursor
+        };
+        assert!(
+            missing_pixels
+                .for_hardware(
+                    Default::default(),
+                    SizeI {
+                        width: 4,
+                        height: 4
+                    }
+                )
+                .is_err()
+        );
     }
 }

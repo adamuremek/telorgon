@@ -8,6 +8,7 @@ pub(super) struct ShmCopyRequest {
     pub(super) snapshot: crate::compositor_wayland::SurfaceStateSnapshot,
     viewport: Option<crate::compositor_wayland::ViewportState>,
     reader: crate::compositor_wayland::ShmBufferReader,
+    output_scale: crate::platform::ScaleFactor,
 }
 
 impl ShmCopyRequest {
@@ -15,11 +16,13 @@ impl ShmCopyRequest {
         snapshot: crate::compositor_wayland::SurfaceStateSnapshot,
         viewport: Option<crate::compositor_wayland::ViewportState>,
         reader: crate::compositor_wayland::ShmBufferReader,
+        output_scale: crate::platform::ScaleFactor,
     ) -> Self {
         Self {
             snapshot,
             viewport,
             reader,
+            output_scale,
         }
     }
 
@@ -48,17 +51,18 @@ impl ShmCopyRequest {
                 shm_image_resource(buffer, revision, shm).map_err(|error| error.to_string())
             })
             .and_then(|image| {
-                transform_surface_image(
+                crate::compositor_render::transform_surface_image_at_scale(
                     image,
                     self.snapshot.buffer_scale,
                     self.snapshot.buffer_transform,
                     self.viewport,
+                    self.output_scale,
                 )
                 .map_err(|error| error.to_string())
             })
             // Preparing both owners here keeps all whole-buffer copying off the compositor/input
             // owner. Later commits patch the retained client copy and scene snapshot independently.
-            .map(PreparedClientImage::full);
+            .map(|(image, logical)| PreparedClientImage::full_scaled(image, logical));
         ShmCopyCompletion {
             snapshot: self.snapshot,
             buffer,

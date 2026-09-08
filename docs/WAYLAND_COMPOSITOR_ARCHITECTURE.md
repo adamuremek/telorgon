@@ -46,6 +46,10 @@ configured pointer theme, and a client-side xdg-decoration request suppresses Te
 See [Custom windows, assets, icons, and pointers](CUSTOM_WINDOWS_ASSETS_AND_POINTERS.md) for the
 complete authoring API.
 
+Output scaling now uses logical desktop units with automatic density selection at boot or
+`OutputScale::Fixed(factor)`. See [Logical units and output scaling](LOGICAL_UNITS_AND_OUTPUT_SCALING.md)
+for coordinate contracts, protocol announcements, configuration migration, and current limits.
+
 `LinuxDesktopConfig` selects the DRM device, seat, optional Wayland socket name, output scale,
 frame dimensions, and pointer extent. The umbrella exposes this mode through the
 `desktop-wayland-linux` Cargo feature; it remains target plumbing rather than a renderer-selection

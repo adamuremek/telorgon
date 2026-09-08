@@ -97,6 +97,8 @@ impl PointerGraphic {
         self
     }
 
+    /// Nominal size at 100%. The Linux desktop treats this as logical units and rasterizes
+    /// at its output density; managed hosts retain their existing pixel-size behavior.
     pub const fn size(mut self, physical_pixels: u16) -> Self {
         self.size = Some(physical_pixels);
         self
@@ -121,6 +123,7 @@ impl PointerGraphic {
         self.hotspot
     }
 
+    /// Historical name for the nominal 100% size. See [`Self::size`] for host interpretation.
     pub const fn physical_size(&self) -> Option<u16> {
         self.size
     }

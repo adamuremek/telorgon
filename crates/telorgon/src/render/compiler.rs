@@ -295,17 +295,19 @@ impl SceneCompiler {
                                 computed.local_content_rect.width - run.advance_width_px
                             }
                         };
+                        let raster_scale = text.raster_scale().get();
                         let (run_origin_x, run_origin_y) = snap_text_run_origin(
                             computed.local_content_rect.x + alignment_offset_x,
                             computed.local_content_rect.y,
                             computed.world_transform,
+                            raster_scale,
                         );
                         for glyph in run.glyphs.iter() {
                             let local_rect = crate::core::RectF {
-                                x: run_origin_x + glyph.dst_x as f32,
-                                y: run_origin_y + glyph.dst_y as f32,
-                                width: glyph.width_px as f32,
-                                height: glyph.height_px as f32,
+                                x: run_origin_x + glyph.dst_x as f32 / raster_scale,
+                                y: run_origin_y + glyph.dst_y as f32 / raster_scale,
+                                width: glyph.width_px as f32 / raster_scale,
+                                height: glyph.height_px as f32 / raster_scale,
                             };
                             self.glyph_scratch.push(GlyphInstance {
                                 node: *node,
@@ -313,6 +315,10 @@ impl SceneCompiler {
                                 view_bounds: computed.world_transform.transform_rect(local_rect),
                                 atlas_x: glyph.atlas_x,
                                 atlas_y: glyph.atlas_y,
+                                atlas_size: SizeI {
+                                    width: glyph.width_px,
+                                    height: glyph.height_px,
+                                },
                                 color: visual.style.color,
                                 opacity,
                                 clip: computed.clip,
@@ -463,7 +469,12 @@ fn positive_constraint(value: f32) -> Option<f32> {
 /// prevents linear atlas sampling from blending adjacent texels, while preserving every shaped
 /// glyph offset and therefore kerning. Transformed text remains unsnapped because rotation or
 /// scaling needs continuous placement rather than pixel-grid alignment.
-fn snap_text_run_origin(x: f32, y: f32, transform: crate::core::Affine2D) -> (f32, f32) {
+fn snap_text_run_origin(
+    x: f32,
+    y: f32,
+    transform: crate::core::Affine2D,
+    raster_scale: f32,
+) -> (f32, f32) {
     const EPSILON: f32 = 1.0e-6;
     let translation_only = (transform.m11 - 1.0).abs() <= EPSILON
         && transform.m12.abs() <= EPSILON
@@ -471,8 +482,8 @@ fn snap_text_run_origin(x: f32, y: f32, transform: crate::core::Affine2D) -> (f3
         && (transform.m22 - 1.0).abs() <= EPSILON;
     if translation_only {
         (
-            (x + transform.tx).round() - transform.tx,
-            (y + transform.ty).round() - transform.ty,
+            ((x + transform.tx) * raster_scale).round() / raster_scale - transform.tx,
+            ((y + transform.ty) * raster_scale).round() / raster_scale - transform.ty,
         )
     } else {
         (x, y)
@@ -653,7 +664,7 @@ mod tests {
     #[test]
     fn text_run_snapping_preserves_glyph_offsets_and_skips_transformed_text() {
         let translated = crate::core::Affine2D::translation(0.25, 0.75);
-        let snapped = snap_text_run_origin(10.4, 20.4, translated);
+        let snapped = snap_text_run_origin(10.4, 20.4, translated, 1.0);
         assert_eq!(snapped, (10.75, 20.25));
         assert_eq!(snapped.0 + translated.tx, 11.0);
         assert_eq!(snapped.1 + translated.ty, 21.0);
@@ -663,7 +674,7 @@ mod tests {
             m22: 1.5,
             ..crate::core::Affine2D::IDENTITY
         };
-        assert_eq!(snap_text_run_origin(10.4, 20.4, scaled), (10.4, 20.4));
+        assert_eq!(snap_text_run_origin(10.4, 20.4, scaled, 1.0), (10.4, 20.4));
     }
 
     #[test]

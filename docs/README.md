@@ -10,6 +10,9 @@ features.
 > use former `telorgon-*` crate names to identify ownership; [Code layout](CODE_LAYOUT.md) controls
 > their current module paths and [Cargo publishing](PUBLISHING.md) controls the registry surface.
 
+See [Logical units and output scaling](LOGICAL_UNITS_AND_OUTPUT_SCALING.md) for Linux desktop
+HiDPI behavior, boot density selection, configuration migration, and qualification limits.
+
 ## Reading order
 
 1. [Project scope and architecture](PROJECT_SCOPE_AND_ARCHITECTURE.md) defines Telorgon's mission,

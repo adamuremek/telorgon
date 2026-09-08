@@ -8,7 +8,10 @@ pub(super) struct ClientWindow {
     pub(super) offset: PointI,
     pub(super) server_decorated: bool,
     pub(super) position: PointI,
+    /// Surface-local logical extent used for window geometry and input.
     pub(super) size: SizeI,
+    /// Retained image pixel extent, independent of surface geometry.
+    pub(super) image_size: SizeI,
     pub(super) window_geometry: RectI,
     pub(super) requested_size: SizeI,
     pub(super) resize_anchor: Option<ResizeAnchor>,
@@ -53,12 +56,14 @@ pub(super) enum PreparedClientImage {
         alpha_mode: ImageAlphaMode,
     },
     Full {
+        logical_extent: SizeI,
         image: crate::render::ImageResource,
         retained_pixels: Vec<u8>,
     },
     Region(crate::render::ImageResourceUpdate),
     External {
         extent: SizeI,
+        raster_extent: SizeI,
         pixel_format: ImagePixelFormat,
         alpha_mode: ImageAlphaMode,
         image: ImageId,
@@ -81,9 +86,10 @@ pub(super) fn observe_surface_configure_acknowledgement(
 }
 
 impl PreparedClientImage {
-    pub(super) fn full(image: crate::render::ImageResource) -> Self {
+    pub(super) fn full_scaled(image: crate::render::ImageResource, logical_extent: SizeI) -> Self {
         let retained_pixels = image.pixels.to_vec();
         Self::Full {
+            logical_extent,
             image,
             retained_pixels,
         }
@@ -92,9 +98,17 @@ impl PreparedClientImage {
     fn extent(&self) -> SizeI {
         match self {
             Self::Unchanged { extent, .. } => *extent,
-            Self::Full { image, .. } => image.extent,
+            Self::Full { logical_extent, .. } => *logical_extent,
             Self::Region(update) => update.extent,
             Self::External { extent, .. } => *extent,
+        }
+    }
+
+    fn raster_extent(&self) -> SizeI {
+        match self {
+            Self::Full { image, .. } => image.extent,
+            Self::External { raster_extent, .. } => *raster_extent,
+            _ => self.extent(),
         }
     }
 
@@ -140,8 +154,10 @@ impl ClientWindow {
             PreparedClientImage::Full {
                 image,
                 retained_pixels,
+                logical_extent,
             } => {
-                self.size = image.extent;
+                self.size = logical_extent;
+                self.image_size = image.extent;
                 self.alpha_mode = image.alpha_mode;
                 self.pixel_format = image.pixel_format;
                 self.pixels = retained_pixels;
@@ -153,11 +169,13 @@ impl ClientWindow {
             }
             PreparedClientImage::External {
                 extent,
+                raster_extent,
                 pixel_format,
                 alpha_mode,
                 image,
             } => {
                 self.size = extent;
+                self.image_size = raster_extent;
                 self.alpha_mode = alpha_mode;
                 self.pixel_format = pixel_format;
                 self.pixels.clear();
@@ -174,7 +192,7 @@ impl ClientWindow {
                 DesktopImageUpdate::Regions(vec![DesktopImageRegion {
                     rect,
                     row_bytes: rect.width as usize * 4,
-                    pixels: copy_client_region(&self.pixels, self.size, rect).into(),
+                    pixels: copy_client_region(&self.pixels, self.image_size, rect).into(),
                 }])
             }
             PendingClientImageUpdate::External(image) => DesktopImageUpdate::External {
@@ -243,6 +261,7 @@ pub(super) fn apply_surface_publication(
         .role
         .ok_or_else(|| AppError::new("published surface has no role"))?;
     let image_extent = prepared_image.extent();
+    let raster_extent = prepared_image.raster_extent();
     let image_pixel_format = prepared_image.pixel_format();
     let image_alpha_mode = prepared_image.alpha_mode();
     let window_geometry = if role == SurfaceRole::XdgToplevel {
@@ -390,6 +409,7 @@ pub(super) fn apply_surface_publication(
             PreparedClientImage::Full {
                 image,
                 retained_pixels,
+                ..
             } => (
                 PendingClientImageUpdate::Full(image.pixels),
                 retained_pixels,
@@ -413,6 +433,7 @@ pub(super) fn apply_surface_publication(
                 server_decorated,
                 position: reconciled_position,
                 size: image_extent,
+                image_size: raster_extent,
                 window_geometry,
                 requested_size,
                 restore_geometry,

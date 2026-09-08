@@ -12,9 +12,7 @@ use std::time::{Duration, Instant};
 #[path = "desktop_wayland/transparency_tests.rs"]
 mod transparency_tests;
 
-use crate::compositor_render::{
-    shm_image_metadata, shm_image_resource, shm_image_update, transform_surface_image,
-};
+use crate::compositor_render::{shm_image_metadata, shm_image_resource, shm_image_update};
 use crate::compositor_wayland::{
     BufferDescriptor, BufferTransform, ButtonState as WaylandButtonState, ClientLimits,
     CompositorAction, CursorImage, NativeCompositor, OutputDescription, OutputMode, OutputState,
@@ -138,7 +136,22 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .position(|mode| mode.preferred())
         .unwrap_or(0);
     let mode = connector.modes[mode_index];
-    let extent = mode.size();
+    let physical_extent = mode.size();
+    let output_scale = config
+        .output_scale
+        .resolve(physical_extent, connector.physical_millimeters)?;
+    let extent = output_scale.logical_size(physical_extent);
+    eprintln!(
+        "telorgon-kms: {}x{} pixels, {}x{} mm, {:.0}% scale, {}x{} logical units ({:?})",
+        physical_extent.width,
+        physical_extent.height,
+        connector.physical_millimeters.width,
+        connector.physical_millimeters.height,
+        output_scale.get() * 100.0,
+        extent.width,
+        extent.height,
+        config.output_scale
+    );
     let refresh_period =
         Duration::from_nanos(1_000_000_000_000_u64 / u64::from(mode.refresh_millihertz().max(1)));
     let mode_blob = kms.create_mode_blob(&mode).map_err(app_error)?;
@@ -160,7 +173,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         &topology,
         connector,
         mode_blob.id(),
-        extent,
+        physical_extent,
         renderer,
     )?;
     let crtc_index = scanout.crtc_index;
@@ -209,7 +222,11 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
     let mut wayland =
         NativeCompositor::new(&display, ClientLimits::default()).map_err(app_error)?;
     wayland
-        .add_output(&display, 1, output_state(connector, mode_index, &config)?)
+        .add_output(
+            &display,
+            1,
+            output_state(connector, mode_index, output_scale)?,
+        )
         .map_err(app_error)?;
     wayland
         .add_seat(
@@ -347,10 +364,10 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         .keyboard_keymap(1, keymap.fd(), keymap.size())
         .map_err(app_error)?;
 
-    let mut background = Layer::new(background, extent, assets)?;
+    let mut background = Layer::new(background, extent, assets, output_scale)?;
     let mut frame_layers = BTreeMap::<WaylandSurfaceId, WindowFrameLayer>::new();
     let mut pointer = pointer
-        .map(|driver| Layer::new(driver, config.pointer_extent, assets))
+        .map(|driver| Layer::new(driver, config.pointer_extent, assets, output_scale))
         .transpose()?;
     let mut icon_layers = icons
         .into_iter()
@@ -364,6 +381,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         height: 24,
                     },
                     assets,
+                    output_scale,
                 )?,
             ))
         })
@@ -394,7 +412,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 width,
                 height,
                 reserved_space: reserved_space.round().max(0.0) as i32,
-                layer: Layer::new(driver, widget_extent, assets)?,
+                layer: Layer::new(driver, widget_extent, assets, output_scale)?,
             })
         })
         .collect::<AppResult<Vec<_>>>()?;
@@ -406,7 +424,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
         y: extent.height as f32 * 0.5,
     };
     if let Some(cursor) = &mut hardware_cursor {
-        cursor.move_to(pointer_position);
+        cursor.move_to(output_scale.physical_point(pointer_position));
     }
     let mut drag_position = pointer_position;
     let mut pointer_focus = None;
@@ -582,6 +600,9 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                         delta,
                         unaccelerated,
                     } => {
+                        // Libinput motion is normalized mouse movement, not KMS pixels.
+                        // Apply it in logical units so pointer speed is stable across densities;
+                        // preserve the device's unaccelerated vector for relative-pointer clients.
                         let scene_follows_pointer = window_interaction.is_some()
                             || (wayland.drag_active(1) && wayland.drag_touch_slot(1).is_none());
                         other_work_seen |= scene_follows_pointer;
@@ -1156,7 +1177,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     hardware_cursor
                         .as_mut()
                         .expect("atomic hardware cursor checked")
-                        .move_to(pointer_position);
+                        .move_to(output_scale.physical_point(pointer_position));
                     #[cfg(feature = "profiler")]
                     {
                         cursor_path = PointerCursorPath::Deferred;
@@ -1416,6 +1437,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             buffer_scale: snapshot.buffer_scale,
                             buffer_transform: snapshot.buffer_transform,
                             viewport,
+                            output_scale,
                         })?;
                         let pending = pending_dma_bufs.entry(attachment.buffer).or_default();
                         *pending = pending
@@ -1441,6 +1463,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             &snapshot,
                             PreparedClientImage::External {
                                 extent: queued.extent,
+                                raster_extent: queued.raster_extent,
                                 pixel_format: queued.pixel_format,
                                 alpha_mode: queued.alpha_mode,
                                 image: queued.image,
@@ -1537,6 +1560,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                             wayland
                                 .shm_buffer_reader(attachment.buffer)
                                 .map_err(app_error)?,
+                            output_scale,
                         );
                         let buffer = request.buffer();
                         let request_surface = request.snapshot.surface;
@@ -1922,8 +1946,8 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     plane_properties,
                     mode_blob.id(),
                     frame_slots[slot_index].framebuffer,
-                    extent.width as u32,
-                    extent.height as u32,
+                    physical_extent.width as u32,
+                    physical_extent.height as u32,
                 )
                 .map_err(app_error)?
             } else {
@@ -2172,6 +2196,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                     &app_icon_profile,
                     &runtime_wake,
                     now,
+                    output_scale,
                 )?;
             }
             let cursor_image = wayland
@@ -2190,15 +2215,16 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 &pointer_config,
                 pointer_theme.as_ref(),
                 &mut pointer_media,
+                output_scale,
             )?;
             let mut cursor_on_hardware = false;
             if let Some(cursor) = &mut hardware_cursor {
-                cursor.move_to(pointer_position);
+                cursor.move_to(output_scale.physical_point(pointer_position));
                 if !cursor.composited_fallback_requested() {
                     let update = if let Some(image) =
                         rendered_cursor.as_ref().and_then(CursorVisual::image)
                     {
-                        cursor.set_image(image).map(|_| true)
+                        cursor.set_logical_image(image, output_scale).map(|_| true)
                     } else {
                         cursor.hide();
                         Ok(rendered_cursor.is_none())
@@ -2257,6 +2283,7 @@ pub(crate) fn run(application: ReadyDesktopEnvironment) -> AppResult<()> {
                 repaint = false;
                 continue;
             };
+            let frame = frame.into_physical(output_scale, physical_extent);
             let frame_id = next_frame_id;
             frame_surface_revisions[scanout_index] = frame.surface_revisions.clone();
             next_frame_id = next_frame_id.wrapping_add(1).max(1);
@@ -2420,7 +2447,7 @@ fn record_libinput_event(
 fn output_state(
     connector: &crate::presenter_vulkan_kms::KmsConnector,
     current_mode: usize,
-    config: &LinuxDesktopConfig,
+    scale: crate::platform::ScaleFactor,
 ) -> AppResult<OutputState> {
     let name = format!(
         "DRM-{}-{}",
@@ -2443,7 +2470,7 @@ fn output_state(
             model: name,
             physical_millimeters: connector.physical_millimeters,
             logical_position: PointI::default(),
-            scale: config.output_scale,
+            scale,
             transform: OutputTransform::Normal,
             modes,
         },

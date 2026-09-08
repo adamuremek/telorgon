@@ -119,7 +119,7 @@ fn runtime_directory_rejects_symlinks_and_insecure_permissions() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", feature = "desktop-wayland-linux"))]
 fn wayland_socket_auto_selection_and_cleanup_use_the_explicit_directory() {
     let fixture = Fixture::new();
     let old_env = std::env::var_os("XDG_RUNTIME_DIR");

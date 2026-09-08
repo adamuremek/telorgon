@@ -1307,8 +1307,8 @@ fn convert_glyph(instance: &GlyphInstance) -> GpuGlyphInstance {
         uv_texels: [
             instance.atlas_x as f32,
             instance.atlas_y as f32,
-            instance.rect.width,
-            instance.rect.height,
+            instance.atlas_size.width as f32,
+            instance.atlas_size.height as f32,
         ],
         color_spatial_clip_page: [
             pack(instance.color),
@@ -1451,6 +1451,7 @@ pub(crate) fn validate_texture_count(order: &[DrawItem]) -> Result<(), &'static 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::RectF;
     use crate::layout::{ClipId, SpatialId};
     use crate::render::{BlendMode, PrimitiveKind};
     fn draw(kind: PrimitiveKind, resource: u32) -> DrawItem {
@@ -1471,6 +1472,33 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn glyph_upload_keeps_physical_atlas_texels_separate_from_logical_quad() {
+        let instance = GlyphInstance {
+            node: crate::scene::NodeId::new(0, 1),
+            rect: RectF {
+                x: 2.0,
+                y: 3.0,
+                width: 10.0,
+                height: 12.0,
+            },
+            view_bounds: RectF::ZERO,
+            atlas_x: 5,
+            atlas_y: 7,
+            atlas_size: crate::core::SizeI {
+                width: 20,
+                height: 24,
+            },
+            color: ColorRgba8::rgba(255, 255, 255, 255),
+            opacity: 1.0,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        };
+        let gpu = convert_glyph(&instance);
+        assert_eq!(gpu.rect, [2.0, 3.0, 10.0, 12.0]);
+        assert_eq!(gpu.uv_texels, [5.0, 7.0, 20.0, 24.0]);
+    }
+
     #[test]
     fn batching_preserves_mixed_order_and_merges_only_adjacent_compatible_items() {
         let batches = build_batches(&[

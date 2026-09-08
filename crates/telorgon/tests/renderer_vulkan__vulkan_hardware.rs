@@ -436,6 +436,10 @@ fn mixed_scene_matches_the_software_reference_on_real_vulkan_hardware() {
         },
         atlas_x: 0,
         atlas_y: 0,
+        atlas_size: SizeI {
+            width: 2,
+            height: 2,
+        },
         color: ColorRgba8::rgba(255, 255, 0, 255),
         opacity: 1.0,
         clip: ClipId(0),

@@ -168,6 +168,8 @@ pub struct GlyphInstance {
     pub view_bounds: RectF,
     pub atlas_x: i32,
     pub atlas_y: i32,
+    /// Physical atlas texels, independent of the logical glyph rectangle.
+    pub atlas_size: SizeI,
     pub color: ColorRgba8,
     pub opacity: f32,
     pub clip: ClipId,

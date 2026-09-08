@@ -35,14 +35,18 @@ pub struct LinuxDesktopConfig {
     pub seat_name: String,
     pub socket_name: Option<String>,
     pub session: crate::session::SessionConfig,
-    pub output_scale: i32,
+    /// All compositor geometry uses logical units; this selects pixels per logical unit.
+    pub output_scale: super::OutputScale,
+    /// Window border thickness in logical units.
     pub window_border: i32,
+    /// Title-bar height in logical units.
     pub titlebar_height: i32,
     /// Fallback content veil during interactive resize and while awaiting the final client image.
     /// Only the preview geometry changes during the drag; the client receives its final size on
     /// release. Alpha reveals lower desktop layers, not stale client content. Frame templates
     /// can override this through [`WindowFrameTemplate::content_style`].
     pub resize_preview_color: ColorRgba8,
+    /// Default pointer size in logical units.
     pub pointer_extent: SizeI,
 }
 
@@ -53,7 +57,7 @@ impl Default for LinuxDesktopConfig {
             seat_name: "seat0".to_owned(),
             socket_name: None,
             session: crate::session::SessionConfig::default(),
-            output_scale: 1,
+            output_scale: super::OutputScale::Auto,
             window_border: 4,
             titlebar_height: 32,
             resize_preview_color: ColorRgba8 {
@@ -72,6 +76,7 @@ impl Default for LinuxDesktopConfig {
 
 impl LinuxDesktopConfig {
     fn validate(&self) -> AppResult<()> {
+        self.output_scale.validate()?;
         self.session
             .validate()
             .map_err(|e| AppError::new(e.to_string()))?;
@@ -83,7 +88,6 @@ impl LinuxDesktopConfig {
             || self.socket_name.as_ref().is_some_and(|name| {
                 name.trim().is_empty() || name.contains(['/', '\\']) || name == "." || name == ".."
             })
-            || self.output_scale <= 0
             || self.window_border < 0
             || self.titlebar_height < 0
             || self.pointer_extent.width <= 0

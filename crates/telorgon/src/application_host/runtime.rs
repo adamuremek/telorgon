@@ -302,6 +302,15 @@ impl<D: ComponentDriver> AppRuntimeCore<D> {
         self.extent
     }
 
+    /// Change glyph raster density while preserving logical layout and input coordinates.
+    pub fn set_raster_scale(&mut self, scale: crate::platform::ScaleFactor) {
+        if self.text.raster_scale() != scale {
+            self.text.set_raster_scale(scale);
+            self.compiler = SceneCompiler::default();
+            self.view.scheduler_mut().request();
+        }
+    }
+
     pub fn resize(&mut self, extent: SizeI) -> AppResult<()> {
         if extent.width <= 0 || extent.height <= 0 {
             return Err(AppError::new("runtime extent must be positive"));

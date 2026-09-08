@@ -194,11 +194,31 @@ pub fn transform_surface_image(
     transform: BufferTransform,
     viewport: Option<ViewportState>,
 ) -> Result<ImageResource, CompositorRenderError> {
+    transform_surface_image_at_scale(
+        image,
+        buffer_scale,
+        transform,
+        viewport,
+        crate::platform::ScaleFactor::default(),
+    )
+    .map(|(image, _)| image)
+}
+
+/// Materialize directly from original buffer pixels at output density. The returned logical
+/// extent remains independent of the image allocation, preventing a downsample/upsample cycle.
+pub fn transform_surface_image_at_scale(
+    image: ImageResource,
+    buffer_scale: i32,
+    transform: BufferTransform,
+    viewport: Option<ViewportState>,
+    output_scale: crate::platform::ScaleFactor,
+) -> Result<(ImageResource, SizeI), CompositorRenderError> {
     if buffer_scale <= 0 {
         return Err(CompositorRenderError::new("buffer scale must be positive"));
     }
     if buffer_scale == 1 && transform == BufferTransform::Normal && viewport.is_none() {
-        return Ok(image);
+        let logical = image.extent;
+        return Ok((image, logical));
     }
     let input_width = usize::try_from(image.extent.width)
         .map_err(|_| CompositorRenderError::new("invalid image width"))?;
@@ -230,28 +250,6 @@ pub fn transform_surface_image(
     }
     let logical_width = transformed_width / scale;
     let logical_height = transformed_height / scale;
-    let logical_len = logical_width
-        .checked_mul(logical_height)
-        .and_then(|pixels| pixels.checked_mul(4))
-        .ok_or_else(|| CompositorRenderError::new("logical surface size overflow"))?;
-    let mut logical = vec![0_u8; logical_len];
-    for y in 0..logical_height {
-        for x in 0..logical_width {
-            let transformed_x = (x * scale + scale / 2).min(transformed_width - 1);
-            let transformed_y = (y * scale + scale / 2).min(transformed_height - 1);
-            let (source_x, source_y) = transformed_coordinate(
-                transform,
-                transformed_x,
-                transformed_y,
-                input_width,
-                input_height,
-            );
-            let source = (source_y * input_width + source_x) * 4;
-            let target = (y * logical_width + x) * 4;
-            logical[target..target + 4].copy_from_slice(&image.pixels[source..source + 4]);
-        }
-    }
-
     let viewport = viewport.unwrap_or_default();
     let source = viewport.source.unwrap_or(ViewportSource {
         x: 0.0,
@@ -283,8 +281,16 @@ pub fn transform_surface_image(
             "viewport destination must be positive",
         ));
     }
-    let destination_width = destination.width as usize;
-    let destination_height = destination.height as usize;
+    let raster = SizeI {
+        width: (destination.width as f32 * output_scale.get())
+            .round()
+            .max(1.0) as i32,
+        height: (destination.height as f32 * output_scale.get())
+            .round()
+            .max(1.0) as i32,
+    };
+    let destination_width = raster.width as usize;
+    let destination_height = raster.height as usize;
     let destination_len = destination_width
         .checked_mul(destination_height)
         .and_then(|pixels| pixels.checked_mul(4))
@@ -293,23 +299,35 @@ pub fn transform_surface_image(
     let mut pixels = vec![0_u8; destination_len];
     for y in 0..destination_height {
         for x in 0..destination_width {
-            let sample_x = (source.x + (x as f64 + 0.5) * source.width / destination_width as f64)
+            let transformed_x = ((source.x
+                + (x as f64 + 0.5) * source.width / destination_width as f64)
+                * scale as f64)
                 .floor() as usize;
-            let sample_y = (source.y + (y as f64 + 0.5) * source.height / destination_height as f64)
+            let transformed_y = ((source.y
+                + (y as f64 + 0.5) * source.height / destination_height as f64)
+                * scale as f64)
                 .floor() as usize;
-            let sample_x = sample_x.min(logical_width - 1);
-            let sample_y = sample_y.min(logical_height - 1);
-            let source_index = (sample_y * logical_width + sample_x) * 4;
+            let (source_x, source_y) = transformed_coordinate(
+                transform,
+                transformed_x.min(transformed_width - 1),
+                transformed_y.min(transformed_height - 1),
+                input_width,
+                input_height,
+            );
+            let source_index = (source_y * input_width + source_x) * 4;
             let target_index = (y * destination_width + x) * 4;
             pixels[target_index..target_index + 4]
-                .copy_from_slice(&logical[source_index..source_index + 4]);
+                .copy_from_slice(&image.pixels[source_index..source_index + 4]);
         }
     }
-    Ok(ImageResource {
-        extent: destination,
-        pixels: Arc::from(pixels),
-        ..image
-    })
+    Ok((
+        ImageResource {
+            extent: raster,
+            pixels: Arc::from(pixels),
+            ..image
+        },
+        destination,
+    ))
 }
 
 fn transformed_coordinate(
@@ -582,6 +600,59 @@ mod tests {
                 255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
             ]),
         };
+        let (dense, logical) = transform_surface_image_at_scale(
+            image.clone(),
+            2,
+            BufferTransform::Normal,
+            None,
+            crate::platform::ScaleFactor::new(2.0).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            logical,
+            SizeI {
+                width: 1,
+                height: 1
+            }
+        );
+        assert_eq!(dense.extent, image.extent);
+        assert_eq!(
+            dense.pixels, image.pixels,
+            "2x client detail must survive materialization"
+        );
+        let (fractional, logical) = transform_surface_image_at_scale(
+            image.clone(),
+            1,
+            BufferTransform::Normal,
+            Some(ViewportState {
+                source: None,
+                destination: Some(SizeI {
+                    width: 1,
+                    height: 1,
+                }),
+            }),
+            crate::platform::ScaleFactor::new(1.5).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            logical,
+            SizeI {
+                width: 1,
+                height: 1
+            }
+        );
+        assert_eq!(fractional.extent, image.extent);
+        assert_eq!(fractional.pixels, image.pixels);
+        assert!(
+            transform_surface_image_at_scale(
+                image.clone(),
+                3,
+                BufferTransform::Normal,
+                None,
+                crate::platform::ScaleFactor::new(2.0).unwrap()
+            )
+            .is_err()
+        );
         let scaled = transform_surface_image(image.clone(), 2, BufferTransform::Normal, None)
             .expect("scale is valid");
         assert_eq!(

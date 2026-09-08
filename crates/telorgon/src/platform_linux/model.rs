@@ -35,7 +35,9 @@ pub struct LinuxInputEvent {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LinuxInputEventKind {
     PointerMotion {
+        /// Libinput's normalized accelerated movement; the desktop applies it in logical units.
         delta: PointF,
+        /// Device-space unaccelerated movement, independent of the output pixel density.
         unaccelerated: PointF,
     },
     PointerAbsolute {

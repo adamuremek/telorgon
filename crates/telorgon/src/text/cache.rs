@@ -54,6 +54,17 @@ impl RetainedTextSystem {
         })
     }
 
+    pub fn raster_scale(&self) -> crate::platform::ScaleFactor {
+        self.engine.raster_scale()
+    }
+
+    pub fn set_raster_scale(&mut self, scale: crate::platform::ScaleFactor) {
+        if self.engine.raster_scale() != scale {
+            self.clear();
+            self.engine.set_raster_scale(scale);
+        }
+    }
+
     /// Shapes and caches constraint-dependent text geometry without touching the glyph atlas.
     pub fn measure(&mut self, request: RetainedTextRequest<'_>) -> TextResult<TextRunId> {
         let RetainedTextRequest {
@@ -65,6 +76,7 @@ impl RetainedTextSystem {
             max_width_px,
             max_height_px,
         } = request;
+        key.scale_bits = self.engine.raster_scale().get().to_bits();
         key.text_hash = stable_string_hash(text);
         key.family_hash = stable_string_hash(family);
         key.size_bits = (font_size_px as f32).to_bits();

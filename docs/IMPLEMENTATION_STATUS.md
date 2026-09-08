@@ -8,6 +8,12 @@
 > [Managed sessions and process launching](SESSION_AND_PROCESS_LAUNCHING.md) for ownership and
 > recovery limits; these additions are not production-qualified.
 
+> Linux desktop HiDPI: logical layout/input, output-density text/client images, and physical KMS
+> composition are integrated with CPU regression coverage. Automatic boot scaling uses reported
+> monitor dimensions with a fixed override. Native client events and hardware presentation still
+> await manual qualification; dynamic scale changes and multiple outputs are not implemented here.
+> See [Logical units and output scaling](LOGICAL_UNITS_AND_OUTPUT_SCALING.md).
+
 ## Status vocabulary
 
 This document records what the repository currently demonstrates. It is deliberately separate from

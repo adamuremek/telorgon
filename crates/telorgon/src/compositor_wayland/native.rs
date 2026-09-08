@@ -456,6 +456,8 @@ struct NativeState {
     core: CompositorCore,
     clients: BTreeMap<usize, ClientId>,
     resources: BTreeMap<ProtocolObjectId, usize>,
+    mapped_outputs: BTreeSet<WaylandSurfaceId>,
+    entered_outputs: BTreeSet<(WaylandSurfaceId, ProtocolObjectId)>,
     regions: BTreeMap<ProtocolObjectId, Vec<RectI>>,
     shm_pools: BTreeMap<ProtocolObjectId, NativeShmPool>,
     buffer_files: BTreeMap<WaylandBufferId, OwnedFd>,
@@ -535,6 +537,8 @@ impl<'display> NativeCompositor<'display> {
             core: CompositorCore::new(limits).map_err(error)?,
             clients: BTreeMap::new(),
             resources: BTreeMap::new(),
+            mapped_outputs: BTreeSet::new(),
+            entered_outputs: BTreeSet::new(),
             regions: BTreeMap::new(),
             shm_pools: BTreeMap::new(),
             buffer_files: BTreeMap::new(),
@@ -2684,6 +2688,9 @@ impl NativeState {
         }
         if let ResourceKind::Output(output) = kind {
             self.send_output_description(resource, output)?;
+            for surface in self.mapped_outputs.iter().copied().collect::<Vec<_>>() {
+                self.update_surface_output(surface, true)?;
+            }
         }
         if let ResourceKind::Seat(seat) = kind {
             self.send_seat_description(resource, seat)?;
@@ -2784,7 +2791,7 @@ impl NativeState {
                 "wl_output",
                 "scale",
                 &mut [ffi::wl_argument {
-                    i: description.scale,
+                    i: description.scale.get().ceil() as i32,
                 }],
             )?;
         }
@@ -3958,9 +3965,7 @@ impl NativeState {
             .values()
             .find(|output| output.enabled)
             .map_or(120, |output| {
-                u32::try_from(output.description.scale)
-                    .unwrap_or(1)
-                    .saturating_mul(120)
+                (output.description.scale.get() * 120.0).round() as u32
             });
         self.post_event(
             scale,
@@ -4519,10 +4524,7 @@ impl NativeState {
             },
             _ => mode.size,
         };
-        Ok(crate::core::SizeI {
-            width: transformed.width / output.description.scale,
-            height: transformed.height / output.description.scale,
-        })
+        Ok(output.description.scale.logical_size(transformed))
     }
 
     fn session_lock_frame_presented(
@@ -5038,7 +5040,7 @@ impl NativeState {
                     .world
                     .create_surface(context.client, surface)
                     .map_err(error)?;
-                self.create_resource(
+                let created = self.create_resource(
                     resource.client(),
                     context.client,
                     "wl_surface",
@@ -5047,6 +5049,20 @@ impl NativeState {
                     ResourceKind::Surface(surface),
                     true,
                 )?;
+                if created.version() >= 6 {
+                    let scale = self
+                        .core
+                        .outputs
+                        .values()
+                        .find(|output| output.enabled)
+                        .map_or(1, |output| output.description.scale.get().ceil() as i32);
+                    self.post_event(
+                        created,
+                        "wl_surface",
+                        "preferred_buffer_scale",
+                        &mut [ffi::wl_argument { i: scale }],
+                    )?;
+                }
             }
             "create_region" => {
                 let object = self.peek_next_object()?;
@@ -5948,6 +5964,7 @@ impl NativeState {
             self.committed_releases
                 .insert((surface, outcome.revision), release);
         }
+        self.update_surface_output(surface, outcome.mapped)?;
         self.core.queue_action(if outcome.mapped {
             CompositorAction::PublishSurface(surface)
         } else {
@@ -5964,6 +5981,7 @@ impl NativeState {
             let child_outcome = self.surface_mut(child)?.commit().map_err(error)?;
             self.commit_viewport_state(child)?;
             self.commit_feedback_state(child, child_outcome.revision);
+            self.update_surface_output(child, child_outcome.mapped)?;
             self.core.queue_action(if child_outcome.mapped {
                 CompositorAction::PublishSurface(child)
             } else {
@@ -6643,6 +6661,61 @@ impl NativeState {
         Ok(matches)
     }
 
+    /// The desktop currently places all mapped surfaces on its single enabled output.
+    /// Track each binding separately so late binds and map/unmap cycles get balanced events.
+    fn update_surface_output(
+        &mut self,
+        surface: WaylandSurfaceId,
+        mapped: bool,
+    ) -> Result<(), NativeCompositorError> {
+        let raw = self.surface_resource(surface)?;
+        let resource = unsafe { ResourceRef::from_raw(raw) }.expect("live surface resource");
+        let context = unsafe { &*resource.user_data().cast::<ResourceContext>() };
+        let outputs = self
+            .resources_for_client(context.client, |kind| {
+                matches!(kind, ResourceKind::Output(_))
+            })?
+            .into_iter()
+            .map(|output| {
+                let ctx = unsafe { &*output.user_data().cast::<ResourceContext>() };
+                (ctx.object, ctx.kind, output.identity())
+            })
+            .collect::<Vec<_>>();
+        for (object, kind, identity) in outputs {
+            let ResourceKind::Output(output) = kind else {
+                unreachable!()
+            };
+            let present = mapped
+                && self
+                    .core
+                    .outputs
+                    .get(&output)
+                    .is_some_and(|output| output.enabled);
+            let entered = self.entered_outputs.contains(&(surface, object));
+            if present != entered {
+                self.post_event(
+                    resource,
+                    "wl_surface",
+                    if present { "enter" } else { "leave" },
+                    &mut [ffi::wl_argument {
+                        o: identity as *mut ffi::wl_resource,
+                    }],
+                )?;
+                if present {
+                    self.entered_outputs.insert((surface, object));
+                } else {
+                    self.entered_outputs.remove(&(surface, object));
+                }
+            }
+        }
+        if mapped {
+            self.mapped_outputs.insert(surface);
+        } else {
+            self.mapped_outputs.remove(&surface);
+        }
+        Ok(())
+    }
+
     fn surface_resource(
         &self,
         surface: WaylandSurfaceId,
@@ -6765,6 +6838,13 @@ impl NativeState {
 
     fn destroy_context(&mut self, context: &ResourceContext) {
         self.resources.remove(&context.object);
+        self.entered_outputs
+            .retain(|(_, output)| *output != context.object);
+        if let ResourceKind::Surface(surface) = context.kind {
+            self.mapped_outputs.remove(&surface);
+            self.entered_outputs
+                .retain(|(candidate, _)| *candidate != surface);
+        }
         let abort_drag = self
             .active_drag
             .as_ref()

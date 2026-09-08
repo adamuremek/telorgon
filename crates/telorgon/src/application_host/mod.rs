@@ -4,6 +4,8 @@
 compile_error!("feature `desktop-wayland-linux` is supported only for Linux targets");
 
 mod declaration;
+mod output_scale;
+pub use output_scale::OutputScale;
 mod delta_queue;
 #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
 mod desktop_wayland;

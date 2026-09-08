@@ -61,6 +61,58 @@ impl ScaleFactor {
     pub const fn get(self) -> f32 {
         self.0
     }
+
+    /// Convert logical positions or vectors into physical pixels without rounding.
+    pub fn physical_point(self, p: crate::core::PointF) -> crate::core::PointF {
+        crate::core::PointF {
+            x: p.x * self.0,
+            y: p.y * self.0,
+        }
+    }
+
+    /// Convert physical positions or vectors into logical units without rounding.
+    pub fn logical_point(self, p: crate::core::PointF) -> crate::core::PointF {
+        crate::core::PointF {
+            x: p.x / self.0,
+            y: p.y / self.0,
+        }
+    }
+
+    /// Integer surface/layout extent covering the entire physical output.
+    pub fn logical_size(self, pixels: crate::core::SizeI) -> crate::core::SizeI {
+        crate::core::SizeI {
+            width: (pixels.width as f32 / self.0).ceil() as i32,
+            height: (pixels.height as f32 / self.0).ceil() as i32,
+        }
+    }
+
+    /// Snap shared placement edges consistently; never round origin and width separately.
+    pub fn physical_rect(self, rect: crate::core::RectI) -> crate::core::RectI {
+        let x = (rect.x as f64 * self.0 as f64).round() as i32;
+        let y = (rect.y as f64 * self.0 as f64).round() as i32;
+        let right = (rect.right() as f64 * self.0 as f64).round() as i32;
+        let bottom = (rect.bottom() as f64 * self.0 as f64).round() as i32;
+        crate::core::RectI {
+            x,
+            y,
+            width: right.saturating_sub(x),
+            height: bottom.saturating_sub(y),
+        }
+    }
+
+    /// Damage covers every touched physical pixel, including fractional edges.
+    pub fn physical_damage(self, rect: crate::core::RectI) -> crate::core::RectI {
+        let x = (rect.x as f64 * self.0 as f64).floor() as i32;
+        let y = (rect.y as f64 * self.0 as f64).floor() as i32;
+        let right = (rect.right() as f64 * self.0 as f64).ceil() as i32;
+        let bottom = (rect.bottom() as f64 * self.0 as f64).ceil() as i32;
+        crate::core::RectI {
+            x,
+            y,
+            width: right.saturating_sub(x),
+            height: bottom.saturating_sub(y),
+        }
+    }
 }
 
 impl Default for ScaleFactor {
@@ -710,6 +762,64 @@ mod tests {
     }
 
     fn assert_snapshot<T: Clone + PartialEq + Send + Sync + 'static>() {}
+
+    #[test]
+    fn desktop_coordinates_round_shared_edges_and_cover_fractional_damage() {
+        use crate::core::{PointF, RectI, SizeI};
+        let scale = ScaleFactor::new(1.5).unwrap();
+        let left = scale.physical_rect(RectI {
+            x: -1,
+            y: 0,
+            width: 4,
+            height: 2,
+        });
+        let right = scale.physical_rect(RectI {
+            x: 3,
+            y: 0,
+            width: 4,
+            height: 2,
+        });
+        assert_eq!(left.right(), right.x);
+        assert_eq!(
+            left,
+            RectI {
+                x: -2,
+                y: 0,
+                width: 7,
+                height: 3
+            }
+        );
+        assert_eq!(
+            scale.physical_damage(RectI {
+                x: 1,
+                y: -1,
+                width: 2,
+                height: 2
+            }),
+            RectI {
+                x: 1,
+                y: -2,
+                width: 4,
+                height: 4
+            }
+        );
+        assert_eq!(
+            scale.logical_size(SizeI {
+                width: 1921,
+                height: 1081
+            }),
+            SizeI {
+                width: 1281,
+                height: 721
+            }
+        );
+        let pointer = PointF { x: 125.5, y: 71.25 };
+        assert_eq!(scale.logical_point(scale.physical_point(pointer)), pointer);
+        assert_eq!(
+            scale.logical_point(PointF { x: 3.0, y: -6.0 }),
+            PointF { x: 2.0, y: -4.0 }
+        );
+    }
 
     #[test]
     fn scale_derives_coherent_logical_extent_and_named_transform_spaces() {

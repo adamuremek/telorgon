@@ -420,6 +420,47 @@ pub(super) struct DesktopFrame {
     pub damage: Option<RectI>,
 }
 
+impl DesktopFrame {
+    /// Cross the logical desktop -> physical scanout boundary exactly once. Scene content and
+    /// publication revisions stay unchanged; both backends receive the same placement mapping.
+    pub(super) fn into_physical(
+        mut self,
+        scale: crate::platform::ScaleFactor,
+        extent: SizeI,
+    ) -> Self {
+        self.extent = extent;
+        self.damage = self.damage.and_then(|rect| {
+            intersect(
+                scale.physical_damage(rect),
+                RectI {
+                    x: 0,
+                    y: 0,
+                    width: extent.width,
+                    height: extent.height,
+                },
+            )
+        });
+        for placement in &mut self.placements {
+            placement.target = scale.physical_rect(placement.target);
+            placement.clip = placement.clip.map(|rect| scale.physical_rect(rect));
+            for clip in placement.rounded_clips.iter_mut().flatten() {
+                let s = scale.get();
+                clip.rect = RectF {
+                    x: clip.rect.x * s,
+                    y: clip.rect.y * s,
+                    width: clip.rect.width * s,
+                    height: clip.rect.height * s,
+                };
+                clip.radii.top_left *= s;
+                clip.radii.top_right *= s;
+                clip.radii.bottom_left *= s;
+                clip.radii.bottom_right *= s;
+            }
+        }
+        self
+    }
+}
+
 struct ImageScene {
     source: RenderScene,
     source_version: u64,
@@ -1096,6 +1137,63 @@ fn intersect(left: RectI, right: RectI) -> Option<RectI> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn output_mapping_scales_geometry_clips_and_damage_once_and_preserves_revisions() {
+        let logical = RectI {
+            x: 1,
+            y: 3,
+            width: 100,
+            height: 40,
+        };
+        let mut rounded = RoundedClip::new(
+            RectF {
+                x: 1.0,
+                y: 3.0,
+                width: 100.0,
+                height: 40.0,
+            },
+            crate::ui::CornerRadii::all(4.0),
+        );
+        rounded.inverted = true;
+        let frame = DesktopFrame {
+            extent: SizeI {
+                width: 1280,
+                height: 720,
+            },
+            live_scenes: BTreeSet::new(),
+            updates: Vec::new(),
+            placements: vec![DesktopPlacement {
+                key: DesktopLayerKey::Surface(1),
+                scene: DesktopSceneKey::Surface(1),
+                target: logical,
+                clip: Some(logical),
+                rounded_clips: [Some(rounded), None],
+            }],
+            surface_revisions: vec![(1, 9)],
+            damage: Some(logical),
+        };
+        for factor in [1.0, 1.5, 2.0] {
+            let scale = crate::platform::ScaleFactor::new(factor).unwrap();
+            let pixels = SizeI {
+                width: (1280.0 * factor) as i32,
+                height: (720.0 * factor) as i32,
+            };
+            let physical = frame.clone().into_physical(scale, pixels);
+            assert_eq!(physical.extent, pixels);
+            assert_eq!(physical.placements[0].target, scale.physical_rect(logical));
+            assert_eq!(
+                physical.placements[0].clip,
+                Some(scale.physical_rect(logical))
+            );
+            assert_eq!(physical.damage, Some(scale.physical_damage(logical)));
+            let clip = physical.placements[0].rounded_clips[0].unwrap();
+            assert_eq!(clip.radii.top_left, 4.0 * factor);
+            assert_eq!(clip.rect.y, 3.0 * factor);
+            assert!(clip.inverted);
+            assert_eq!(physical.surface_revisions, [(1, 9)]);
+        }
+    }
 
     #[test]
     fn frame_cutouts_cover_only_the_complement_even_at_output_edges() {

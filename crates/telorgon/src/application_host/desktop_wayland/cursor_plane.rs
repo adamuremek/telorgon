@@ -170,7 +170,16 @@ impl<'gbm, 'kms, 'fd> HardwareCursor<'gbm, 'kms, 'fd> {
         })
     }
 
-    pub(super) fn set_image(&mut self, cursor: &RenderedCursor) -> AppResult<()> {
+    pub(super) fn set_logical_image(
+        &mut self,
+        cursor: &RenderedCursor,
+        scale: crate::platform::ScaleFactor,
+    ) -> AppResult<()> {
+        let physical = cursor.for_hardware(scale, self.extent)?;
+        self.set_image(&physical)
+    }
+
+    fn set_image(&mut self, cursor: &RenderedCursor) -> AppResult<()> {
         if cursor.size.width <= 0
             || cursor.size.height <= 0
             || cursor.size.width > self.extent.width

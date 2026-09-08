@@ -1140,8 +1140,10 @@ fn draw_glyph(
             if !glyph.rect.contains(local) {
                 continue;
             }
-            let atlas_x = glyph.atlas_x as f32 + (local.x - glyph.rect.x);
-            let atlas_y = glyph.atlas_y as f32 + (local.y - glyph.rect.y);
+            let atlas_x = glyph.atlas_x as f32
+                + (local.x - glyph.rect.x) * glyph.atlas_size.width as f32 / glyph.rect.width;
+            let atlas_y = glyph.atlas_y as f32
+                + (local.y - glyph.rect.y) * glyph.atlas_size.height as f32 / glyph.rect.height;
             let coverage = sample_a8_linear(
                 atlas,
                 atlas_extent.width,
@@ -1464,6 +1466,56 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn dense_glyph_samples_the_entire_atlas_region() {
+        let mut pixels = [0_u8; 2 * 4];
+        let mut raster = RasterTarget {
+            pixels: &mut pixels,
+            width: 2,
+            height: 1,
+            origin: crate::core::PointI::default(),
+            blend_mode: BlendMode::Alpha,
+            color_space: ColorSpace::Srgb,
+            rounded_clips: [None; 2],
+        };
+        let rect = RectF {
+            x: 0.0,
+            y: 0.0,
+            width: 2.0,
+            height: 1.0,
+        };
+        let glyph = GlyphInstance {
+            node: NodeId::new(0, 1),
+            rect,
+            view_bounds: rect,
+            atlas_x: 0,
+            atlas_y: 0,
+            atlas_size: SizeI {
+                width: 4,
+                height: 2,
+            },
+            color: ColorRgba8::rgba(255, 255, 255, 255),
+            opacity: 1.0,
+            clip: ClipId(0),
+            spatial: SpatialId(0),
+        };
+        // The right half is opaque; sampling only the logical-sized left half would lose it.
+        draw_glyph(
+            &mut raster,
+            &glyph,
+            None,
+            None,
+            rect,
+            &[0, 0, 255, 255, 0, 0, 255, 255],
+            SizeI {
+                width: 4,
+                height: 2,
+            },
+        );
+        assert_eq!(pixels[3], 0);
+        assert_eq!(pixels[7], 255);
+    }
+
+    #[test]
     fn fractional_glyph_bounds_do_not_sample_outside_the_quad() {
         let mut pixels = [0_u8; 3 * 4];
         let mut raster = RasterTarget {
@@ -1491,6 +1543,10 @@ mod tests {
             },
             atlas_x: 0,
             atlas_y: 0,
+            atlas_size: SizeI {
+                width: 1,
+                height: 1,
+            },
             color: ColorRgba8::rgba(255, 255, 255, 255),
             opacity: 1.0,
             clip: ClipId(0),
@@ -2148,6 +2204,10 @@ mod tests {
             },
             atlas_x: 0,
             atlas_y: 0,
+            atlas_size: SizeI {
+                width: 2,
+                height: 1,
+            },
             color: ColorRgba8::rgba(255, 255, 255, 255),
             opacity: 0.5,
             clip: ClipId(1),

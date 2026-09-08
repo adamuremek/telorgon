@@ -10,6 +10,7 @@ use crate::text::{ResolvedTextStyle, TextError, TextResult};
 const DEFAULT_ATLAS_SIZE: i32 = 1024;
 
 #[derive(Clone, Debug, PartialEq)]
+/// Layout constraints and font metrics are logical units, despite historical `_px` names.
 pub struct TextLayoutRequest<'a> {
     pub text: &'a str,
     pub style: ResolvedTextStyle,
@@ -28,6 +29,7 @@ pub(crate) struct ShapedText {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreparedText {
+    /// Raster-pixel positions and atlas extents at the engine's raster scale.
     pub glyphs: Vec<AtlasGlyph>,
     /// Widest shaped line advance before rasterization. Unlike glyph ink bounds, this includes
     /// the font's intended side bearings and is therefore the correct width for text alignment.
@@ -40,6 +42,7 @@ pub struct TextEngine {
     font_system: FontSystem,
     swash_cache: SwashCache,
     atlas: GlyphAtlas,
+    raster_scale: crate::platform::ScaleFactor,
 }
 
 impl TextEngine {
@@ -52,7 +55,19 @@ impl TextEngine {
             font_system: FontSystem::new(),
             swash_cache: SwashCache::new(),
             atlas: GlyphAtlas::new(width_px, height_px)?,
+            raster_scale: Default::default(),
         })
+    }
+
+    pub fn raster_scale(&self) -> crate::platform::ScaleFactor {
+        self.raster_scale
+    }
+
+    pub fn set_raster_scale(&mut self, scale: crate::platform::ScaleFactor) {
+        if self.raster_scale != scale {
+            self.raster_scale = scale;
+            self.atlas.clear();
+        }
     }
 
     pub fn load_font_bytes(&mut self, bytes: Vec<u8>) -> TextResult<()> {
@@ -142,7 +157,10 @@ impl TextEngine {
             advance_width_px = advance_width_px.max(run.line_w);
             height_px = height_px.max(run.line_top + run.line_height);
             for glyph in run.glyphs {
-                glyphs.push(glyph.physical((0.0, run.line_y), 1.0));
+                glyphs.push(glyph.physical(
+                    (0.0, run.line_y * self.raster_scale.get()),
+                    self.raster_scale.get(),
+                ));
             }
         }
         ShapedText {
@@ -223,6 +241,35 @@ mod tests {
     use crate::core::ColorRgba8;
 
     use crate::text::{ResolvedTextStyle, TextEngine, TextLayoutRequest};
+
+    #[test]
+    fn density_changes_raster_detail_without_changing_wrapping_or_line_spacing() {
+        let mut engine = TextEngine::with_atlas_size(512, 512).unwrap();
+        let request = TextLayoutRequest {
+            text: "Hello\nHello",
+            style: ResolvedTextStyle::new(ColorRgba8::rgba(255, 255, 255, 255), 24),
+            max_width_px: Some(100.0),
+            max_height_px: None,
+        };
+        let logical = engine.shape_text(&request);
+        let low = engine.prepare_text(request.clone()).unwrap();
+        engine.set_raster_scale(crate::platform::ScaleFactor::new(2.0).unwrap());
+        let dense = engine.shape_text(&request);
+        let high = engine.prepare_text(request).unwrap();
+        assert_eq!(logical.line_count, dense.line_count);
+        assert_eq!(logical.advance_width_px, dense.advance_width_px);
+        assert_eq!(logical.height_px, dense.height_px);
+        assert_eq!(logical.baseline_px, dense.baseline_px);
+        assert_eq!(low.advance_width_px, high.advance_width_px);
+        assert_ne!(low.atlas_generation, high.atlas_generation);
+        assert_eq!(low.glyphs.len(), high.glyphs.len());
+        assert!(high.glyphs[0].height_px > low.glyphs[0].height_px);
+        // Equal glyphs on successive lines isolate the baseline from rasterizer bearings.
+        let per_line = low.glyphs.len() / 2;
+        let low_spacing = low.glyphs[per_line].dst_y - low.glyphs[0].dst_y;
+        let high_spacing = high.glyphs[per_line].dst_y - high.glyphs[0].dst_y;
+        assert!((high_spacing - 2 * low_spacing).abs() <= 1);
+    }
 
     #[test]
     fn prepares_text_into_atlas_glyphs() {

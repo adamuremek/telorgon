@@ -184,8 +184,9 @@ pub mod app {
     pub use super::authoring::*;
     pub use crate::application_host::{
         Application, Compositor, DesktopKeyAction, DesktopKeyEvent, KeyBindings, KeyChord,
-        LinuxDesktopConfig, Renderer, ShellWidget, ShellWidgetAnchor, ShellWidgetExtent,
-        ShortcutKey, Window, WindowDecorationMode, WindowFrameFactory, WindowFrameTemplate,
+        LinuxDesktopConfig, OutputScale, Renderer, ShellWidget, ShellWidgetAnchor,
+        ShellWidgetExtent, ShortcutKey, Window, WindowDecorationMode, WindowFrameFactory,
+        WindowFrameTemplate,
     };
     pub use crate::session;
 }
