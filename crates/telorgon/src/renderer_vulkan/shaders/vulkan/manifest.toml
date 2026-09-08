@@ -3,7 +3,7 @@ interface_major = 4
 interface_minor = 0
 target = "vulkan1.3-spirv1.6"
 source_config_hash = "eb7f93861289f94c5a8d59a8a54d91cc63dc42b629a39418c7ab3292b785f232"
-bundle_hash = "bb67aabba2958470bb2d0449f361591b9cac24a68beb29818676bdb47c156bef"
+bundle_hash = "82ef061970b15fe4b6fc3eb704ce1dfd8d36c2f8c398585c2d57222f71956274"
 
 [[shader]]
 name = "box_vertex"
@@ -17,9 +17,9 @@ entry_point = "main"
 [[shader]]
 name = "box_fragment"
 source = "shaders/vulkan/box/box.frag"
-source_hash = "fff505c8f5f5040d6dcfe4dab3e2648b8ec4beb1ec114d5abb76c5ff0c1a9c07"
+source_hash = "d058e5778a97d0226b5782a194911a52e28d99b9399a2edca8a11cf40cb47da5"
 artifact = "box.frag.spv"
-artifact_hash = "af0ba7374b5bd7459684fc400ab31b5b8a108a8f46660815c99d8fe4fff7dc37"
+artifact_hash = "4c5e366a199ec975b617d7372c5a78b02e5ac8125cf26c5364c6b45a4ab45fbc"
 stage = "fragment"
 entry_point = "main"
 
@@ -35,7 +35,7 @@ entry_point = "main"
 [[shader]]
 name = "glyph_fragment"
 source = "shaders/vulkan/box/glyph.frag"
-source_hash = "31c3656d9edf7544e26e30b7eec0b345f9f270dd8f84c85ae5492e159912fd54"
+source_hash = "66ebe9facc52c1c1560f4637122ff5aed54d7a4ed3830d8196454dafc5d3e41d"
 artifact = "glyph.frag.spv"
 artifact_hash = "9b5afe64fd6f43634ae5fa24686e75b9f7acd9966318ffc2e1725927bcbecbd2"
 stage = "fragment"
@@ -53,7 +53,7 @@ entry_point = "main"
 [[shader]]
 name = "image_fragment"
 source = "shaders/vulkan/box/image.frag"
-source_hash = "afd027055331bb7a1f6d13223831d0944a874d167b85c086235f17017b7253a5"
+source_hash = "1b351b1e889ef3702e03dd2e0d7f675b4d702983e9eef8596ff135bb1f854662"
 artifact = "image.frag.spv"
 artifact_hash = "a601aaf4de67eb271b1eb8e51ba061326e4f902819be304e088813f01a63305f"
 stage = "fragment"
@@ -71,7 +71,7 @@ entry_point = "main"
 [[shader]]
 name = "material_fragment"
 source = "shaders/vulkan/box/material.frag"
-source_hash = "34a8ff8a8cfaecb80aa506a6eff7165c123ee251df30cea3226d588149c128cc"
+source_hash = "fd1e583297176e5c585933df05942b1a5c3ffbe6ad5c4f3b1632c5beb5693b1f"
 artifact = "material.frag.spv"
 artifact_hash = "bccb2d5cdb8e97cc18a4be9dc23ff7d6d841e246a08ae4319e0f8e19bafe726a"
 stage = "fragment"

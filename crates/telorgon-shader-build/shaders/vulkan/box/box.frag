@@ -61,7 +61,24 @@ float rounded_distance(vec2 p,vec2 size,vec4 radii){
     vec2 q=abs(p-half_size)-(half_size-vec2(radius));
     return length(max(q,vec2(0)))+min(max(q.x,q.y),0.0)-radius;
 }
-float coverage(vec2 p,vec2 size,vec4 radii){float d=rounded_distance(p,size,radii);return clamp(.5-d/max(fwidth(d),1e-4),0.0,1.0);}
+float coverage(vec2 p,vec2 size,vec4 radii){
+    // Evaluate derivatives before branching. SDF derivatives cross different edges at
+    // square corners and can incorrectly fade a fully covered corner pixel.
+    vec2 dx=dFdx(p);
+    vec2 dy=dFdy(p);
+    float d=rounded_distance(p,size,radii);
+    float rounded=clamp(.5-d/max(fwidth(d),1e-4),0.0,1.0);
+    bool axis_aligned=(dx.y==0.0&&dy.x==0.0)||(dx.x==0.0&&dy.y==0.0);
+    if(all(lessThanEqual(radii,vec4(0)))&&axis_aligned){
+        // Integrate the rectangular pixel footprint independently on each axis.
+        // Integer edges are crisp; fractional edges retain fractional coverage.
+        vec2 footprint=max(abs(dx)+abs(dy),vec2(1e-4));
+        vec2 overlap=max(min(p+footprint*.5,size)-max(p-footprint*.5,vec2(0)),vec2(0));
+        vec2 amount=clamp(overlap/footprint,vec2(0),vec2(1));
+        return amount.x*amount.y;
+    }
+    return rounded;
+}
 vec4 premul(uint packed,float amount,float opacity){vec4 c=unpack_srgba(packed);float a=c.a*amount*clamp(opacity,0.0,1.0);return vec4(srgb_decode(c.rgb)*a,a);}
 vec4 over(vec4 destination,vec4 source){return source+destination*(1.0-source.a);}
 

@@ -1929,6 +1929,58 @@ mod tests {
     }
 
     #[test]
+    fn adjacent_square_controls_cover_every_corner_pixel() {
+        for scale in [1, 2, 3] {
+            for origin in [0, 1] {
+                let width = 120 * scale + 2;
+                let height = 24 * scale + 2;
+                let mut pixels = vec![0; width * height * 4];
+                let mut raster = RasterTarget {
+                    pixels: &mut pixels,
+                    width,
+                    height,
+                    origin: crate::core::PointI::default(),
+                    blend_mode: BlendMode::Alpha,
+                    color_space: ColorSpace::Srgb,
+                    rounded_clips: [None; 2],
+                };
+                for index in 0..3 {
+                    let rect = RectF {
+                        x: (origin + index * 40 * scale) as f32,
+                        y: origin as f32,
+                        width: (40 * scale) as f32,
+                        height: (24 * scale) as f32,
+                    };
+                    let instance = BoxInstance {
+                        node: NodeId::new(index as u32, 1),
+                        rect,
+                        view_bounds: rect,
+                        background: Some(ColorRgba8::rgba(0, 0, 255, 255)),
+                        border: Border::default(),
+                        outline: Outline::default(),
+                        corner_radii: CornerRadii::all(0.0),
+                        shadows: ShadowList::default(),
+                        opacity: 1.0,
+                        clip: ClipId(0),
+                        spatial: SpatialId(0),
+                    };
+                    draw_box(&mut raster, &instance, None, None, rect);
+                }
+                for y in origin..origin + 24 * scale {
+                    for x in origin..origin + 120 * scale {
+                        let offset = (y * width + x) * 4;
+                        assert_eq!(
+                            &pixels[offset..offset + 4],
+                            &[0, 0, 255, 255],
+                            "square control seam at ({x},{y}), scale={scale}, origin={origin}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn border_and_fill_share_coverage_without_an_alpha_seam() {
         let rect = RectF {
             x: 0.0,

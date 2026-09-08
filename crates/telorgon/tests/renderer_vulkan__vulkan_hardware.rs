@@ -608,7 +608,7 @@ fn flush_controls_have_no_diagonal_or_edge_seams_under_rounded_clipping() {
     // The bright backing exposes even a single partially covered pixel along the two
     // triangles' shared diagonal. Odd extents and fractional origins vary helper coverage.
     for width in [200, 201] {
-        for scale in [1.0_f32, 1.25, 1.5, 2.0] {
+        for scale in [1.0_f32, 1.25, 1.5, 2.0, 3.0] {
             for inset in [1.0, 1.5] {
                 for radius in [0.0, 12.0] {
                     let extent = SizeI {
@@ -648,9 +648,9 @@ fn flush_controls_have_no_diagonal_or_edge_seams_under_rounded_clipping() {
                     for index in 0..3 {
                         let node = NodeId::new(index + 1, 1);
                         let rect = RectF {
-                            x: logical.width - inset - 38.0 - (2 - index) as f32 * 40.0,
+                            x: logical.width - inset - 40.0 - (2 - index) as f32 * 40.0,
                             y: inset,
-                            width: 38.0,
+                            width: 40.0,
                             height: 31.0,
                         };
                         source.boxes.upsert(
