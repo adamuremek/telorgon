@@ -395,11 +395,11 @@ impl ManagedPointer {
         graphic: &crate::PointerGraphic,
     ) -> AppResult<Vec<ManagedCursorFrame>> {
         let size = graphic
-            .physical_size()
+            .logical_size()
             .or_else(|| {
                 self.theme
                     .as_ref()
-                    .and_then(crate::PointerTheme::physical_size)
+                    .and_then(crate::PointerTheme::logical_size)
             })
             .unwrap_or(32);
         let hotspot = graphic.pointer_hotspot();

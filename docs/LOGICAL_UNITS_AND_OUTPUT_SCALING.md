@@ -56,8 +56,10 @@ changes, monitor hotplug, and moving surfaces between differently scaled outputs
 
 - Desktop window geometry, decorations, widget placement, reservations, hit tests, Wayland configure
   sizes, pointer focus, and cursor hotspots are logical. Historical text layout names such as
-  `font_size_px` and the pointer theme's nominal `physical_size()` accessor denote the size at 100%
-  when used by this desktop host. `pointer_extent`, title-bar height, and border width are logical.
+  `font_size_px` denote logical dimensions in this desktop host. Cursor builders accept
+  `logical_units`, and `PointerGraphic::logical_size()` / `PointerTheme::logical_size()` expose
+  the nominal logical size (replacing the former `physical_size()` names). `pointer_extent`,
+  title-bar height, and border width are logical.
 - `platform::ScaleFactor` is the validated conversion boundary. Floating-point points preserve
   fractional positions. Integer desktop bounds use `ceil(physical / scale)` to cover the final pixel.
   Placement rectangles round shared endpoints, rather than origin and size separately. Damage uses

@@ -296,7 +296,7 @@ fn render_asset_pointer(
             })
     };
     let logical_size = graphic
-        .physical_size()
+        .logical_size()
         .map_or(fallback_extent, |size| SizeI {
             width: i32::from(size),
             height: i32::from(size),

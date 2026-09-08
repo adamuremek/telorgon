@@ -99,8 +99,8 @@ impl PointerGraphic {
 
     /// Nominal size at 100%. The Linux desktop treats this as logical units and rasterizes
     /// at its output density; managed hosts retain their existing pixel-size behavior.
-    pub const fn size(mut self, physical_pixels: u16) -> Self {
-        self.size = Some(physical_pixels);
+    pub const fn size(mut self, logical_units: u16) -> Self {
+        self.size = Some(logical_units);
         self
     }
 
@@ -123,8 +123,8 @@ impl PointerGraphic {
         self.hotspot
     }
 
-    /// Historical name for the nominal 100% size. See [`Self::size`] for host interpretation.
-    pub const fn physical_size(&self) -> Option<u16> {
+    /// Nominal logical size at 100%. See [`Self::size`] for host interpretation.
+    pub const fn logical_size(&self) -> Option<u16> {
         self.size
     }
 
@@ -172,8 +172,9 @@ impl PointerTheme {
         self
     }
 
-    pub fn default_size(mut self, physical_pixels: u16) -> Self {
-        self.default_size = (physical_pixels > 0).then_some(physical_pixels);
+    /// Default cursor size in logical units; managed hosts currently use a 1:1 pixel mapping.
+    pub fn default_size(mut self, logical_units: u16) -> Self {
+        self.default_size = (logical_units > 0).then_some(logical_units);
         self
     }
 
@@ -190,7 +191,8 @@ impl PointerTheme {
         })
     }
 
-    pub const fn physical_size(&self) -> Option<u16> {
+    /// Default logical cursor size, used when a graphic does not specify its own size.
+    pub const fn logical_size(&self) -> Option<u16> {
         self.default_size
     }
 
