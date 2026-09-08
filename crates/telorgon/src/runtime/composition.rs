@@ -1213,7 +1213,12 @@ impl CompositionDriver {
                 },
                 ElementKind::Button(candidate),
             ) => {
-                ui.set_box_style(*node, candidate.style);
+                // The mounted style includes resolved theme/inline properties. A parent
+                // update must not reset those to identical authored defaults: unchanged
+                // bindings will not resolve again until an interaction state changes.
+                if props.style != candidate.style {
+                    ui.set_box_style(*node, candidate.style);
+                }
                 ui.set_image_visual_tinted(
                     *icon_node,
                     candidate.icon.unwrap_or(crate::ui::ImageId(0)),

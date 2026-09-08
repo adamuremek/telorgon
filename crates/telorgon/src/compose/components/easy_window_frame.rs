@@ -879,6 +879,101 @@ mod tests {
         assert_eq!(component.design, DESIGN);
     }
 
+    #[cfg(all(feature = "desktop-wayland-linux", target_os = "linux"))]
+    #[test]
+    fn controls_remain_centered_after_frame_state_updates_without_hover() {
+        use crate::application_host::AppRuntimeCore;
+        use crate::core::{MonotonicInstant, SizeI};
+
+        let mut design = DESIGN;
+        design.title_bar.height = 24.0;
+        design.title_bar.padding = Insets::ZERO;
+        for control in [
+            &mut design.controls.minimize,
+            &mut design.controls.maximize,
+            &mut design.controls.restore,
+            &mut design.controls.close,
+        ] {
+            control.style.height = Dimension::FILL;
+            control.style.icon_size = 12.0;
+        }
+        let template = easy_window_frame(design);
+        let extent = SizeI {
+            width: 640,
+            height: 480,
+        };
+        let mut runtime = AppRuntimeCore::from_composed_with_extent(
+            template.compose(WindowChromeModel::new(42, "Controls").active(true)),
+            extent,
+        )
+        .unwrap();
+        for (iteration, state) in [
+            WindowChromeState::Normal,
+            WindowChromeState::Maximized,
+            WindowChromeState::Normal,
+            WindowChromeState::Maximized,
+            WindowChromeState::Normal,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            runtime
+                .update_composition_root(Box::new(
+                    template.compose(
+                        WindowChromeModel::new(42, "Controls")
+                            .active(true)
+                            .state(state),
+                    ),
+                ))
+                .unwrap();
+            runtime
+                .resize(if state == WindowChromeState::Maximized {
+                    SizeI {
+                        width: 1280,
+                        height: 800,
+                    }
+                } else {
+                    extent
+                })
+                .unwrap();
+            runtime
+                .prepare_frame(
+                    MonotonicInstant::from_nanos(iteration as u64 * 1_000_000),
+                    true,
+                )
+                .unwrap();
+            let controls: Vec<_> = runtime
+                .ui()
+                .style_bindings()
+                .iter()
+                .filter(|b| {
+                    b.local_style.is_some()
+                        && b.slots.iter().any(|s| s.slot == StyleSlotId::named("icon"))
+                })
+                .collect();
+            assert_eq!(controls.len(), 3);
+            for binding in controls {
+                let button = runtime
+                    .layout()
+                    .computed(binding.state_root)
+                    .unwrap()
+                    .border_rect;
+                assert_eq!(button.height, 24.0, "button height in {state:?}");
+                let icon_node = binding
+                    .slots
+                    .iter()
+                    .find(|s| s.slot == StyleSlotId::named("icon"))
+                    .unwrap()
+                    .node;
+                let icon = runtime.layout().computed(icon_node).unwrap().border_rect;
+                assert!(
+                    (icon.y + icon.height / 2.0 - (button.y + button.height / 2.0)).abs() < 0.001,
+                    "icon not centered in {state:?}: icon={icon:?}, button={button:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn control_design_resolves_interaction_visuals_without_a_theme_catalog_entry() {
         let hovered = WindowControlVisual {
