@@ -136,8 +136,8 @@ impl WindowFrame {
     ) -> Result<WindowFrameRef, RuntimeError> {
         let bounds = self.snapshot.geometry().logical_bounds();
         let mut container_style = self.style.container;
-        container_style.width = SizeRule::Px(bounds.width);
-        container_style.height = SizeRule::Px(bounds.height);
+        container_style.width = SizeRule::Logical(bounds.width);
+        container_style.height = SizeRule::Logical(bounds.height);
         container_style.transform.translation.x = bounds.x - parent_global_origin.x;
         container_style.transform.translation.y = bounds.y - parent_global_origin.y;
 

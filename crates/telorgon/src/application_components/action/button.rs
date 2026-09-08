@@ -130,8 +130,8 @@ impl Default for ButtonStyle {
     fn default() -> Self {
         let container = |color| BoxStyle {
             min_size: SizeRule2D {
-                width: SizeRule::Px(32.0),
-                height: SizeRule::Px(32.0),
+                width: SizeRule::Logical(32.0),
+                height: SizeRule::Logical(32.0),
             },
             padding: EdgeInsets {
                 top: 7.0,
@@ -458,8 +458,8 @@ impl Button {
         let mut visual = self.style.resolve(state).visual;
         let minimum = self.density_metrics().effective_minimum();
         visual.container.min_size = SizeRule2D {
-            width: SizeRule::Px(minimum.width()),
-            height: SizeRule::Px(minimum.height()),
+            width: SizeRule::Logical(minimum.width()),
+            height: SizeRule::Logical(minimum.height()),
         };
 
         let label = self.label.clone();
@@ -720,8 +720,8 @@ mod tests {
         assert!(semantic.actions.contains(SemanticAction::Activate));
         assert!(semantic.actions.contains(SemanticAction::Focus));
         let style = runtime.ui().box_styles.get(node).unwrap();
-        assert_eq!(style.min_size.width, SizeRule::Px(44.0));
-        assert_eq!(style.min_size.height, SizeRule::Px(44.0));
+        assert_eq!(style.min_size.width, SizeRule::Logical(44.0));
+        assert_eq!(style.min_size.height, SizeRule::Logical(44.0));
 
         assert!(runtime.dispatch_activation(node, ChangeSource::Pointer));
         assert!(runtime.dispatch_activation(node, ChangeSource::Accessibility));

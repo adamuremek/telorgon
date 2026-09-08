@@ -40,8 +40,8 @@ const CONTROL_DISABLED: WindowControlVisual = WindowControlVisual {
 };
 
 const STANDARD_BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
-    width: Dimension::Pixels(38.0),
-    height: Dimension::Pixels(30.0),
+    width: Dimension::Logical(38.0),
+    height: Dimension::Logical(30.0),
     icon_size: 15.0,
     resting: CONTROL_RESTING,
     hovered: Some(CONTROL_HOVERED),
@@ -703,7 +703,7 @@ fn control_dimensions_follow_the_padded_bar_and_preserve_hit_targets() {
             for height in [
                 Dimension::FILL,
                 Dimension::Percent(0.5),
-                Dimension::Pixels(16.0),
+                Dimension::Logical(16.0),
                 Dimension::Shrink,
             ] {
                 for maximized in [false, true] {
@@ -740,7 +740,7 @@ fn control_dimensions_follow_the_padded_bar_and_preserve_hit_targets() {
                         let expected = match height {
                             Dimension::Fill(_) => available,
                             Dimension::Percent(fraction) => available * fraction,
-                            Dimension::Pixels(value) => value,
+                            Dimension::Logical(value) => value,
                             Dimension::Shrink => {
                                 assert!(bounds.height > 0.0 && bounds.height <= available);
                                 bounds.height
@@ -791,11 +791,12 @@ fn control_widths_support_shrink_percent_and_weighted_fill() {
         let second = bounds(WindowAction::ToggleMaximize);
         let last = bounds(WindowAction::Close);
         assert!(first.width > 0.0);
-        assert_eq!(first.width, second.width);
-        assert_eq!(second.x, first.right() + design.controls.gap);
-        assert_eq!(last.x, second.right() + design.controls.gap);
+        // Bounds arithmetic can differ by a few f32 rounding steps.
+        assert!((first.width - second.width).abs() < 0.001);
+        assert!((second.x - (first.right() + design.controls.gap)).abs() < 0.001);
+        assert!((last.x - (second.right() + design.controls.gap)).abs() < 0.001);
         if width == Dimension::FILL {
-            assert_eq!(last.width, first.width * 2.0);
+            assert!((last.width - first.width * 2.0).abs() < 0.001);
         }
         assert!(last.right() <= 631.0);
     }
@@ -804,9 +805,9 @@ fn control_widths_support_shrink_percent_and_weighted_fill() {
 #[test]
 fn control_dimension_validation_rejects_invalid_values() {
     for dimension in [
-        Dimension::Pixels(-1.0),
-        Dimension::Pixels(0.0),
-        Dimension::Pixels(f32::NAN),
+        Dimension::Logical(-1.0),
+        Dimension::Logical(0.0),
+        Dimension::Logical(f32::NAN),
         Dimension::Fill(0.0),
         Dimension::Fill(f32::INFINITY),
         Dimension::Percent(-0.1),
@@ -829,7 +830,7 @@ fn control_dimension_validation_rejects_invalid_values() {
         Dimension::Shrink,
         Dimension::FILL,
         Dimension::Percent(0.5),
-        Dimension::Pixels(24.0),
+        Dimension::Logical(24.0),
     ] {
         let mut design = TEST_CHROME;
         design.controls.close.style.height = dimension;

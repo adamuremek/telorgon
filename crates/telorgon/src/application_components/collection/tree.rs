@@ -780,8 +780,8 @@ where
                                 item.enabled,
                             );
                             style.min_size = SizeRule2D {
-                                width: SizeRule::Px(minimum.width()),
-                                height: SizeRule::Px(minimum.height()),
+                                width: SizeRule::Logical(minimum.width()),
+                                height: SizeRule::Logical(minimum.height()),
                             };
                             let control = writer.action_node(style, false, |writer| {
                                 writer.text(
@@ -1507,8 +1507,8 @@ mod tests {
                 .unwrap()
                 .min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
         let item_node = mounted.items()[1].node();

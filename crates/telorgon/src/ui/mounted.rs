@@ -199,7 +199,8 @@ pub enum BoxSizing {
 }
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum SizeRule {
-    Px(f32),
+    /// Fixed size in logical layout units; the host applies output scaling when rendering.
+    Logical(f32),
     Percent(f32),
     Fill(f32),
     #[default]

@@ -218,8 +218,8 @@ where
         let minimum = DensityMetrics::baseline(self.density).effective_minimum();
         let mut entry_style = self.style.entry;
         entry_style.min_size = SizeRule2D {
-            width: SizeRule::Px(minimum.width()),
-            height: SizeRule::Px(minimum.height()),
+            width: SizeRule::Logical(minimum.width()),
+            height: SizeRule::Logical(minimum.height()),
         };
         let mut mounted = Vec::with_capacity(self.entries.len());
         let root = ui
@@ -535,7 +535,7 @@ mod tests {
                     .unwrap()
                     .min_size
                     .height,
-                SizeRule::Px(44.0)
+                SizeRule::Logical(44.0)
             );
         }
     }

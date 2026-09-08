@@ -154,7 +154,7 @@ impl WindowChromeDesign {
             for dimension in [control.style.width, control.style.height] {
                 let valid = match dimension {
                     Dimension::Shrink => true,
-                    Dimension::Pixels(value) | Dimension::Fill(value) => {
+                    Dimension::Logical(value) | Dimension::Fill(value) => {
                         value.is_finite() && value > 0.0
                     }
                     Dimension::Percent(value) => value.is_finite() && value > 0.0 && value <= 1.0,
@@ -479,8 +479,8 @@ fn compiled_control_style(style: WindowControlButtonStyle) -> Arc<CompiledCompon
     root.height = Some(style.height.into());
     // Chrome controls follow their authored dimensions, including bars shorter than 32px.
     root.min_size = Some(SizeRule2D {
-        width: SizeRule::Px(0.0),
-        height: SizeRule::Px(0.0),
+        width: SizeRule::Logical(0.0),
+        height: SizeRule::Logical(0.0),
     });
     let icon = visual_icon_patch(style.resting);
 
@@ -747,8 +747,8 @@ mod tests {
         icon_tint: ColorRgba8::rgba(255, 255, 255, 255),
     };
     const BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
-        width: Dimension::Pixels(38.0),
-        height: Dimension::Pixels(30.0),
+        width: Dimension::Logical(38.0),
+        height: Dimension::Logical(30.0),
         icon_size: 15.0,
         resting: VISUAL,
         hovered: None,

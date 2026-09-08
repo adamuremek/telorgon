@@ -834,7 +834,7 @@ mod tests {
                 .unwrap()
                 .min_size
                 .height,
-            SizeRule::Px(44.0)
+            SizeRule::Logical(44.0)
         );
         assert!(reference.availability().can_commit);
 

@@ -441,8 +441,8 @@ impl TextField {
         let minimum = DensityMetrics::baseline(self.density).effective_minimum();
         let mut container = visual.container;
         container.min_size = SizeRule2D {
-            width: SizeRule::Px(visual.minimum_width.max(minimum.width())),
-            height: SizeRule::Px(if multiline {
+            width: SizeRule::Logical(visual.minimum_width.max(minimum.width())),
+            height: SizeRule::Logical(if multiline {
                 minimum.height().max(
                     visual.container.padding.vertical()
                         + visual.label_size * 1.25
@@ -885,7 +885,7 @@ mod tests {
                 .unwrap()
                 .min_size
                 .height,
-            SizeRule::Px(44.0)
+            SizeRule::Logical(44.0)
         );
         assert!(reference.availability().can_edit);
     }

@@ -590,8 +590,8 @@ mod tests {
                 let button = builder.button(
                     (),
                     BoxStyle {
-                        width: SizeRule::Px(160.0),
-                        height: SizeRule::Px(44.0),
+                        width: SizeRule::Logical(160.0),
+                        height: SizeRule::Logical(44.0),
                         ..BoxStyle::default()
                     },
                     |builder| {
@@ -687,8 +687,8 @@ mod tests {
                 button = Some(builder.button(
                     (),
                     BoxStyle {
-                        width: SizeRule::Px(100.0),
-                        height: SizeRule::Px(36.0),
+                        width: SizeRule::Logical(100.0),
+                        height: SizeRule::Logical(36.0),
                         decoration: crate::ui::BoxDecoration {
                             background: Background::Color(ColorRgba8::rgba(40, 80, 120, 255)),
                             ..crate::ui::BoxDecoration::default()
@@ -768,8 +768,8 @@ mod tests {
                         handles.push(builder.button(
                             (),
                             BoxStyle {
-                                width: SizeRule::Px(10.0),
-                                height: SizeRule::Px(1.0),
+                                width: SizeRule::Logical(10.0),
+                                height: SizeRule::Logical(1.0),
                                 decoration: crate::ui::BoxDecoration {
                                     background: Background::Color(ColorRgba8::rgba(1, 2, 3, 255)),
                                     ..crate::ui::BoxDecoration::default()
@@ -827,8 +827,8 @@ mod tests {
             builder.root(BoxStyle::default(), LayoutStyle::default(), |builder| {
                 child = Some(builder.container(
                     BoxStyle {
-                        width: SizeRule::Px(20.0),
-                        height: SizeRule::Px(20.0),
+                        width: SizeRule::Logical(20.0),
+                        height: SizeRule::Logical(20.0),
                         decoration: crate::ui::BoxDecoration {
                             background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
                             ..crate::ui::BoxDecoration::default()

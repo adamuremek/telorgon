@@ -541,7 +541,7 @@ mod tests {
                 .unwrap()
                 .min_size
                 .height,
-            SizeRule::Px(44.0)
+            SizeRule::Logical(44.0)
         );
         assert_eq!(
             reference.privacy_policy().visual_capture(),

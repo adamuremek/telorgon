@@ -170,8 +170,8 @@ impl Default for IconButtonStyle {
     fn default() -> Self {
         let container = |color| BoxStyle {
             min_size: SizeRule2D {
-                width: SizeRule::Px(32.0),
-                height: SizeRule::Px(32.0),
+                width: SizeRule::Logical(32.0),
+                height: SizeRule::Logical(32.0),
             },
             padding: EdgeInsets::all(7.0),
             decoration: crate::ui::BoxDecoration {
@@ -269,8 +269,8 @@ impl IconButton {
         let mut visual = self.style.resolve(state).visual;
         let minimum = self.button.density_metrics().effective_minimum();
         visual.container.min_size = SizeRule2D {
-            width: SizeRule::Px(minimum.width()),
-            height: SizeRule::Px(minimum.height()),
+            width: SizeRule::Logical(minimum.width()),
+            height: SizeRule::Logical(minimum.height()),
         };
         let image = self.artwork.image();
         let tint = self.artwork.tint_color();
@@ -283,8 +283,8 @@ impl IconButton {
                     1,
                     tint,
                     BoxStyle {
-                        width: SizeRule::Px(icon.logical_size()),
-                        height: SizeRule::Px(icon.logical_size()),
+                        width: SizeRule::Logical(icon.logical_size()),
+                        height: SizeRule::Logical(icon.logical_size()),
                         opacity: icon.opacity(),
                         ..BoxStyle::default()
                     },
@@ -495,13 +495,13 @@ mod tests {
         assert_eq!(
             runtime.ui().box_styles.get(node).unwrap().min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
         assert_eq!(
             runtime.ui().box_styles.get(icon).unwrap().width,
-            SizeRule::Px(18.0)
+            SizeRule::Logical(18.0)
         );
 
         assert!(runtime.dispatch_activation(node, ChangeSource::Accessibility));

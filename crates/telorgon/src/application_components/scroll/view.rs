@@ -452,8 +452,8 @@ mod tests {
                 .root(BoxStyle::default(), LayoutStyle::default(), |_| {});
             let style = ScrollViewStyle {
                 viewport: BoxStyle {
-                    width: SizeRule::Px(320.0),
-                    height: SizeRule::Px(180.0),
+                    width: SizeRule::Logical(320.0),
+                    height: SizeRule::Logical(180.0),
                     overflow: Overflow::Clip,
                     ..BoxStyle::default()
                 },
@@ -535,7 +535,7 @@ mod tests {
         );
         assert_eq!(
             runtime.ui().box_styles.get(viewport).unwrap().width,
-            SizeRule::Px(320.0)
+            SizeRule::Logical(320.0)
         );
         assert_eq!(
             runtime

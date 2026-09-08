@@ -149,8 +149,8 @@ impl WorkspaceOverview {
                 )
                 .ok_or_else(|| RuntimeError::new("workspace-overview container is stale"))?;
             let mut preview_style = self.style.preview;
-            preview_style.width = SizeRule::Px(logical.width * self.style.preview_scale);
-            preview_style.height = SizeRule::Px(logical.height * self.style.preview_scale);
+            preview_style.width = SizeRule::Logical(logical.width * self.style.preview_scale);
+            preview_style.height = SizeRule::Logical(logical.height * self.style.preview_scale);
             let preview = ui
                 .foundation()
                 .container_node_under(item.node, preview_style, self.style.preview_layout, |_| {})
@@ -180,8 +180,8 @@ impl WorkspaceOverview {
                     height: source.height * self.style.preview_scale,
                 };
                 let mut surface_style = self.style.surface;
-                surface_style.width = SizeRule::Px(projected.width);
-                surface_style.height = SizeRule::Px(projected.height);
+                surface_style.width = SizeRule::Logical(projected.width);
+                surface_style.height = SizeRule::Logical(projected.height);
                 surface_style.transform.translation.x = projected.x;
                 surface_style.transform.translation.y = projected.y;
                 let surface = ui

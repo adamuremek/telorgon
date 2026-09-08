@@ -544,9 +544,9 @@ fn configure_progress_geometry<T: RangeScalar>(
     value: ProgressValue<T>,
     model: &RangeModel<T>,
 ) {
-    visual.track.width = SizeRule::Px(visual.track_length);
-    visual.track.height = SizeRule::Px(visual.track_thickness);
-    visual.fill.height = SizeRule::Px(visual.track_thickness);
+    visual.track.width = SizeRule::Logical(visual.track_length);
+    visual.track.height = SizeRule::Logical(visual.track_thickness);
+    visual.fill.height = SizeRule::Logical(visual.track_thickness);
     let (fraction, offset) = match value {
         ProgressValue::Determinate(value) => {
             let fraction = ((value.to_f64() - model.minimum().to_f64())
@@ -559,7 +559,7 @@ fn configure_progress_geometry<T: RangeScalar>(
             visual.track_length * 0.1,
         ),
     };
-    visual.fill.width = SizeRule::Px(visual.track_length * fraction);
+    visual.fill.width = SizeRule::Logical(visual.track_length * fraction);
     visual.fill.transform = Transform2D {
         translation: PointF { x: offset, y: 0.0 },
         ..Transform2D::default()
@@ -791,10 +791,10 @@ fn resolved_activity_visual(
 }
 
 fn configure_activity_geometry(visual: &mut ActivityIndicatorVisualStyle) {
-    visual.track.width = SizeRule::Px(visual.indicator_size);
-    visual.track.height = SizeRule::Px(visual.indicator_size);
-    visual.marker.width = SizeRule::Px(visual.marker_size);
-    visual.marker.height = SizeRule::Px(visual.marker_size);
+    visual.track.width = SizeRule::Logical(visual.indicator_size);
+    visual.track.height = SizeRule::Logical(visual.indicator_size);
+    visual.marker.width = SizeRule::Logical(visual.marker_size);
+    visual.marker.height = SizeRule::Logical(visual.marker_size);
     let centered = (visual.indicator_size - visual.marker_size) * 0.5;
     let y = match visual.motion {
         ActivityMotionStyle::Rotate { .. } => 0.0,
@@ -1189,7 +1189,7 @@ mod tests {
         assert_eq!(resolved.visual.indicator_size, 20.0);
         assert_eq!(
             runtime.ui().box_styles.get(indicator).unwrap().width,
-            SizeRule::Px(20.0)
+            SizeRule::Logical(20.0)
         );
         assert_eq!(
             runtime

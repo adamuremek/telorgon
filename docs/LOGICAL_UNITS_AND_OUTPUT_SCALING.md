@@ -10,6 +10,18 @@ CPU regression coverage and compilation checks. Interactive KMS/Wayland and GPU 
 need manual qualification. This change does not retrofit automatic DPI selection into the separate
 managed GUI hosts or implement multiple simultaneous desktop outputs.
 
+## Fixed layout dimensions
+
+Use `Dimension::Logical(value)` in composition builders and `SizeRule::Logical(value)` in
+retained styles for fixed logical sizes. For example, `Dimension::Logical(38.0)` occupies
+38 physical pixels at 100% and 76 at 200% in the desktop host. Numeric builder arguments
+such as `.width(38.0)` continue to convert into logical dimensions.
+
+API migration: replace `Dimension::Pixels` with `Dimension::Logical` and `SizeRule::Px`
+with `SizeRule::Logical`, including match patterns. The old variants have been removed.
+This is a naming change only; layout values and output scaling behavior are unchanged.
+Neither variant specifies a fixed physical-pixel size.
+
 ## Selecting scale at boot
 
 `LinuxDesktopConfig::default()` uses `OutputScale::Auto`. After selecting the connector's preferred

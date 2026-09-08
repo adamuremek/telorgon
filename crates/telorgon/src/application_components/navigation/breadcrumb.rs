@@ -259,8 +259,8 @@ where
                         } else {
                             let mut style = self.style.ancestor;
                             style.min_size = SizeRule2D {
-                                width: SizeRule::Px(minimum.width()),
-                                height: SizeRule::Px(minimum.height()),
+                                width: SizeRule::Logical(minimum.width()),
+                                height: SizeRule::Logical(minimum.height()),
                             };
                             writer
                                 .action_node(style, true, |writer| {
@@ -713,8 +713,8 @@ mod tests {
                         .unwrap()
                         .min_size,
                     SizeRule2D {
-                        width: SizeRule::Px(44.0),
-                        height: SizeRule::Px(44.0),
+                        width: SizeRule::Logical(44.0),
+                        height: SizeRule::Logical(44.0),
                     }
                 );
             }

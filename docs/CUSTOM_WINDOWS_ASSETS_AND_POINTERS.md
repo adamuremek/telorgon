@@ -208,8 +208,8 @@ const DISABLED: WindowControlVisual = WindowControlVisual {
 };
 
 const BUTTON: WindowControlButtonStyle = WindowControlButtonStyle {
-    width: Dimension::Pixels(38.0),
-    height: Dimension::Pixels(30.0),
+    width: Dimension::Logical(38.0),
+    height: Dimension::Logical(30.0),
     icon_size: 15.0,
     resting: RESTING,
     hovered: Some(HOVERED),
@@ -342,9 +342,9 @@ normal/maximized/tiled/fullscreen geometry, client/fallback app icons, capabilit
 maximize versus restore artwork, resizable tiled edges, and every declared control state. The state
 styles are code-local bindings, so no theme-catalog entry is required.
 
-Control button `width` and `height` accept the composition `Dimension` primitives: `Pixels`,
+Control button `width` and `height` accept the composition `Dimension` primitives: `Logical` (fixed logical units),
 `Percent` (a fraction from 0 to 1), weighted `Fill`, and `Shrink`. Migrate numeric struct fields to
-`Dimension::Pixels(value)` (or `value.into()` outside constants). To span the title bar vertically,
+`Dimension::Logical(value)` (or `value.into()` outside constants). To span the title bar vertically,
 use `height: Dimension::FILL` for each control and zero vertical title-bar padding. Fill respects
 padding; fixed and percentage heights are centered within the remaining height. Chrome controls
 have no inherited 32px minimum, so compact bars can use smaller buttons; keep icons small enough to fit.

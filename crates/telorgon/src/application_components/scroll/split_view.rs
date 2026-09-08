@@ -755,27 +755,27 @@ fn resolve_styles(
     let mut divider_grip = style.divider_grip;
     let target = density.effective_minimum();
     divider.min_size = SizeRule2D {
-        width: SizeRule::Px(target.width()),
-        height: SizeRule::Px(target.height()),
+        width: SizeRule::Logical(target.width()),
+        height: SizeRule::Logical(target.height()),
     };
     match orientation {
         SplitViewOrientation::Horizontal => {
-            primary.width = SizeRule::Px(primary_extent);
+            primary.width = SizeRule::Logical(primary_extent);
             primary.height = SizeRule::Fill(1.0);
-            secondary.width = SizeRule::Px(secondary_extent);
+            secondary.width = SizeRule::Logical(secondary_extent);
             secondary.height = SizeRule::Fill(1.0);
             divider.height = SizeRule::Fill(1.0);
-            divider_grip.width = SizeRule::Px(4.0);
-            divider_grip.height = SizeRule::Px(24.0);
+            divider_grip.width = SizeRule::Logical(4.0);
+            divider_grip.height = SizeRule::Logical(24.0);
         }
         SplitViewOrientation::Vertical => {
             primary.width = SizeRule::Fill(1.0);
-            primary.height = SizeRule::Px(primary_extent);
+            primary.height = SizeRule::Logical(primary_extent);
             secondary.width = SizeRule::Fill(1.0);
-            secondary.height = SizeRule::Px(secondary_extent);
+            secondary.height = SizeRule::Logical(secondary_extent);
             divider.width = SizeRule::Fill(1.0);
-            divider_grip.width = SizeRule::Px(24.0);
-            divider_grip.height = SizeRule::Px(4.0);
+            divider_grip.width = SizeRule::Logical(24.0);
+            divider_grip.height = SizeRule::Logical(4.0);
         }
     }
     ResolvedSplitViewStyles {
@@ -1204,8 +1204,8 @@ mod tests {
                 .unwrap()
                 .min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
 

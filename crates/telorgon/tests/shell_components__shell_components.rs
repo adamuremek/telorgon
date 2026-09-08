@@ -323,8 +323,8 @@ fn mounted_catalog_preserves_structure_geometry_semantics_and_typed_requests() {
         Some(refs.frame.node())
     );
     let frame_style = runtime.ui().box_styles.get(refs.frame.node()).unwrap();
-    assert_eq!(frame_style.width, SizeRule::Px(640.0));
-    assert_eq!(frame_style.height, SizeRule::Px(480.0));
+    assert_eq!(frame_style.width, SizeRule::Logical(640.0));
+    assert_eq!(frame_style.height, SizeRule::Logical(480.0));
     assert_eq!(
         frame_style.transform.translation,
         PointF { x: 20.0, y: 30.0 }
@@ -416,7 +416,7 @@ fn mounted_catalog_preserves_structure_geometry_semantics_and_typed_requests() {
     assert_eq!(refs.preview.bounds().x, 400.0);
     assert_eq!(refs.preview.output_revision().get(), 13);
     let preview_style = runtime.ui().box_styles.get(refs.preview.node()).unwrap();
-    assert_eq!(preview_style.width, SizeRule::Px(400.0));
+    assert_eq!(preview_style.width, SizeRule::Logical(400.0));
     assert_eq!(preview_style.transform.translation.x, 400.0);
     assert!(runtime.ui().interactions.get(refs.preview.node()).is_none());
 

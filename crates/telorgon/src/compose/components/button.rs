@@ -165,8 +165,8 @@ impl View for Button {
 pub fn button(label: impl Into<String>) -> Button {
     let style = BoxStyle {
         min_size: SizeRule2D {
-            width: SizeRule::Px(32.0),
-            height: SizeRule::Px(32.0),
+            width: SizeRule::Logical(32.0),
+            height: SizeRule::Logical(32.0),
         },
         padding: EdgeInsets {
             top: 0.0,

@@ -624,17 +624,17 @@ fn resolve_style(
     let minimum = density.effective_minimum();
     let mut container = style.container;
     container.min_size = SizeRule2D {
-        width: SizeRule::Px(minimum.width()),
-        height: SizeRule::Px(minimum.height()),
+        width: SizeRule::Logical(minimum.width()),
+        height: SizeRule::Logical(minimum.height()),
     };
     let mut track = style.track;
     let mut thumb = style.thumb;
     match axis {
         ScrollViewAxis::Horizontal => {
-            track.width = SizeRule::Px(style.track_extent);
-            track.height = SizeRule::Px(style.track_thickness);
-            thumb.width = SizeRule::Px(thumb_geometry.extent());
-            thumb.height = SizeRule::Px(style.track_thickness);
+            track.width = SizeRule::Logical(style.track_extent);
+            track.height = SizeRule::Logical(style.track_thickness);
+            thumb.width = SizeRule::Logical(thumb_geometry.extent());
+            thumb.height = SizeRule::Logical(style.track_thickness);
             thumb.transform = Transform2D {
                 translation: PointF {
                     x: thumb_geometry.origin(),
@@ -644,10 +644,10 @@ fn resolve_style(
             };
         }
         ScrollViewAxis::Vertical => {
-            track.width = SizeRule::Px(style.track_thickness);
-            track.height = SizeRule::Px(style.track_extent);
-            thumb.width = SizeRule::Px(style.track_thickness);
-            thumb.height = SizeRule::Px(thumb_geometry.extent());
+            track.width = SizeRule::Logical(style.track_thickness);
+            track.height = SizeRule::Logical(style.track_extent);
+            thumb.width = SizeRule::Logical(style.track_thickness);
+            thumb.height = SizeRule::Logical(thumb_geometry.extent());
             thumb.transform = Transform2D {
                 translation: PointF {
                     x: thumb.transform.translation.x,
@@ -1019,21 +1019,21 @@ mod tests {
         assert_eq!(
             runtime.ui().box_styles.get(root).unwrap().min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
         assert_eq!(
             runtime.ui().box_styles.get(track).unwrap().width,
-            SizeRule::Px(10.0)
+            SizeRule::Logical(10.0)
         );
         assert_eq!(
             runtime.ui().box_styles.get(track).unwrap().height,
-            SizeRule::Px(200.0)
+            SizeRule::Logical(200.0)
         );
         let thumb_style = runtime.ui().box_styles.get(thumb).unwrap();
-        assert_eq!(thumb_style.width, SizeRule::Px(10.0));
-        assert_eq!(thumb_style.height, SizeRule::Px(40.0));
+        assert_eq!(thumb_style.width, SizeRule::Logical(10.0));
+        assert_eq!(thumb_style.height, SizeRule::Logical(40.0));
         assert_eq!(
             thumb_style.transform.translation,
             PointF { x: 3.0, y: 40.0 }

@@ -94,8 +94,8 @@ fn public_toolbar_mounts_one_focus_stop_and_routes_a_fresh_typed_action() {
     assert_eq!(
         runtime.ui().box_styles.get(item_node).unwrap().min_size,
         SizeRule2D {
-            width: SizeRule::Px(44.0),
-            height: SizeRule::Px(44.0),
+            width: SizeRule::Logical(44.0),
+            height: SizeRule::Logical(44.0),
         }
     );
     assert!(runtime.dispatch_activation(item_node, ChangeSource::Keyboard));

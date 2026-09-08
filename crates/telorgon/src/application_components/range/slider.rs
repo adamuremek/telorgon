@@ -420,8 +420,8 @@ impl Default for SliderStyle {
             SliderVisualStyle {
                 container: BoxStyle {
                     min_size: SizeRule2D {
-                        width: SizeRule::Px(32.0),
-                        height: SizeRule::Px(32.0),
+                        width: SizeRule::Logical(32.0),
+                        height: SizeRule::Logical(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
                     decoration: crate::ui::BoxDecoration {
@@ -643,12 +643,14 @@ where
         let content_style = match self.orientation {
             SliderOrientation::Horizontal => BoxStyle {
                 width: SizeRule::Fill(1.0),
-                height: SizeRule::Px((visual.label_size * 1.25).max(visual.thumb_size)),
+                height: SizeRule::Logical((visual.label_size * 1.25).max(visual.thumb_size)),
                 ..BoxStyle::default()
             },
             SliderOrientation::Vertical => BoxStyle {
-                width: SizeRule::Px((visual.label_size * 4.0).max(visual.thumb_size)),
-                height: SizeRule::Px(visual.track_length + visual.gap + visual.label_size * 1.25),
+                width: SizeRule::Logical((visual.label_size * 4.0).max(visual.thumb_size)),
+                height: SizeRule::Logical(
+                    visual.track_length + visual.gap + visual.label_size * 1.25,
+                ),
                 ..BoxStyle::default()
             },
         };
@@ -810,8 +812,8 @@ fn resolved_visual<T: RangeScalar>(
     .clamp(0.0, 1.0) as f32;
     let mut visual = style.resolve(context.state).visual;
     visual.container.min_size = SizeRule2D {
-        width: SizeRule::Px(context.minimum.width()),
-        height: SizeRule::Px(context.minimum.height()),
+        width: SizeRule::Logical(context.minimum.width()),
+        height: SizeRule::Logical(context.minimum.height()),
     };
     configure_visual_geometry(
         &mut visual,
@@ -839,15 +841,15 @@ fn configure_visual_geometry(
     match orientation {
         SliderOrientation::Horizontal => {
             let cross_axis_offset = (visual.track_thickness - visual.thumb_size) * 0.5;
-            visual.track.width = SizeRule::Px(visual.track_length);
-            visual.track.height = SizeRule::Px(visual.track_thickness);
-            visual.fill.width = SizeRule::Px(visual.track_length * visual_fraction);
-            visual.fill.height = SizeRule::Px(visual.track_thickness);
-            visual.thumb.width = SizeRule::Px(visual.thumb_size);
-            visual.thumb.height = SizeRule::Px(visual.thumb_size);
+            visual.track.width = SizeRule::Logical(visual.track_length);
+            visual.track.height = SizeRule::Logical(visual.track_thickness);
+            visual.fill.width = SizeRule::Logical(visual.track_length * visual_fraction);
+            visual.fill.height = SizeRule::Logical(visual.track_thickness);
+            visual.thumb.width = SizeRule::Logical(visual.thumb_size);
+            visual.thumb.height = SizeRule::Logical(visual.thumb_size);
             visual.thumb.max_size = SizeRule2D {
-                width: SizeRule::Px(visual.thumb_size),
-                height: SizeRule::Px(visual.thumb_size),
+                width: SizeRule::Logical(visual.thumb_size),
+                height: SizeRule::Logical(visual.thumb_size),
             };
             visual.thumb.transform = Transform2D {
                 translation: PointF {
@@ -859,15 +861,15 @@ fn configure_visual_geometry(
         }
         SliderOrientation::Vertical => {
             let cross_axis_offset = (visual.track_thickness - visual.thumb_size) * 0.5;
-            visual.track.width = SizeRule::Px(visual.track_thickness);
-            visual.track.height = SizeRule::Px(visual.track_length);
-            visual.fill.width = SizeRule::Px(visual.track_thickness);
-            visual.fill.height = SizeRule::Px(visual.track_length * fraction);
-            visual.thumb.width = SizeRule::Px(visual.thumb_size);
-            visual.thumb.height = SizeRule::Px(visual.thumb_size);
+            visual.track.width = SizeRule::Logical(visual.track_thickness);
+            visual.track.height = SizeRule::Logical(visual.track_length);
+            visual.fill.width = SizeRule::Logical(visual.track_thickness);
+            visual.fill.height = SizeRule::Logical(visual.track_length * fraction);
+            visual.thumb.width = SizeRule::Logical(visual.thumb_size);
+            visual.thumb.height = SizeRule::Logical(visual.thumb_size);
             visual.thumb.max_size = SizeRule2D {
-                width: SizeRule::Px(visual.thumb_size),
-                height: SizeRule::Px(visual.thumb_size),
+                width: SizeRule::Logical(visual.thumb_size),
+                height: SizeRule::Logical(visual.thumb_size),
             };
             visual.thumb.transform = Transform2D {
                 translation: PointF {
@@ -1369,8 +1371,8 @@ mod tests {
         assert_eq!(
             runtime.ui().box_styles.get(node).unwrap().min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
         assert_eq!(

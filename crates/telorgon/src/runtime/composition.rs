@@ -1749,8 +1749,8 @@ fn button_icon_style(props: &ButtonElement) -> BoxStyle {
         (0.0, 0.0)
     };
     BoxStyle {
-        width: SizeRule::Px(size),
-        height: SizeRule::Px(size),
+        width: SizeRule::Logical(size),
+        height: SizeRule::Logical(size),
         opacity,
         ..BoxStyle::default()
     }
@@ -1761,8 +1761,8 @@ fn button_label_box_style(props: &ButtonElement) -> BoxStyle {
         BoxStyle::default()
     } else {
         BoxStyle {
-            width: SizeRule::Px(0.0),
-            height: SizeRule::Px(0.0),
+            width: SizeRule::Logical(0.0),
+            height: SizeRule::Logical(0.0),
             opacity: 0.0,
             ..BoxStyle::default()
         }
@@ -1853,11 +1853,11 @@ fn checkbox_styles(value: SemanticCheckState, enabled: bool) -> CheckboxStyles {
     let checked = value != SemanticCheckState::Unchecked;
     let indicator = BoxStyle {
         sizing: BoxSizing::BorderBox,
-        width: SizeRule::Px(18.0),
-        height: SizeRule::Px(18.0),
+        width: SizeRule::Logical(18.0),
+        height: SizeRule::Logical(18.0),
         max_size: SizeRule2D {
-            width: SizeRule::Px(18.0),
-            height: SizeRule::Px(18.0),
+            width: SizeRule::Logical(18.0),
+            height: SizeRule::Logical(18.0),
         },
         decoration: crate::ui::BoxDecoration {
             background: if checked {
@@ -1885,8 +1885,8 @@ fn checkbox_styles(value: SemanticCheckState, enabled: bool) -> CheckboxStyles {
     CheckboxStyles {
         container: BoxStyle {
             min_size: SizeRule2D {
-                width: SizeRule::Px(32.0),
-                height: SizeRule::Px(32.0),
+                width: SizeRule::Logical(32.0),
+                height: SizeRule::Logical(32.0),
             },
             padding: EdgeInsets::all(5.0),
             ..BoxStyle::default()
@@ -1918,11 +1918,11 @@ fn mark_segment(start: PointF, end: PointF, background: Background) -> BoxStyle 
     let length = dx.hypot(dy);
     let stroke = 2.0 * SCALE;
     BoxStyle {
-        width: SizeRule::Px(length),
-        height: SizeRule::Px(stroke),
+        width: SizeRule::Logical(length),
+        height: SizeRule::Logical(stroke),
         max_size: SizeRule2D {
-            width: SizeRule::Px(length),
-            height: SizeRule::Px(stroke),
+            width: SizeRule::Logical(length),
+            height: SizeRule::Logical(stroke),
         },
         decoration: crate::ui::BoxDecoration {
             background,
@@ -1959,18 +1959,18 @@ fn switch_styles(value: bool, enabled: bool) -> SwitchStyles {
     SwitchStyles {
         container: BoxStyle {
             min_size: SizeRule2D {
-                width: SizeRule::Px(32.0),
-                height: SizeRule::Px(32.0),
+                width: SizeRule::Logical(32.0),
+                height: SizeRule::Logical(32.0),
             },
             padding: EdgeInsets::all(5.0),
             ..BoxStyle::default()
         },
         track: BoxStyle {
-            width: SizeRule::Px(38.0),
-            height: SizeRule::Px(22.0),
+            width: SizeRule::Logical(38.0),
+            height: SizeRule::Logical(22.0),
             max_size: SizeRule2D {
-                width: SizeRule::Px(38.0),
-                height: SizeRule::Px(22.0),
+                width: SizeRule::Logical(38.0),
+                height: SizeRule::Logical(22.0),
             },
             padding: EdgeInsets::all(2.0),
             decoration: crate::ui::BoxDecoration {
@@ -1982,11 +1982,11 @@ fn switch_styles(value: bool, enabled: bool) -> SwitchStyles {
             ..BoxStyle::default()
         },
         thumb: BoxStyle {
-            width: SizeRule::Px(16.0),
-            height: SizeRule::Px(16.0),
+            width: SizeRule::Logical(16.0),
+            height: SizeRule::Logical(16.0),
             max_size: SizeRule2D {
-                width: SizeRule::Px(16.0),
-                height: SizeRule::Px(16.0),
+                width: SizeRule::Logical(16.0),
+                height: SizeRule::Logical(16.0),
             },
             decoration: crate::ui::BoxDecoration {
                 background: Background::Color(ColorRgba8::rgba(248, 249, 252, opacity)),
@@ -2020,18 +2020,18 @@ fn slider_styles(value: f32, enabled: bool) -> SliderStyles {
     SliderStyles {
         container: BoxStyle {
             min_size: SizeRule2D {
-                width: SizeRule::Px(32.0),
-                height: SizeRule::Px(32.0),
+                width: SizeRule::Logical(32.0),
+                height: SizeRule::Logical(32.0),
             },
             padding: EdgeInsets::all(5.0),
             ..BoxStyle::default()
         },
         track: BoxStyle {
-            width: SizeRule::Px(160.0),
-            height: SizeRule::Px(6.0),
+            width: SizeRule::Logical(160.0),
+            height: SizeRule::Logical(6.0),
             max_size: SizeRule2D {
-                width: SizeRule::Px(160.0),
-                height: SizeRule::Px(6.0),
+                width: SizeRule::Logical(160.0),
+                height: SizeRule::Logical(6.0),
             },
             decoration: crate::ui::BoxDecoration {
                 background: Background::Color(ColorRgba8::rgba(78, 87, 105, opacity)),
@@ -2041,8 +2041,8 @@ fn slider_styles(value: f32, enabled: bool) -> SliderStyles {
             ..BoxStyle::default()
         },
         fill: BoxStyle {
-            width: SizeRule::Px(160.0 * value),
-            height: SizeRule::Px(6.0),
+            width: SizeRule::Logical(160.0 * value),
+            height: SizeRule::Logical(6.0),
             decoration: crate::ui::BoxDecoration {
                 background: Background::Color(accent),
                 corner_radii: CornerRadii::all(3.0),
@@ -2051,11 +2051,11 @@ fn slider_styles(value: f32, enabled: bool) -> SliderStyles {
             ..BoxStyle::default()
         },
         thumb: BoxStyle {
-            width: SizeRule::Px(18.0),
-            height: SizeRule::Px(18.0),
+            width: SizeRule::Logical(18.0),
+            height: SizeRule::Logical(18.0),
             max_size: SizeRule2D {
-                width: SizeRule::Px(18.0),
-                height: SizeRule::Px(18.0),
+                width: SizeRule::Logical(18.0),
+                height: SizeRule::Logical(18.0),
             },
             decoration: crate::ui::BoxDecoration {
                 background: Background::Color(ColorRgba8::rgba(245, 247, 251, opacity)),

@@ -372,7 +372,7 @@ mod tests {
         assert!(semantic.actions.contains(SemanticAction::Activate));
         assert_eq!(
             runtime.ui().box_styles.get(node).unwrap().min_size.width,
-            crate::ui::SizeRule::Px(44.0)
+            crate::ui::SizeRule::Logical(44.0)
         );
 
         assert!(runtime.dispatch_activation(node, ChangeSource::Pointer));

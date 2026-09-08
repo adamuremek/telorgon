@@ -294,10 +294,16 @@ fn compile_slot(
         patch.margin = Some(EdgeInsets::all(finite(tokens.length(value)?, "margin")?));
     }
     if let Some(value) = &source.width {
-        patch.width = Some(SizeRule::Px(nonnegative(tokens.length(value)?, "width")?));
+        patch.width = Some(SizeRule::Logical(nonnegative(
+            tokens.length(value)?,
+            "width",
+        )?));
     }
     if let Some(value) = &source.height {
-        patch.height = Some(SizeRule::Px(nonnegative(tokens.length(value)?, "height")?));
+        patch.height = Some(SizeRule::Logical(nonnegative(
+            tokens.length(value)?,
+            "height",
+        )?));
     }
     if let Some(value) = source.opacity {
         if !value.is_finite() || !(0.0..=1.0).contains(&value) {

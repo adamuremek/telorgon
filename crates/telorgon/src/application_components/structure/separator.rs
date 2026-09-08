@@ -173,12 +173,12 @@ fn resolve_line_style(
 ) -> BoxStyle {
     match orientation {
         SeparatorOrientation::Horizontal => {
-            style.width = SizeRule::Px(geometry.length());
-            style.height = SizeRule::Px(geometry.thickness());
+            style.width = SizeRule::Logical(geometry.length());
+            style.height = SizeRule::Logical(geometry.thickness());
         }
         SeparatorOrientation::Vertical => {
-            style.width = SizeRule::Px(geometry.thickness());
-            style.height = SizeRule::Px(geometry.length());
+            style.width = SizeRule::Logical(geometry.thickness());
+            style.height = SizeRule::Logical(geometry.length());
         }
     }
     style
@@ -344,8 +344,8 @@ mod tests {
         assert_eq!(runtime.ui().kinds.get(named_node), Some(&NodeKind::Box));
 
         let decorative_style = runtime.ui().box_styles.get(decorative_node).unwrap();
-        assert_eq!(decorative_style.width, SizeRule::Px(120.0));
-        assert_eq!(decorative_style.height, SizeRule::Px(2.0));
+        assert_eq!(decorative_style.width, SizeRule::Logical(120.0));
+        assert_eq!(decorative_style.height, SizeRule::Logical(2.0));
         assert_eq!(
             decorative_style.decoration.background,
             Background::Color(ColorRgba8::rgba(10, 20, 30, 255))
@@ -365,8 +365,8 @@ mod tests {
             }
         );
         let named_style = runtime.ui().box_styles.get(named_node).unwrap();
-        assert_eq!(named_style.width, SizeRule::Px(3.0));
-        assert_eq!(named_style.height, SizeRule::Px(80.0));
+        assert_eq!(named_style.width, SizeRule::Logical(3.0));
+        assert_eq!(named_style.height, SizeRule::Logical(80.0));
 
         let decorative_semantics = runtime.ui().semantics.get(decorative_node).unwrap();
         assert_eq!(decorative_semantics.role, SemanticRole::Separator);

@@ -347,8 +347,8 @@ where
                                 self.style.item
                             };
                             item_style.min_size = SizeRule2D {
-                                width: SizeRule::Px(minimum.width()),
-                                height: SizeRule::Px(minimum.height()),
+                                width: SizeRule::Logical(minimum.width()),
+                                height: SizeRule::Logical(minimum.height()),
                             };
                             let color = if state.enabled() {
                                 self.style.label_color

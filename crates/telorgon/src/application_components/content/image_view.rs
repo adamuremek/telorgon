@@ -243,8 +243,8 @@ mod tests {
                 .root(BoxStyle::default(), LayoutStyle::default(), |_| {});
             let style = ImageViewStyle {
                 image: BoxStyle {
-                    width: SizeRule::Px(320.0),
-                    height: SizeRule::Px(180.0),
+                    width: SizeRule::Logical(320.0),
+                    height: SizeRule::Logical(180.0),
                     decoration: crate::ui::BoxDecoration {
                         background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
                         border: Border::all(2.0, ColorRgba8::rgba(40, 50, 60, 255)),
@@ -309,8 +309,8 @@ mod tests {
         assert_eq!(decorative.content(), ImageViewContent::new(ImageId(17), 44));
 
         let style = runtime.ui().box_styles.get(decorative.node()).unwrap();
-        assert_eq!(style.width, SizeRule::Px(320.0));
-        assert_eq!(style.height, SizeRule::Px(180.0));
+        assert_eq!(style.width, SizeRule::Logical(320.0));
+        assert_eq!(style.height, SizeRule::Logical(180.0));
         assert_eq!(style.opacity, 0.75);
         assert_eq!(style.decoration.corner_radii, CornerRadii::all(8.0));
         assert_eq!(

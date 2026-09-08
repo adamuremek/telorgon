@@ -139,8 +139,8 @@ fn public_menu_mounts_one_focus_entry_and_preserves_command_and_submenu_sources(
             .unwrap()
             .min_size,
         SizeRule2D {
-            width: SizeRule::Px(44.0),
-            height: SizeRule::Px(44.0),
+            width: SizeRule::Logical(44.0),
+            height: SizeRule::Logical(44.0),
         }
     );
     let disabled = runtime.ui().semantics.get(items[1].node()).unwrap();

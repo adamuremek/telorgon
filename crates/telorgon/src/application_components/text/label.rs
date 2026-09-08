@@ -316,7 +316,7 @@ mod tests {
                 .style(LabelStyle {
                     text,
                     container: BoxStyle {
-                        width: SizeRule::Px(240.0),
+                        width: SizeRule::Logical(240.0),
                         decoration: crate::ui::BoxDecoration {
                             background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
                             ..crate::ui::BoxDecoration::default()
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(visual.style.weight, 600);
 
         let box_style = runtime.ui().box_styles.get(label.node()).unwrap();
-        assert_eq!(box_style.width, SizeRule::Px(240.0));
+        assert_eq!(box_style.width, SizeRule::Logical(240.0));
         assert_eq!(box_style.opacity, 0.8);
         assert_eq!(
             runtime.ui().layouts.get(label.node()).unwrap(),

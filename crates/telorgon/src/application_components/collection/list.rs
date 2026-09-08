@@ -291,8 +291,8 @@ where
                     for item in &self.items {
                         let mut style = self.style.row;
                         style.min_size = SizeRule2D {
-                            width: SizeRule::Px(minimum.width()),
-                            height: SizeRule::Px(minimum.height()),
+                            width: SizeRule::Logical(minimum.width()),
+                            height: SizeRule::Logical(minimum.height()),
                         };
                         let control = writer.layer(true, style, LayoutStyle::default(), |writer| {
                             content(item, writer)
@@ -593,8 +593,8 @@ mod tests {
             assert_eq!(
                 runtime.ui().box_styles.get(row.node()).unwrap().min_size,
                 SizeRule2D {
-                    width: SizeRule::Px(44.0),
-                    height: SizeRule::Px(44.0),
+                    width: SizeRule::Logical(44.0),
+                    height: SizeRule::Logical(44.0),
                 }
             );
         }

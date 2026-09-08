@@ -141,8 +141,8 @@ impl ToggleButton {
         let mut visual = self.style.resolve(value, state).visual;
         let minimum = self.button.density_metrics().effective_minimum();
         visual.container.min_size = SizeRule2D {
-            width: SizeRule::Px(minimum.width()),
-            height: SizeRule::Px(minimum.height()),
+            width: SizeRule::Logical(minimum.width()),
+            height: SizeRule::Logical(minimum.height()),
         };
 
         let label = self.button.label().to_owned();
@@ -331,8 +331,8 @@ mod tests {
         assert_eq!(
             runtime.ui().box_styles.get(node).unwrap().min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
 

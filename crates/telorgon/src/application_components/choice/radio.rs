@@ -239,8 +239,8 @@ impl Default for RadioStyle {
             RadioItemVisualStyle {
                 container: BoxStyle {
                     min_size: SizeRule2D {
-                        width: SizeRule::Px(32.0),
-                        height: SizeRule::Px(32.0),
+                        width: SizeRule::Logical(32.0),
+                        height: SizeRule::Logical(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
                     decoration: crate::ui::BoxDecoration {
@@ -251,8 +251,8 @@ impl Default for RadioStyle {
                     ..BoxStyle::default()
                 },
                 indicator: BoxStyle {
-                    width: SizeRule::Px(18.0),
-                    height: SizeRule::Px(18.0),
+                    width: SizeRule::Logical(18.0),
+                    height: SizeRule::Logical(18.0),
                     decoration: crate::ui::BoxDecoration {
                         border: Border::all(1.0, ColorRgba8::rgba(109, 119, 139, opacity)),
                         corner_radii: CornerRadii::all(9.0),
@@ -261,8 +261,8 @@ impl Default for RadioStyle {
                     ..BoxStyle::default()
                 },
                 dot: BoxStyle {
-                    width: SizeRule::Px(if selected { 10.0 } else { 0.0 }),
-                    height: SizeRule::Px(if selected { 10.0 } else { 0.0 }),
+                    width: SizeRule::Logical(if selected { 10.0 } else { 0.0 }),
+                    height: SizeRule::Logical(if selected { 10.0 } else { 0.0 }),
                     decoration: crate::ui::BoxDecoration {
                         background: if selected {
                             Background::Color(ColorRgba8::rgba(76, 132, 235, opacity))
@@ -418,8 +418,8 @@ where
                             .resolve_item(selected == Some(item.key), state)
                             .visual;
                         visual.container.min_size = SizeRule2D {
-                            width: SizeRule::Px(minimum.width()),
-                            height: SizeRule::Px(minimum.height()),
+                            width: SizeRule::Logical(minimum.width()),
+                            height: SizeRule::Logical(minimum.height()),
                         };
                         let label = item.label.clone();
                         let control = writer.action_node(visual.container, false, move |writer| {
@@ -872,8 +872,8 @@ mod tests {
                 .unwrap()
                 .min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
 

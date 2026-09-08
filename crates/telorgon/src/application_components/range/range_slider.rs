@@ -442,8 +442,8 @@ where
             .visual;
         let target = self.density.effective_minimum();
         visual.container.min_size = SizeRule2D {
-            width: SizeRule::Px(target.width()),
-            height: SizeRule::Px(target.height()),
+            width: SizeRule::Logical(target.width()),
+            height: SizeRule::Logical(target.height()),
         };
         let (lower_position, upper_position) = visual_positions(
             lower_fraction,
@@ -629,12 +629,12 @@ fn configure_track(
 ) {
     match orientation {
         SliderOrientation::Horizontal => {
-            track.width = SizeRule::Px(length);
-            track.height = SizeRule::Px(thickness);
+            track.width = SizeRule::Logical(length);
+            track.height = SizeRule::Logical(thickness);
         }
         SliderOrientation::Vertical => {
-            track.width = SizeRule::Px(thickness);
-            track.height = SizeRule::Px(length);
+            track.width = SizeRule::Logical(thickness);
+            track.height = SizeRule::Logical(length);
         }
     }
 }
@@ -657,27 +657,27 @@ fn configure_range_visual(
     let end = lower_position.max(upper_position);
     match orientation {
         SliderOrientation::Horizontal => {
-            fill.width = SizeRule::Px(track_length * (end - start));
-            fill.height = SizeRule::Px(track_thickness);
+            fill.width = SizeRule::Logical(track_length * (end - start));
+            fill.height = SizeRule::Logical(track_thickness);
             fill.transform = translation(track_length * start, 0.0);
             for (thumb, position) in [(lower_thumb, lower_position), (upper_thumb, upper_position)]
             {
                 thumb.min_size = SizeRule2D {
-                    width: SizeRule::Px(target_width),
-                    height: SizeRule::Px(target_height),
+                    width: SizeRule::Logical(target_width),
+                    height: SizeRule::Logical(target_height),
                 };
                 thumb.transform = translation((track_length - thumb_size) * position, 0.0);
             }
         }
         SliderOrientation::Vertical => {
-            fill.width = SizeRule::Px(track_thickness);
-            fill.height = SizeRule::Px(track_length * (end - start));
+            fill.width = SizeRule::Logical(track_thickness);
+            fill.height = SizeRule::Logical(track_length * (end - start));
             fill.transform = translation(0.0, track_length * start);
             for (thumb, position) in [(lower_thumb, lower_position), (upper_thumb, upper_position)]
             {
                 thumb.min_size = SizeRule2D {
-                    width: SizeRule::Px(target_width),
-                    height: SizeRule::Px(target_height),
+                    width: SizeRule::Logical(target_width),
+                    height: SizeRule::Logical(target_height),
                 };
                 thumb.transform = translation(0.0, (track_length - thumb_size) * position);
             }
@@ -1037,8 +1037,8 @@ mod tests {
             assert_eq!(
                 runtime.ui().box_styles.get(node).unwrap().min_size,
                 SizeRule2D {
-                    width: SizeRule::Px(44.0),
-                    height: SizeRule::Px(44.0),
+                    width: SizeRule::Logical(44.0),
+                    height: SizeRule::Logical(44.0),
                 }
             );
         }

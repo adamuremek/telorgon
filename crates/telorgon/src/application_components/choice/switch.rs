@@ -94,8 +94,8 @@ impl Default for SwitchStyle {
             SwitchVisualStyle {
                 container: BoxStyle {
                     min_size: SizeRule2D {
-                        width: SizeRule::Px(32.0),
-                        height: SizeRule::Px(32.0),
+                        width: SizeRule::Logical(32.0),
+                        height: SizeRule::Logical(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
                     decoration: crate::ui::BoxDecoration {
@@ -106,8 +106,8 @@ impl Default for SwitchStyle {
                     ..BoxStyle::default()
                 },
                 track: BoxStyle {
-                    width: SizeRule::Px(38.0),
-                    height: SizeRule::Px(22.0),
+                    width: SizeRule::Logical(38.0),
+                    height: SizeRule::Logical(22.0),
                     padding: EdgeInsets::all(2.0),
                     decoration: crate::ui::BoxDecoration {
                         background: Background::Color(track_color),
@@ -118,8 +118,8 @@ impl Default for SwitchStyle {
                     ..BoxStyle::default()
                 },
                 thumb: BoxStyle {
-                    width: SizeRule::Px(16.0),
-                    height: SizeRule::Px(16.0),
+                    width: SizeRule::Logical(16.0),
+                    height: SizeRule::Logical(16.0),
                     decoration: crate::ui::BoxDecoration {
                         background: Background::Color(ColorRgba8::rgba(248, 249, 252, opacity)),
                         corner_radii: CornerRadii::all(8.0),
@@ -246,8 +246,8 @@ impl Switch {
         let mut visual = self.style.resolve(value, state).visual;
         let minimum = self.button.density_metrics().effective_minimum();
         visual.container.min_size = SizeRule2D {
-            width: SizeRule::Px(minimum.width()),
-            height: SizeRule::Px(minimum.height()),
+            width: SizeRule::Logical(minimum.width()),
+            height: SizeRule::Logical(minimum.height()),
         };
 
         let label = self.button.label().to_owned();
@@ -296,8 +296,8 @@ impl Switch {
         ui.bind_map(read, control.style, move |value| {
             let mut visual = style.resolve(*value, state).visual;
             visual.container.min_size = SizeRule2D {
-                width: SizeRule::Px(minimum.width()),
-                height: SizeRule::Px(minimum.height()),
+                width: SizeRule::Logical(minimum.width()),
+                height: SizeRule::Logical(minimum.height()),
             };
             visual.container
         })?;
@@ -540,8 +540,8 @@ mod tests {
         assert_eq!(
             runtime.ui().box_styles.get(node).unwrap().min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
 

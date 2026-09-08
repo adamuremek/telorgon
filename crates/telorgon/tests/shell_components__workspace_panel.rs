@@ -437,5 +437,5 @@ fn mounted_workspace_and_panel_components_preserve_host_truth_and_emit_only_requ
         SemanticParticipation::Exclude
     );
     let preview_style = runtime.ui().box_styles.get(preview.node()).unwrap();
-    assert_eq!(preview_style.width, SizeRule::Px(48.0));
+    assert_eq!(preview_style.width, SizeRule::Logical(48.0));
 }

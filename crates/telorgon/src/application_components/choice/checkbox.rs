@@ -60,8 +60,8 @@ fn checkbox_mark_styles(visual: CheckboxVisualStyle, value: CheckState) -> Check
 
     CheckboxMarkStyles {
         root: BoxStyle {
-            width: SizeRule::Px(indicator_width),
-            height: SizeRule::Px(indicator_height),
+            width: SizeRule::Logical(indicator_width),
+            height: SizeRule::Logical(indicator_height),
             ..BoxStyle::default()
         },
         check_first: mark_segment(
@@ -100,8 +100,8 @@ fn mark_segment(
     let length = dx.hypot(dy);
     let stroke_width = MARK_STROKE_WIDTH * scale;
     BoxStyle {
-        width: SizeRule::Px(length),
-        height: SizeRule::Px(stroke_width),
+        width: SizeRule::Logical(length),
+        height: SizeRule::Logical(stroke_width),
         decoration: crate::ui::BoxDecoration {
             background,
             corner_radii: CornerRadii::all(stroke_width * 0.5),
@@ -122,7 +122,7 @@ fn mark_segment(
 
 const fn fixed_extent(rule: SizeRule) -> Option<f32> {
     match rule {
-        SizeRule::Px(value) => Some(value),
+        SizeRule::Logical(value) => Some(value),
         SizeRule::Percent(_) | SizeRule::Fill(_) | SizeRule::Shrink => None,
     }
 }
@@ -238,8 +238,8 @@ impl Default for CheckboxStyle {
             CheckboxVisualStyle {
                 container: BoxStyle {
                     min_size: SizeRule2D {
-                        width: SizeRule::Px(32.0),
-                        height: SizeRule::Px(32.0),
+                        width: SizeRule::Logical(32.0),
+                        height: SizeRule::Logical(32.0),
                     },
                     padding: EdgeInsets::all(5.0),
                     decoration: crate::ui::BoxDecoration {
@@ -250,8 +250,8 @@ impl Default for CheckboxStyle {
                     ..BoxStyle::default()
                 },
                 indicator: BoxStyle {
-                    width: SizeRule::Px(18.0),
-                    height: SizeRule::Px(18.0),
+                    width: SizeRule::Logical(18.0),
+                    height: SizeRule::Logical(18.0),
                     decoration: crate::ui::BoxDecoration {
                         border: Border::all(1.0, ColorRgba8::rgba(109, 119, 139, opacity)),
                         background: indicator_background,
@@ -399,8 +399,8 @@ impl Checkbox {
         let mut visual = self.style.resolve(value, state).visual;
         let minimum = self.button.density_metrics().effective_minimum();
         visual.container.min_size = SizeRule2D {
-            width: SizeRule::Px(minimum.width()),
-            height: SizeRule::Px(minimum.height()),
+            width: SizeRule::Logical(minimum.width()),
+            height: SizeRule::Logical(minimum.height()),
         };
 
         let label = self.button.label().to_owned();
@@ -481,8 +481,8 @@ impl Checkbox {
         ui.bind_map(read, control.style, move |value| {
             let mut visual = style.resolve(*value, state).visual;
             visual.container.min_size = SizeRule2D {
-                width: SizeRule::Px(minimum.width()),
-                height: SizeRule::Px(minimum.height()),
+                width: SizeRule::Logical(minimum.width()),
+                height: SizeRule::Logical(minimum.height()),
             };
             visual.container
         })?;
@@ -726,8 +726,8 @@ mod tests {
 
         let style = CheckboxStyle::default();
         let checked = checkbox_mark_styles(style.checked.resting, CheckState::Checked);
-        assert_eq!(checked.root.width, SizeRule::Px(16.0));
-        assert_eq!(checked.root.height, SizeRule::Px(16.0));
+        assert_eq!(checked.root.width, SizeRule::Logical(16.0));
+        assert_eq!(checked.root.height, SizeRule::Logical(16.0));
         assert!(matches!(
             checked.check_first.decoration.background,
             Background::Color(_)
@@ -869,8 +869,8 @@ mod tests {
         assert_eq!(
             runtime.ui().box_styles.get(node).unwrap().min_size,
             SizeRule2D {
-                width: SizeRule::Px(44.0),
-                height: SizeRule::Px(44.0),
+                width: SizeRule::Logical(44.0),
+                height: SizeRule::Logical(44.0),
             }
         );
 

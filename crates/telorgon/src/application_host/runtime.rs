@@ -892,8 +892,8 @@ mod tests {
                     root.0,
                     || (),
                     BoxStyle {
-                        width: SizeRule::Px(80.0),
-                        height: SizeRule::Px(30.0),
+                        width: SizeRule::Logical(80.0),
+                        height: SizeRule::Logical(30.0),
                         decoration: crate::ui::BoxDecoration {
                             background: Background::Color(ColorRgba8::rgba(10, 20, 30, 255)),
                             ..crate::ui::BoxDecoration::default()
@@ -1268,8 +1268,8 @@ mod tests {
                 .container_node_under(
                     parent,
                     BoxStyle {
-                        width: SizeRule::Px(80.0),
-                        height: SizeRule::Px(30.0),
+                        width: SizeRule::Logical(80.0),
+                        height: SizeRule::Logical(30.0),
                         ..BoxStyle::default()
                     },
                     LayoutStyle::default(),

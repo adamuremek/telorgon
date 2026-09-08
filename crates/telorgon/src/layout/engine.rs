@@ -667,7 +667,7 @@ fn border_insets(style: &BoxStyle) -> EdgeInsets {
 
 fn resolve_size(rule: SizeRule, available: f32, intrinsic: f32) -> f32 {
     match rule {
-        SizeRule::Px(value) => value.max(0.0),
+        SizeRule::Logical(value) => value.max(0.0),
         SizeRule::Percent(value) => available * value.clamp(0.0, 1.0),
         SizeRule::Fill(weight) => {
             if weight > 0.0 {
@@ -815,8 +815,8 @@ mod tests {
                     saved = Some(builder.button(
                         (),
                         BoxStyle {
-                            width: SizeRule::Px(80.0),
-                            height: SizeRule::Px(32.0),
+                            width: SizeRule::Logical(80.0),
+                            height: SizeRule::Logical(32.0),
                             decoration: crate::ui::BoxDecoration {
                                 background: crate::ui::Background::Color(ColorRgba8::rgba(
                                     1, 2, 3, 255,
@@ -860,8 +860,8 @@ mod tests {
             writer.root(BoxStyle::default(), LayoutStyle::default(), |writer| {
                 saved_button = Some(writer.button_node(
                     BoxStyle {
-                        width: SizeRule::Px(120.0),
-                        height: SizeRule::Px(40.0),
+                        width: SizeRule::Logical(120.0),
+                        height: SizeRule::Logical(40.0),
                         ..BoxStyle::default()
                     },
                     |writer| {
@@ -1024,8 +1024,8 @@ mod tests {
                 saved = Some(builder.button(
                     (),
                     BoxStyle {
-                        width: SizeRule::Px(80.0),
-                        height: SizeRule::Px(30.0),
+                        width: SizeRule::Logical(80.0),
+                        height: SizeRule::Logical(30.0),
                         ..BoxStyle::default()
                     },
                     |builder| {
@@ -1070,8 +1070,8 @@ mod tests {
                     let content_box = builder.container(
                         BoxStyle {
                             sizing: BoxSizing::ContentBox,
-                            width: SizeRule::Px(100.0),
-                            height: SizeRule::Px(20.0),
+                            width: SizeRule::Logical(100.0),
+                            height: SizeRule::Logical(20.0),
                             margin: EdgeInsets::all(5.0),
                             padding: EdgeInsets::all(10.0),
                             decoration: crate::ui::BoxDecoration {
@@ -1086,7 +1086,7 @@ mod tests {
                     let fill_one = builder.container(
                         BoxStyle {
                             width: SizeRule::Fill(1.0),
-                            height: SizeRule::Px(20.0),
+                            height: SizeRule::Logical(20.0),
                             ..BoxStyle::default()
                         },
                         LayoutStyle::default(),
@@ -1095,7 +1095,7 @@ mod tests {
                     let fill_two = builder.container(
                         BoxStyle {
                             width: SizeRule::Fill(2.0),
-                            height: SizeRule::Px(20.0),
+                            height: SizeRule::Logical(20.0),
                             ..BoxStyle::default()
                         },
                         LayoutStyle::default(),
@@ -1139,8 +1139,8 @@ mod tests {
                 let mut child = None;
                 let parent = builder.container(
                     BoxStyle {
-                        width: SizeRule::Px(100.0),
-                        height: SizeRule::Px(50.0),
+                        width: SizeRule::Logical(100.0),
+                        height: SizeRule::Logical(50.0),
                         padding: EdgeInsets::all(10.0),
                         transform: crate::core::Transform2D {
                             translation: PointF { x: 5.0, y: 3.0 },
@@ -1153,8 +1153,8 @@ mod tests {
                     |builder| {
                         child = Some(builder.container(
                             BoxStyle {
-                                width: SizeRule::Px(10.0),
-                                height: SizeRule::Px(10.0),
+                                width: SizeRule::Logical(10.0),
+                                height: SizeRule::Logical(10.0),
                                 ..BoxStyle::default()
                             },
                             LayoutStyle::default(),
@@ -1197,8 +1197,8 @@ mod tests {
                 let mut child = None;
                 let parent = writer.container(
                     BoxStyle {
-                        width: SizeRule::Px(20.0),
-                        height: SizeRule::Px(20.0),
+                        width: SizeRule::Logical(20.0),
+                        height: SizeRule::Logical(20.0),
                         overflow: Overflow::Visible,
                         ..BoxStyle::default()
                     },
@@ -1206,11 +1206,11 @@ mod tests {
                     |writer| {
                         child = Some(writer.container(
                             BoxStyle {
-                                width: SizeRule::Px(10.0),
-                                height: SizeRule::Px(10.0),
+                                width: SizeRule::Logical(10.0),
+                                height: SizeRule::Logical(10.0),
                                 max_size: crate::ui::SizeRule2D {
-                                    width: SizeRule::Px(10.0),
-                                    height: SizeRule::Px(10.0),
+                                    width: SizeRule::Logical(10.0),
+                                    height: SizeRule::Logical(10.0),
                                 },
                                 transform: crate::core::Transform2D {
                                     translation: PointF { x: 30.0, y: 0.0 },
@@ -1253,8 +1253,8 @@ mod tests {
             writer.root(BoxStyle::default(), LayoutStyle::default(), |writer| {
                 button = Some(writer.button_node(
                     BoxStyle {
-                        width: SizeRule::Px(20.0),
-                        height: SizeRule::Px(10.0),
+                        width: SizeRule::Logical(20.0),
+                        height: SizeRule::Logical(10.0),
                         transform: crate::core::Transform2D {
                             rotation: std::f32::consts::FRAC_PI_2,
                             origin: PointF { x: 0.5, y: 0.5 },

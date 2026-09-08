@@ -148,8 +148,8 @@ impl Panel {
         };
 
         let mut style = self.style.container;
-        style.width = SizeRule::Px(bounds.width);
-        style.height = SizeRule::Px(bounds.height);
+        style.width = SizeRule::Logical(bounds.width);
+        style.height = SizeRule::Logical(bounds.height);
         style.transform.translation.x = bounds.x;
         style.transform.translation.y = bounds.y;
         let panel = ui

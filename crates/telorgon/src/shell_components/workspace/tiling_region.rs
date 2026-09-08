@@ -145,8 +145,8 @@ impl TilingRegion {
         }
 
         let mut style = self.style.container;
-        style.width = SizeRule::Px(self.bounds.width);
-        style.height = SizeRule::Px(self.bounds.height);
+        style.width = SizeRule::Logical(self.bounds.width);
+        style.height = SizeRule::Logical(self.bounds.height);
         style.transform.translation.x = self.bounds.x - workspace.output_origin().x;
         style.transform.translation.y = self.bounds.y - workspace.output_origin().y;
         let root = ui

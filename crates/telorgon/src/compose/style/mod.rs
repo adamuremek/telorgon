@@ -53,7 +53,8 @@ impl From<Alignment> for crate::ui::TextAlign {
 /// Concise dimension accepted by composition builders.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Dimension {
-    Pixels(f32),
+    /// Fixed size in logical layout units; the host applies output scaling when rendering.
+    Logical(f32),
     Percent(f32),
     Fill(f32),
     #[default]
@@ -66,14 +67,14 @@ impl Dimension {
 
 impl From<f32> for Dimension {
     fn from(value: f32) -> Self {
-        Self::Pixels(value)
+        Self::Logical(value)
     }
 }
 
 impl From<SizeRule> for Dimension {
     fn from(value: SizeRule) -> Self {
         match value {
-            SizeRule::Px(value) => Self::Pixels(value),
+            SizeRule::Logical(value) => Self::Logical(value),
             SizeRule::Percent(value) => Self::Percent(value),
             SizeRule::Fill(value) => Self::Fill(value),
             SizeRule::Shrink => Self::Shrink,
@@ -84,7 +85,7 @@ impl From<SizeRule> for Dimension {
 impl From<Dimension> for SizeRule {
     fn from(value: Dimension) -> Self {
         match value {
-            Dimension::Pixels(value) => Self::Px(value),
+            Dimension::Logical(value) => Self::Logical(value),
             Dimension::Percent(value) => Self::Percent(value),
             Dimension::Fill(value) => Self::Fill(value),
             Dimension::Shrink => Self::Shrink,

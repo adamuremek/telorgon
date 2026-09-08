@@ -374,13 +374,13 @@ fn configure_meter_geometry<T: RangeScalar>(
     value: T,
     model: &RangeModel<T>,
 ) {
-    visual.track.width = SizeRule::Px(visual.track_length);
-    visual.track.height = SizeRule::Px(visual.track_thickness);
-    visual.fill.height = SizeRule::Px(visual.track_thickness);
+    visual.track.width = SizeRule::Logical(visual.track_length);
+    visual.track.height = SizeRule::Logical(visual.track_thickness);
+    visual.fill.height = SizeRule::Logical(visual.track_thickness);
     let fraction = ((value.to_f64() - model.minimum().to_f64())
         / (model.maximum().to_f64() - model.minimum().to_f64()))
     .clamp(0.0, 1.0) as f32;
-    visual.fill.width = SizeRule::Px(visual.track_length * fraction);
+    visual.fill.width = SizeRule::Logical(visual.track_length * fraction);
 }
 
 /// Focused advanced reference returned by meter mounting.
@@ -654,8 +654,8 @@ mod tests {
         assert_eq!(runtime.ui().string(value_text.unwrap()), Some("75%"));
         assert_eq!(level.get(), Some(MeterLevel::Caution));
         let fill = runtime.ui().box_styles.get(fill.get().unwrap()).unwrap();
-        assert_eq!(fill.width, SizeRule::Px(120.0));
-        assert_eq!(fill.height, SizeRule::Px(6.0));
+        assert_eq!(fill.width, SizeRule::Logical(120.0));
+        assert_eq!(fill.height, SizeRule::Logical(6.0));
         assert_eq!(
             fill.decoration.background,
             Background::Color(MeterStyle::default().touch.colors.caution)

@@ -511,7 +511,7 @@ mod tests {
         let semantics = runtime.ui().semantics.get(reference.node()).unwrap();
         assert_eq!(semantics.role, SemanticRole::TextInput);
         assert!(semantics.state.multiline);
-        let SizeRule::Px(height) = runtime
+        let SizeRule::Logical(height) = runtime
             .ui()
             .box_styles
             .get(reference.node())

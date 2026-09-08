@@ -462,7 +462,7 @@ where
                         writer.layer(
                             true,
                             BoxStyle {
-                                height: SizeRule::Px(plan.leading_extent),
+                                height: SizeRule::Logical(plan.leading_extent),
                                 ..BoxStyle::default()
                             },
                             LayoutStyle::default(),
@@ -475,10 +475,10 @@ where
                             .item_range(index)
                             .map_or(minimum.height(), |range| range.end - range.start);
                         let mut style = self.style.row;
-                        style.height = SizeRule::Px(extent);
+                        style.height = SizeRule::Logical(extent);
                         style.min_size = SizeRule2D {
-                            width: SizeRule::Px(minimum.width()),
-                            height: SizeRule::Px(minimum.height()),
+                            width: SizeRule::Logical(minimum.width()),
+                            height: SizeRule::Logical(minimum.height()),
                         };
                         let control = writer.layer(true, style, LayoutStyle::default(), |writer| {
                             content(item, writer)
@@ -489,7 +489,7 @@ where
                         writer.layer(
                             true,
                             BoxStyle {
-                                height: SizeRule::Px(plan.trailing_extent),
+                                height: SizeRule::Logical(plan.trailing_extent),
                                 ..BoxStyle::default()
                             },
                             LayoutStyle::default(),
